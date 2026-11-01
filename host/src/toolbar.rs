@@ -1170,7 +1170,9 @@ fn bar_slider(
     );
     let value_rect = Rect::from_min_max(pos2(track.right() + 6.0, rect.top()), rect.max);
     let span = (max - min).max(1) as f32;
-    let t = (value - min) as f32 / span;
+    // The knob shows what was asked for, not the lagging echo.
+    let shown = widgets::held(ui, id, &value).unwrap_or(value);
+    let t = (shown - min) as f32 / span;
     let mut edit = BarEdit {
         value: None,
         finished: false,
@@ -1202,7 +1204,7 @@ fn bar_slider(
     visuals.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.hovered.bg_stroke = Stroke::NONE;
     // While the slider is held, its number shows what it asked for.
-    let mut typed = widgets::held(ui, id).unwrap_or(value);
+    let mut typed = widgets::held(ui, id, &value).unwrap_or(value);
     let typed_response = field.add(
         egui::DragValue::new(&mut typed)
             .range(min..=max)

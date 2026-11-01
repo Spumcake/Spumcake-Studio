@@ -363,6 +363,9 @@ const OUTPUT_PAD: f32 = 14.0;
 const TILE_FILL: Color32 = Color32::from_rgb(243, 244, 246);
 const HAIRLINE: Color32 = ts::HAIRLINE;
 const DISABLED: Color32 = Color32::from_rgb(170, 174, 180);
+/// A cell's generated text: italic, a shade softer than the prompt, as the
+/// owner set on 2026-11-01 (`llm-cell-plain-prompt.png`).
+const GENERATED: Color32 = Color32::from_rgb(0x4B, 0x55, 0x63);
 
 /// Every height a card needs, so the card and its list agree.
 struct Layout {
@@ -378,21 +381,22 @@ struct Layout {
 /// shares its line's baseline, right-aligned to `right`, with its line's top
 /// at `top`.
 fn number_at(painter: &egui::Painter, right: f32, top: f32, number: usize) {
-    let mut job = prompt_job(&number.to_string(), f32::INFINITY, false);
+    let mut job = prompt_job(&number.to_string(), f32::INFINITY, true);
     job.sections[0].format.color = MUTED;
     let galley = painter.layout_job(job);
     painter.galley(pos2(right - galley.size().x, top), galley, MUTED);
 }
 
-/// The prompt laid out as the text box shows it: Hack 13 on 20, wrapped.
-/// A Markdown cell's source is coloured as Jupyter colours it.
+/// The prompt laid out as the text box shows it, wrapped: plain text in the
+/// body face, as the owner set on 2026-11-01. A Markdown cell's source is in
+/// Hack 13 on 20, coloured as Jupyter colours it.
 pub(crate) fn prompt_job(text: &str, width: f32, markdown: bool) -> egui::text::LayoutJob {
     let format = |token: crate::markdown::Token| {
         use crate::markdown::Token;
         let mut format = egui::TextFormat {
-            font_id: ts::code(),
+            font_id: if markdown { ts::code() } else { ts::body() },
             color: TEXT,
-            line_height: Some(ts::code_line()),
+            line_height: Some(if markdown { ts::code_line() } else { ts::body_line() }),
             ..Default::default()
         };
         match token {
@@ -430,8 +434,9 @@ pub(crate) fn prompt_job(text: &str, width: f32, markdown: bool) -> egui::text::
 fn layout(ui: &egui::Ui, cell: &Cell, draft: &str, live: Option<&str>, running: bool, inner_w: f32) -> Layout {
     let painter = ui.painter();
     let markdown = cell.kind == protocol::MARKDOWN_KIND;
-    let text = painter.layout_job(prompt_job(draft, inner_w - GUTTER - 12.0, markdown)).size().y;
-    let input = text.max(ts::code_line() * MIN_LINES as f32) + 24.0;
+    let text = painter.layout_job(prompt_job(draft, inner_w - numbers_w(markdown), markdown)).size().y;
+    let line = if markdown { ts::code_line() } else { ts::body_line() };
+    let input = text.max(line * MIN_LINES as f32) + 24.0;
     let picture_h = shown_picture(cell, running).map(|path| picture_height(ui.ctx(), path, inner_w));
     let picture = picture_h.is_some();
     // The filmstrip stays while a picture is made, and after a run fails or
@@ -440,7 +445,13 @@ fn layout(ui: &egui::Ui, cell: &Cell, draft: &str, live: Option<&str>, running: 
     let output = if picture {
         None
     } else {
-        output_text(cell, live, running).map(|(text, color)| crate::markdown::lay_out(painter, &text, color, inner_w))
+        output_text(cell, live, running).map(|(text, color, generated)| {
+            if generated {
+                crate::markdown::lay_out_slanted(painter, &text, color, inner_w)
+            } else {
+                crate::markdown::lay_out(painter, &text, color, inner_w)
+            }
+        })
     };
     let shown = if picture {
         2.0 * OUTPUT_PAD + picture_h.unwrap_or(PICTURE_H)
@@ -460,20 +471,21 @@ fn layout(ui: &egui::Ui, cell: &Cell, draft: &str, live: Option<&str>, running: 
 }
 
 /// The result as Markdown, the reason a run failed, or the words that say
-/// a run has begun, with its color. None when the cell has not run.
-fn output_text(cell: &Cell, live: Option<&str>, running: bool) -> Option<(String, Color32)> {
+/// a run has begun, with its color and whether it is generated text. None
+/// when the cell has not run.
+fn output_text(cell: &Cell, live: Option<&str>, running: bool) -> Option<(String, Color32, bool)> {
     if running {
         let text = live.unwrap_or("");
         if cell.kind == protocol::IMAGE_KIND {
-            return Some((String::from("Making the picture…"), MUTED));
+            return Some((String::from("Making the picture…"), MUTED, false));
         }
         if text.is_empty() {
-            return Some((String::from("Writing…"), MUTED));
+            return Some((String::from("Writing…"), MUTED, false));
         }
-        return Some((text.to_string(), TEXT));
+        return Some((text.to_string(), GENERATED, true));
     }
     if cell.state == CellState::Failed {
-        return Some((cell.error.clone().unwrap_or_else(|| String::from("The run failed.")), ts::FAILED));
+        return Some((cell.error.clone().unwrap_or_else(|| String::from("The run failed.")), ts::FAILED, false));
     }
     let parts: Vec<String> = cell
         .output
@@ -485,14 +497,22 @@ fn output_text(cell: &Cell, live: Option<&str>, running: bool) -> Option<(String
         })
         .collect();
     let text = parts.join("\n");
-    (!text.trim().is_empty()).then_some((text, TEXT))
+    (!text.trim().is_empty()).then_some((text, GENERATED, true))
+}
+
+/// The width of a Markdown cell's line numbers and the rule beside them;
+/// other prompts have none.
+fn numbers_w(markdown: bool) -> f32 {
+    if markdown { GUTTER + 12.0 } else { 0.0 }
 }
 
 /// Draws one cell into `row` and returns the card. `number` is the margin
 /// mark a book shows, such as 1 for "[1]". The card follows the approved
 /// reference, `llm-cell.png`: a header with the kind, the model, Generate
-/// and its menu; the prompt as a text box with line numbers; and the result
-/// below, as Markdown.
+/// and its menu; the prompt as a text box; and the result below, as
+/// Markdown. As `llm-cell-plain-prompt.png` shows, the prompt is plain text
+/// in the body face and the result italic and a shade softer; a Markdown
+/// cell's source keeps its line numbers.
 pub(crate) fn paint_card(
     ui: &mut egui::Ui,
     row: Rect,
@@ -601,24 +621,26 @@ pub(crate) fn paint_card(
         actions.push(CardAction::Drag(shown(cell, live)));
     }
 
-    // Input: the prompt, as a text box with line numbers.
+    // Input: the prompt, as a text box; a Markdown cell's with line numbers.
     let input = Rect::from_min_size(pos2(card.left() + PAD, header_line + 12.0), vec2(inner_w, plan.input - 24.0));
-    let text_left = input.left() + GUTTER + 12.0;
     let markdown = cell.kind == protocol::MARKDOWN_KIND;
-    let numbers = painter.layout_job(prompt_job(draft, input.right() - text_left, markdown));
-    let mut line = 1;
-    let mut starts = true;
-    for row in &numbers.rows {
-        if starts {
-            number_at(&painter, input.left() + GUTTER - 6.0, input.top() + row.min_y(), line);
-            line += 1;
+    let text_left = input.left() + numbers_w(markdown);
+    if markdown {
+        let numbers = painter.layout_job(prompt_job(draft, input.right() - text_left, markdown));
+        let mut line = 1;
+        let mut starts = true;
+        for row in &numbers.rows {
+            if starts {
+                number_at(&painter, input.left() + GUTTER - 6.0, input.top() + row.min_y(), line);
+                line += 1;
+            }
+            starts = row.ends_with_newline;
         }
-        starts = row.ends_with_newline;
+        if numbers.rows.is_empty() || draft.is_empty() {
+            number_at(&painter, input.left() + GUTTER - 6.0, input.top(), 1);
+        }
+        painter.vline(input.left() + GUTTER + 2.0, input.top()..=input.bottom(), egui::Stroke::new(1.0, HAIRLINE));
     }
-    if numbers.rows.is_empty() || draft.is_empty() {
-        number_at(&painter, input.left() + GUTTER - 6.0, input.top(), 1);
-    }
-    painter.vline(input.left() + GUTTER + 2.0, input.top()..=input.bottom(), egui::Stroke::new(1.0, HAIRLINE));
     let field = Rect::from_min_max(pos2(text_left, input.top()), input.max);
     let response = ui.put(
         field,

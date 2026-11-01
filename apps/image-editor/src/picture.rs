@@ -14,7 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A rectangle of whole pixels. Empty when either side is not positive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -600,56 +601,74 @@ impl Picture {
 
     /// Composites `rect` of the picture into `out`, the whole picture as
     /// RGBA8 with straight alpha, starting from `beneath` when it fits: the
-    /// picture as its first top-level nodes combine it, so only the nodes
-    /// above them are combined again. Each pixel is combined by itself, so
-    /// the result is the same, to the bit, as combining every node.
+    /// picture as the nodes beneath a node combine it, at each depth of the
+    /// groups it lies in, so only that node and those above it are combined
+    /// again. Each pixel is combined by itself, so the result is the same,
+    /// to the bit, as combining every node.
     pub fn composite_over(&self, beneath: Option<&Beneath>, rect: Rect, out: &mut [u8]) {
-        match beneath.filter(|beneath| beneath.fits(self)) {
-            Some(beneath) => self.combine_into(&self.nodes[beneath.count..], Some(&beneath.buffer), rect, out),
-            None => self.combine_into(&self.nodes, None, rect, out),
-        }
+        self.combine_into(&self.nodes, beneath.filter(|beneath| beneath.fits(self)), rect, out);
     }
 
-    /// Composites the whole picture into `out`, keeping on the way the
-    /// picture as its first `count` top-level nodes combine it, for the
-    /// document to keep while a node above them is changed.
-    pub fn composite_keeping(&self, count: usize, out: &mut [u8]) -> Beneath {
-        let count = count.min(self.nodes.len());
-        let (below, above) = self.nodes.split_at(count);
+    /// The picture as the nodes beneath `path` combine it, for the document
+    /// to keep while that node is changed: `path` is how many siblings lie
+    /// beneath it at each depth, the top level first, then within each
+    /// group it goes into. A group's level is its children's own, combined
+    /// by themselves, as the group combines them. Made in bands of rows,
+    /// one per core.
+    pub fn beneath(&self, path: &[usize]) -> Beneath {
+        let mut kept = Vec::new();
+        let mut siblings: &[Node] = &self.nodes;
+        for (depth, count) in path.iter().enumerate() {
+            let count = (*count).min(siblings.len());
+            kept.push(siblings[..count].to_vec());
+            if depth + 1 == path.len() {
+                break;
+            }
+            match siblings.get(count).and_then(|node| node.children.as_deref()) {
+                Some(children) => siblings = children,
+                None => break,
+            }
+        }
         let width = self.width as usize;
-        let mut buffer = vec![[0.0f32; 4]; width * self.height as usize];
+        let mut levels: Vec<Vec<[f32; 4]>> = kept.iter().map(|_| vec![[0.0f32; 4]; width * self.height as usize]).collect();
         let rect = self.bounds();
         if !rect.is_empty() {
             let adjusts = Adjusts::of(&self.nodes);
-            let row_bytes = width * 4;
             let band_rows = (rect.h as usize).div_ceil(bands(rect));
-            let tile = tile_rows(width).min(band_rows) * width;
-            with_scratch(tile * rect.h as usize / band_rows + tile, |scratch| {
-                std::thread::scope(|scope| {
-                    let pieces = out.chunks_mut(band_rows * row_bytes).zip(buffer.chunks_mut(band_rows * width)).zip(scratch.chunks_mut(tile));
-                    for (index, ((rows, kept), work)) in pieces.enumerate() {
-                        let adjusts = &adjusts;
-                        scope.spawn(move || {
-                            for (part, (rows, kept)) in rows.chunks_mut(tile * 4).zip(kept.chunks_mut(tile)).enumerate() {
-                                let y = index * band_rows + part * (tile / width);
-                                let part = Rect::new(0, y as i32, self.width as i32, (kept.len() / width) as i32);
-                                self.composite_nodes(below, adjusts, part, kept);
-                                let work = &mut work[..kept.len()];
-                                work.copy_from_slice(kept);
-                                self.composite_nodes(above, adjusts, part, work);
-                                self.to_bytes(part, work, rows);
-                            }
-                        });
+            let tile = tile_rows(width).min(band_rows);
+            let spare = tile * width * depth(&self.nodes);
+            // Each band's rows of every level.
+            let mut pieces: Vec<Vec<&mut [[f32; 4]]>> = Vec::new();
+            for level in &mut levels {
+                for (index, rows) in level.chunks_mut(band_rows * width).enumerate() {
+                    if pieces.len() <= index {
+                        pieces.push(Vec::new());
                     }
-                });
+                    pieces[index].push(rows);
+                }
+            }
+            std::thread::scope(|scope| {
+                for (index, levels) in pieces.into_iter().enumerate() {
+                    let (kept, adjusts) = (&kept, &adjusts);
+                    scope.spawn(move || {
+                        let mut spare = vec![[0.0f32; 4]; spare];
+                        for (nodes, rows) in kept.iter().zip(levels) {
+                            for (part, buffer) in rows.chunks_mut(tile * width).enumerate() {
+                                let part = Rect::new(0, (index * band_rows + part * tile) as i32, self.width as i32, (buffer.len() / width) as i32);
+                                self.composite_nodes(nodes, adjusts, part, buffer, &mut spare);
+                            }
+                        }
+                    });
+                }
             });
         }
-        Beneath { count, width: self.width, height: self.height, buffer }
+        Beneath { kept, width: self.width, height: self.height, levels }
     }
 
     /// Composites `nodes`, a tree of this picture's, into `rect` of `out`,
-    /// over `base`, the whole picture premultiplied, or over nothing.
-    fn combine_into(&self, nodes: &[Node], base: Option<&[[f32; 4]]>, rect: Rect, out: &mut [u8]) {
+    /// from `beneath`, which lies beneath the picture's own nodes, or from
+    /// nothing.
+    fn combine_into(&self, nodes: &[Node], beneath: Option<&Beneath>, rect: Rect, out: &mut [u8]) {
         let rect = rect.intersect(&self.bounds());
         if rect.is_empty() {
             return;
@@ -662,47 +681,80 @@ impl Picture {
         // pixel is composited by itself. The last band is this thread's.
         let band_rows = (rect.h as usize).div_ceil(bands(rect));
         // Each band works in a few rows at a time, which stay in the core's
-        // cache while every node is combined into them.
-        let tile = tile_rows(width).min(band_rows) * width;
-        with_scratch(tile * rect.h as usize / band_rows + tile, |scratch| {
+        // cache while every node is combined into them, with as many more
+        // for the groups it goes into.
+        let tile = tile_rows(width).min(band_rows);
+        let scratch = tile * width * (1 + depth(nodes));
+        with_scratch(scratch * (rect.h as usize).div_ceil(band_rows), |buffers| {
             std::thread::scope(|scope| {
-                let mut pieces = rows.chunks_mut(band_rows * row_bytes).zip(scratch.chunks_mut(tile)).enumerate().peekable();
+                let mut pieces = rows.chunks_mut(band_rows * row_bytes).zip(buffers.chunks_mut(scratch)).enumerate().peekable();
                 while let Some((index, (chunk, buffer))) = pieces.next() {
                     let band = Rect::new(rect.x, rect.y + (index * band_rows) as i32, rect.w, (chunk.len() / row_bytes) as i32);
                     let adjusts = &adjusts;
                     if pieces.peek().is_none() {
-                        self.composite_band(nodes, adjusts, base, band, chunk, buffer);
+                        self.composite_band(nodes, beneath, adjusts, band, chunk, buffer, tile);
                     } else {
-                        scope.spawn(move || self.composite_band(nodes, adjusts, base, band, chunk, buffer));
+                        scope.spawn(move || self.composite_band(nodes, beneath, adjusts, band, chunk, buffer, tile));
                     }
                 }
             });
         });
     }
 
-    /// Composites `rect` into `rows`, the picture's rows it covers, a few
-    /// rows at a time in `buffer`, which starts as `base` there or clear.
-    fn composite_band(&self, nodes: &[Node], adjusts: &Adjusts, base: Option<&[[f32; 4]]>, rect: Rect, rows: &mut [u8], buffer: &mut [[f32; 4]]) {
+    /// Composites `rect` into `rows`, the picture's rows it covers, `tile`
+    /// rows at a time at the start of `buffer`, which starts as the kept
+    /// picture beneath there or clear; the rest of `buffer` is for groups.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_band(&self, nodes: &[Node], beneath: Option<&Beneath>, adjusts: &Adjusts, rect: Rect, rows: &mut [u8], buffer: &mut [[f32; 4]], tile: usize) {
         let width = rect.w as usize;
         let row_bytes = self.width as usize * 4;
-        let tile = (buffer.len() / width.max(1)).max(1);
-        for first in (0..rect.h as usize).step_by(tile) {
+        let (buffer, spare) = buffer.split_at_mut(tile * width);
+        for first in (0..rect.h as usize).step_by(tile.max(1)) {
             let count = tile.min(rect.h as usize - first);
             let part = Rect::new(rect.x, rect.y + first as i32, rect.w, count as i32);
             let buffer = &mut buffer[..count * width];
-            match base {
-                Some(base) => {
-                    let stride = self.width as usize;
-                    for row in 0..count {
-                        let start = (part.y as usize + row) * stride + rect.x as usize;
-                        buffer[row * width..(row + 1) * width].copy_from_slice(&base[start..start + width]);
-                    }
+            match beneath {
+                Some(beneath) => {
+                    self.copy_level(&beneath.levels[0], part, buffer);
+                    self.composite_kept(nodes, beneath, 0, adjusts, part, buffer, spare);
                 }
-                None => buffer.fill([0.0; 4]),
+                None => {
+                    buffer.fill([0.0; 4]);
+                    self.composite_nodes(nodes, adjusts, part, buffer, spare);
+                }
             }
-            self.composite_nodes(nodes, adjusts, part, buffer);
             self.to_bytes(part, buffer, &mut rows[first * row_bytes..(first + count) * row_bytes]);
         }
+    }
+
+    /// `rect` of a kept level, the whole picture premultiplied, into
+    /// `buffer`.
+    fn copy_level(&self, level: &[[f32; 4]], rect: Rect, buffer: &mut [[f32; 4]]) {
+        let (stride, width) = (self.width as usize, rect.w as usize);
+        for row in 0..rect.h as usize {
+            let start = (rect.y as usize + row) * stride + rect.x as usize;
+            buffer[row * width..(row + 1) * width].copy_from_slice(&level[start..start + width]);
+        }
+    }
+
+    /// Blends `nodes` into `buffer`, which holds what `beneath` keeps at
+    /// `depth` beneath them: the siblings above it, and, when the kept
+    /// picture goes into a group, that group from its children kept within
+    /// it, as [`Picture::composite_nodes`] combines a group.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_kept(&self, nodes: &[Node], beneath: &Beneath, depth: usize, adjusts: &Adjusts, rect: Rect, buffer: &mut [[f32; 4]], spare: &mut [[f32; 4]]) {
+        let count = beneath.kept[depth].len();
+        let (Some(level), Some(group)) = (beneath.levels.get(depth + 1), nodes.get(count)) else {
+            self.composite_nodes(&nodes[count.min(nodes.len())..], adjusts, rect, buffer, spare);
+            return;
+        };
+        if group.visible && group.opacity > 0.0 {
+            let (inner, spare) = spare.split_at_mut(buffer.len());
+            self.copy_level(level, rect, inner);
+            self.composite_kept(group.children.as_deref().unwrap_or_default(), beneath, depth + 1, adjusts, rect, inner, spare);
+            self.blend_group(group, inner, rect, buffer);
+        }
+        self.composite_nodes(&nodes[count + 1..], adjusts, rect, buffer, spare);
     }
 
     /// `rect` of premultiplied `buffer` as RGBA8 with straight alpha, into
@@ -775,10 +827,10 @@ impl Picture {
             for (index, chunk) in out.chunks_mut(band_rows * row_bytes).enumerate() {
                 let (nodes, adjusts) = (&nodes, &adjusts);
                 scope.spawn(move || {
-                    let mut buffer = vec![[0.0f32; 4]; width];
+                    let mut buffer = vec![[0.0f32; 4]; width * (1 + depth(nodes))];
                     for local in (0..chunk.len() / row_bytes).step_by(step) {
                         let row = Rect::new(0, (index * band_rows + local) as i32, width as i32, 1);
-                        self.composite_band(nodes, adjusts, None, row, &mut chunk[local * row_bytes..(local + 1) * row_bytes], &mut buffer);
+                        self.composite_band(nodes, None, adjusts, row, &mut chunk[local * row_bytes..(local + 1) * row_bytes], &mut buffer, 1);
                     }
                 });
             }
@@ -813,8 +865,10 @@ impl Picture {
     }
 
     /// Blends `nodes`, bottom to top, into `buffer`: `rect` of the picture,
-    /// premultiplied. `adjusts` holds the tables of their adjustments.
-    fn composite_nodes(&self, nodes: &[Node], adjusts: &Adjusts, rect: Rect, buffer: &mut [[f32; 4]]) {
+    /// premultiplied. `adjusts` holds the tables of their adjustments, and
+    /// `spare` a buffer's room for each depth of groups, so a group is
+    /// combined without asking for fresh memory.
+    fn composite_nodes(&self, nodes: &[Node], adjusts: &Adjusts, rect: Rect, buffer: &mut [[f32; 4]], spare: &mut [[f32; 4]]) {
         let table = unit_table();
         let at = |index: usize| (rect.x + (index % rect.w as usize) as i32, rect.y + (index / rect.w as usize) as i32);
         for node in nodes.iter().filter(|node| node.visible && node.opacity > 0.0) {
@@ -826,16 +880,10 @@ impl Picture {
             if let Some(children) = &node.children {
                 // A group composites its children by themselves, then
                 // blends the result as one layer, through its mask.
-                let mut inner = vec![[0.0f32; 4]; buffer.len()];
-                self.composite_nodes(children, adjusts, rect, &mut inner);
-                for (index, (dst, src)) in buffer.iter_mut().zip(inner.iter()).enumerate() {
-                    if src[3] <= 0.0 {
-                        continue;
-                    }
-                    let alpha = src[3];
-                    let rgb = [src[0] / alpha, src[1] / alpha, src[2] / alpha];
-                    blend_pixel(dst, rgb, alpha * node.opacity * shown(index), node.blend);
-                }
+                let (inner, spare) = spare.split_at_mut(buffer.len());
+                inner.fill([0.0; 4]);
+                self.composite_nodes(children, adjusts, rect, inner, spare);
+                self.blend_group(node, inner, rect, buffer);
                 continue;
             }
             if let Some(adjust) = adjusts.get(node.id) {
@@ -893,6 +941,23 @@ impl Picture {
                     blend_pixel(dst, rgb, table[alpha as usize] * scale * covered, node.blend);
                 }
             }
+        }
+    }
+
+    /// Blends a group's children, combined by themselves in `inner`, into
+    /// `buffer` as one layer, through its mask.
+    fn blend_group(&self, node: &Node, inner: &[[f32; 4]], rect: Rect, buffer: &mut [[f32; 4]]) {
+        let mask = self.mask_view(node);
+        let shown = |index: usize| {
+            mask.as_ref().map_or(1.0, |mask| mask.at(rect.x + (index % rect.w as usize) as i32, rect.y + (index / rect.w as usize) as i32))
+        };
+        for (index, (dst, src)) in buffer.iter_mut().zip(inner.iter()).enumerate() {
+            if src[3] <= 0.0 {
+                continue;
+            }
+            let alpha = src[3];
+            let rgb = [src[0] / alpha, src[1] / alpha, src[2] / alpha];
+            blend_pixel(dst, rgb, alpha * node.opacity * shown(index), node.blend);
         }
     }
 
@@ -960,10 +1025,28 @@ impl Picture {
                     }
                     reach_into(at(write));
                 }
+                // All of it, in bands of rows, into the memory the last
+                // blur used, as a held Feather slider blurs it many times.
                 _ => {
-                    let mut values: Vec<f32> = pixels.data.chunks_exact(4).map(|pixel| f32::from(grey(pixel))).collect();
+                    let band = height.div_ceil(bands(whole)) * width;
+                    let mut values = std::mem::take(&mut *GREYS.lock().unwrap_or_else(PoisonError::into_inner));
+                    values.resize(width * height, 0.0);
+                    in_bands(&mut values, band, |index, out| {
+                        for (value, pixel) in out.iter_mut().zip(pixels.data[index * band * 4..].chunks_exact(4)) {
+                            *value = f32::from(grey(pixel));
+                        }
+                    });
                     blur(&mut values, width, height, f64::from(feather));
-                    let bytes = values.into_iter().map(|value| value.round().clamp(0.0, 255.0) as u8).collect();
+                    let mut bytes = match self.feathered.remove(&id) {
+                        Some((_, bytes)) if bytes.len() == width * height => bytes,
+                        _ => vec![0; width * height],
+                    };
+                    in_bands(&mut bytes, band, |index, out| {
+                        for (byte, value) in out.iter_mut().zip(&values[index * band..]) {
+                            *byte = value.round().clamp(0.0, 255.0) as u8;
+                        }
+                    });
+                    *GREYS.lock().unwrap_or_else(PoisonError::into_inner) = values;
                     self.feathered.insert(id, (feather, bytes));
                     reach_into(at(whole));
                 }
@@ -1086,8 +1169,89 @@ pub fn grey(pixel: &[u8]) -> u8 {
 
 /// Blurs grey values by about `radius` pixels in place: three box blurs,
 /// which come close to a Gaussian, each the average of the values inside
-/// the picture only, so an edge keeps its value.
+/// the picture only, so an edge keeps its value. One thread per core takes
+/// a band of rows, then a band of columns, in turn, each line summed in the
+/// same order as [`blur_alone`] does, so the result is the same to the bit.
 pub fn blur(values: &mut [f32], width: usize, height: usize, radius: f64) {
+    if !radius.is_finite() || radius < 0.5 || width == 0 || height == 0 {
+        return;
+    }
+    let pass = ((radius / 3.0).ceil() as usize).max(1);
+    let cores = bands(Rect::new(0, 0, width as i32, height as i32));
+    let (band_rows, band_columns) = (height.div_ceil(cores), width.div_ceil(cores));
+    // Each band of columns is blurred into its own part of `columns`, row
+    // by row, as wide as the band, and the next pass's rows are read back
+    // from there.
+    let mut columns = std::mem::take(&mut *BLURRED.lock().unwrap_or_else(PoisonError::into_inner));
+    columns.resize(width * height, 0.0);
+    {
+        let rows: Vec<RwLock<&mut [f32]>> = values.chunks_mut(band_rows * width).map(RwLock::new).collect();
+        let parts: Vec<RwLock<&mut [f32]>> = columns.chunks_mut(band_columns * height).map(RwLock::new).collect();
+        let threads = rows.len().max(parts.len());
+        let barrier = Barrier::new(threads);
+        let (rows, parts, barrier) = (&rows, &parts, &barrier);
+        // Row `y` of what the columns made, into `line`.
+        let gather = |parts: &[RwLockReadGuard<&mut [f32]>], y: usize, line: &mut [f32]| {
+            for (band, part) in parts.iter().enumerate() {
+                let wide = part.len() / height;
+                line[band * band_columns..band * band_columns + wide].copy_from_slice(&part[y * wide..(y + 1) * wide]);
+            }
+        };
+        let work = move |index: usize| {
+            let mut line = vec![0.0f32; width];
+            for round in 0..3 {
+                if let Some(band) = rows.get(index) {
+                    let mut band = write(band);
+                    let made: Vec<_> = if round > 0 { parts.iter().map(read).collect() } else { Vec::new() };
+                    for (row, out) in band.chunks_exact_mut(width).enumerate() {
+                        if made.is_empty() {
+                            line.copy_from_slice(out);
+                        } else {
+                            gather(&made, index * band_rows + row, &mut line);
+                        }
+                        box_average(&line, pass, out);
+                    }
+                }
+                barrier.wait();
+                if let Some(part) = parts.get(index) {
+                    let mut part = write(part);
+                    let bands: Vec<_> = rows.iter().map(read).collect();
+                    let x = index * band_columns;
+                    let wide = part.len() / height;
+                    let row = |y: usize| &bands[y / band_rows][(y % band_rows) * width + x..(y % band_rows) * width + x + wide];
+                    box_average_columns(row, height, wide, pass, &mut part);
+                }
+                barrier.wait();
+            }
+            if let Some(band) = rows.get(index) {
+                let mut band = write(band);
+                let made: Vec<_> = parts.iter().map(read).collect();
+                for (row, out) in band.chunks_exact_mut(width).enumerate() {
+                    gather(&made, index * band_rows + row, out);
+                }
+            }
+        };
+        std::thread::scope(|scope| {
+            for index in 1..threads {
+                scope.spawn(move || work(index));
+            }
+            work(0);
+        });
+    }
+    *BLURRED.lock().unwrap_or_else(PoisonError::into_inner) = columns;
+}
+
+fn read<'a, 'b>(lock: &'a RwLock<&'b mut [f32]>) -> RwLockReadGuard<'a, &'b mut [f32]> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write<'a, 'b>(lock: &'a RwLock<&'b mut [f32]>) -> RwLockWriteGuard<'a, &'b mut [f32]> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// [`blur`] on one thread, a line at a time: what the bands must equal.
+#[cfg(test)]
+pub fn blur_alone(values: &mut [f32], width: usize, height: usize, radius: f64) {
     if !radius.is_finite() || radius < 0.5 || width == 0 || height == 0 {
         return;
     }
@@ -1112,6 +1276,81 @@ pub fn blur(values: &mut [f32], width: usize, height: usize, radius: f64) {
     }
 }
 
+/// [`box_average`] down `wide` columns side by side, `row(y)` being their
+/// values in row `y`, into `out`, `wide` values a row: each column's sum
+/// gains and loses its values in the same order as a line's.
+fn box_average_columns<'a>(row: impl Fn(usize) -> &'a [f32], height: usize, wide: usize, radius: usize, out: &mut [f32]) {
+    let mut sums = vec![0.0f32; wide];
+    let mut count = 0usize;
+    for y in 0..radius.min(height) {
+        for (sum, value) in sums.iter_mut().zip(row(y)) {
+            *sum += value;
+        }
+        count += 1;
+    }
+    for index in 0..height {
+        if index + radius < height {
+            for (sum, value) in sums.iter_mut().zip(row(index + radius)) {
+                *sum += value;
+            }
+            count += 1;
+        }
+        if index > radius {
+            for (sum, value) in sums.iter_mut().zip(row(index - radius - 1)) {
+                *sum -= value;
+            }
+            count -= 1;
+        }
+        let count = count.max(1) as f32;
+        for (out, sum) in out[index * wide..(index + 1) * wide].iter_mut().zip(&sums) {
+            *out = sum / count;
+        }
+    }
+}
+
+/// Runs `work` on each `band` values of `data`, side by side, with the
+/// band's number: the last band on this thread.
+pub fn in_bands<T: Send>(data: &mut [T], band: usize, work: impl Fn(usize, &mut [T]) + Sync) {
+    run_apart(data.chunks_mut(band.max(1)).collect(), work);
+}
+
+/// Runs `work` on each of `items`, with its number, on a thread per core,
+/// this one among them: each thread takes the next item left, so one the
+/// system holds back leaves its share to the others.
+pub fn run_apart<T: Send>(items: Vec<T>, work: impl Fn(usize, T) + Sync) {
+    let threads = cores().min(items.len());
+    if threads <= 1 {
+        for (index, item) in items.into_iter().enumerate() {
+            work(index, item);
+        }
+        return;
+    }
+    let slots: Vec<Mutex<Option<T>>> = items.into_iter().map(|item| Mutex::new(Some(item))).collect();
+    let next = AtomicUsize::new(0);
+    let take = || loop {
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        let Some(slot) = slots.get(index) else {
+            break;
+        };
+        if let Some(item) = slot.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            work(index, item);
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..threads {
+            scope.spawn(&take);
+        }
+        take();
+    });
+}
+
+/// A mask's grey values to blur, kept from one blur to the next.
+static GREYS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+
+/// Room for a blur's columns, kept from one blur to the next, so a held
+/// Feather slider does not ask for fresh memory each time.
+static BLURRED: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+
 /// Each value the average of those within `radius` of it, in the line.
 fn box_average(line: &[f32], radius: usize, out: &mut [f32]) {
     let len = line.len();
@@ -1134,30 +1373,86 @@ fn box_average(line: &[f32], radius: usize, out: &mut [f32]) {
     }
 }
 
-/// The picture as its first `count` top-level nodes combine it, the whole
-/// picture premultiplied. The document keeps it while a node above them
-/// changes, such as an adjustment's slider while it is held, and says when
-/// it no longer holds.
+/// The picture as the nodes beneath one node combine it, the whole picture
+/// premultiplied, at each depth of the groups that node lies in: the
+/// top-level nodes beneath it, then within each group its siblings beneath
+/// it, by themselves. The document keeps it while that node, or one above
+/// it, changes, such as an adjustment's slider while it is held, and says
+/// when it no longer holds.
 pub struct Beneath {
-    pub count: usize,
+    /// At each depth, the siblings it was made from.
+    kept: Vec<Vec<Node>>,
     width: u32,
     height: u32,
-    buffer: Vec<[f32; 4]>,
+    levels: Vec<Vec<[f32; 4]>>,
 }
 
 impl Beneath {
-    /// Whether it is of this picture's size and nodes enough.
-    fn fits(&self, picture: &Picture) -> bool {
-        (self.width, self.height) == (picture.width, picture.height) && self.count <= picture.nodes.len()
+    /// How many siblings lie beneath the node at each depth.
+    pub fn path(&self) -> Vec<usize> {
+        self.kept.iter().map(Vec::len).collect()
     }
+
+    /// Whether it is of this picture's size, and its path goes through
+    /// groups the picture has.
+    fn fits(&self, picture: &Picture) -> bool {
+        if (self.width, self.height) != (picture.width, picture.height) {
+            return false;
+        }
+        let mut siblings: &[Node] = &picture.nodes;
+        for (depth, kept) in self.kept.iter().enumerate() {
+            if kept.len() > siblings.len() {
+                return false;
+            }
+            if depth + 1 < self.kept.len() {
+                match siblings.get(kept.len()).and_then(|node| node.children.as_deref()) {
+                    Some(children) => siblings = children,
+                    None => return false,
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether it still lies beneath the picture's nodes: it fits, and
+    /// every sibling it was made from is as the picture has it. The pixels
+    /// are the document's to vouch for.
+    pub fn holds(&self, picture: &Picture) -> bool {
+        if !self.fits(picture) {
+            return false;
+        }
+        let mut siblings: &[Node] = &picture.nodes;
+        for kept in &self.kept {
+            if siblings[..kept.len()] != kept[..] {
+                return false;
+            }
+            siblings = siblings.get(kept.len()).and_then(|node| node.children.as_deref()).unwrap_or_default();
+        }
+        true
+    }
+}
+
+/// How deep groups go within `nodes`: none, 0.
+fn depth(nodes: &[Node]) -> usize {
+    nodes.iter().filter_map(|node| node.children.as_deref()).map(|children| 1 + depth(children)).max().unwrap_or(0)
 }
 
 /// How many bands of rows `rect` is composited in: one per core, as each
 /// pixel is composited by itself, and one for a small area.
-fn bands(rect: Rect) -> usize {
+pub fn bands(rect: Rect) -> usize {
+    if (rect.w as usize) * (rect.h as usize) < 65_536 { 1 } else { cores().min(rect.h.max(1) as usize) }
+}
+
+/// How many cores the computer has.
+pub fn cores() -> usize {
     static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let cores = *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, usize::from));
-    if (rect.w as usize) * (rect.h as usize) < 65_536 { 1 } else { cores.min(rect.h.max(1) as usize) }
+    *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, usize::from))
+}
+
+/// How many shares work on `rect` is split into, for threads that each
+/// take the next share left: a few per core, and one for a small area.
+pub fn shares(rect: Rect) -> usize {
+    if bands(rect) == 1 { 1 } else { (2 * cores()).min(rect.h.max(1) as usize) }
 }
 
 /// How many rows of `width` pixels a band combines at a time: about 256 KB
@@ -1592,5 +1887,23 @@ mod tests {
         picture.nodes.push(node);
         assert!(picture.locks(inner).keeps_position());
         assert!(!picture.locks(inner).keeps_pixels());
+    }
+
+    /// Catches a blur in bands that differs from the blur a line at a time:
+    /// over a busy mask large enough to be split among the cores, of a size
+    /// that leaves the last bands narrower, each feather's bands give the
+    /// same values, to the bit.
+    #[test]
+    fn the_blur_in_bands_is_the_blur_alone() {
+        let (width, height) = (517, 389);
+        let values: Vec<f32> = (0..width * height).map(|index| ((index * 7919 + index / width * 31) % 256) as f32).collect();
+        for radius in [0.6, 4.0, 13.0, 40.0] {
+            let mut banded = values.clone();
+            blur(&mut banded, width, height, radius);
+            let mut alone = values.clone();
+            blur_alone(&mut alone, width, height, radius);
+            let differ = banded.iter().zip(&alone).filter(|(banded, alone)| banded.to_bits() != alone.to_bits()).count();
+            assert_eq!(differ, 0, "{differ} values of a blur of {radius} differ from the blur alone");
+        }
     }
 }

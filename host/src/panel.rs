@@ -761,7 +761,9 @@ fn number_row(
     let field = Rect::from_min_max(pos2(control.right() - NUMBER_W, control.top()), control.max);
 
     let span = (max - min).max(f64::EPSILON);
-    let t = ((value - min) / span) as f32;
+    // The knob shows what was asked for, not the lagging echo.
+    let echoed = (value * scale).round() / scale;
+    let t = ((widgets::held(ui, id.with("slider"), &echoed).unwrap_or(value) - min) / span) as f32;
     let (response, asked) = if centered {
         widgets::slider_from(ui, track, id.with("slider"), t, 0.5)
     } else {
@@ -770,7 +772,6 @@ fn number_row(
     // Only a change from what this hold last sent is sent: the value shown
     // is the application's, and lags while its replies queue.
     let asked = asked.map(|asked| ((min + f64::from(asked) * span) * scale).round() / scale);
-    let echoed = (value * scale).round() / scale;
     if let Some(next) = widgets::unsent(ui, id.with("slider"), asked, &echoed) {
         preview(sent, prop, PropValue::Number(next));
     }
@@ -779,7 +780,7 @@ fn number_row(
     }
 
     // While the slider is held, its field shows what it asked for.
-    let value = widgets::held(ui, id.with("slider")).unwrap_or(value);
+    let value = widgets::held(ui, id.with("slider"), &echoed).unwrap_or(value);
     let shown = (value * scale).round() as i32;
     let suffix = if percent { "%" } else { "" };
     let edit = widgets::number_field(

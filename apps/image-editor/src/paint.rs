@@ -2,7 +2,8 @@
 //! selection: what a stroke covers, how it changes a layer's pixels, and the
 //! selection's coverage mask and outline.
 
-use crate::picture::{Pixels, Rect};
+use crate::picture::{Pixels, Rect, in_bands, run_apart, shares};
+use std::sync::{Mutex, PoisonError};
 
 /// A brush or eraser as the toolbar sets it. Size is in picture pixels;
 /// hardness and opacity run from 0 to 1.
@@ -232,45 +233,76 @@ pub fn apply_colours(
     opacity: f32,
     keep_alpha: bool,
 ) -> Option<Rect> {
+    let colour = |x: i32, y: i32| colours[(y - area.y) as usize * area.w as usize + (x - area.x) as usize];
+    apply_with(pixels, offset, area, coverage, colour, selection, opacity, keep_alpha)
+}
+
+/// [`apply_colours`] with each pixel's colour worked out as it is painted,
+/// by `colour(x, y)`, in bands of rows, one per core.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_with(
+    pixels: &mut Pixels,
+    offset: [i32; 2],
+    area: Rect,
+    coverage: &[f32],
+    colour: impl Fn(i32, i32) -> Option<[f32; 4]> + Sync,
+    selection: Option<&Mask>,
+    opacity: f32,
+    keep_alpha: bool,
+) -> Option<Rect> {
     let layer = Rect::new(offset[0], offset[1], pixels.width as i32, pixels.height as i32);
     let shared = area.intersect(&layer);
-    let mut changed = Rect::new(0, 0, 0, 0);
-    for y in shared.y..shared.bottom() {
-        for x in shared.x..shared.right() {
-            let cell = (y - area.y) as usize * area.w as usize + (x - area.x) as usize;
-            let Some(colour) = colours[cell] else {
-                continue;
-            };
-            let mut amount = coverage[cell] * opacity * colour[3];
-            if let Some(mask) = selection {
-                amount *= f32::from(mask.at(x, y)) / 255.0;
-            }
-            if amount <= 0.0 {
-                continue;
-            }
-            let at = ((y - layer.y) as usize * pixels.width as usize + (x - layer.x) as usize) * 4;
-            let before = [pixels.data[at], pixels.data[at + 1], pixels.data[at + 2], pixels.data[at + 3]];
-            let below = f32::from(before[3]) / 255.0;
-            let mut after = before;
-            if keep_alpha {
-                for channel in 0..3 {
-                    let old = f32::from(before[channel]) / 255.0;
-                    after[channel] = to_byte(old + (colour[channel] - old) * amount);
+    if shared.is_empty() {
+        return None;
+    }
+    let changed = Mutex::new(Rect::new(0, 0, 0, 0));
+    let row_bytes = pixels.width as usize * 4;
+    let rows = &mut pixels.data[(shared.y - layer.y) as usize * row_bytes..(shared.bottom() - layer.y) as usize * row_bytes];
+    // In bands of rows, a few per core, as each pixel is painted by itself.
+    let band = (shared.h as usize).div_ceil(shares(shared));
+    in_bands(rows, band * row_bytes, |index, rows| {
+        let mut own = Rect::new(0, 0, 0, 0);
+        for (row, line) in rows.chunks_exact_mut(row_bytes).enumerate() {
+            let y = shared.y + (index * band + row) as i32;
+            for x in shared.x..shared.right() {
+                let cell = (y - area.y) as usize * area.w as usize + (x - area.x) as usize;
+                let Some(colour) = colour(x, y) else {
+                    continue;
+                };
+                let mut amount = coverage[cell] * opacity * colour[3];
+                if let Some(mask) = selection {
+                    amount *= f32::from(mask.at(x, y)) / 255.0;
                 }
-            } else {
-                let alpha = amount + below * (1.0 - amount);
-                for channel in 0..3 {
-                    let old = f32::from(before[channel]) / 255.0;
-                    after[channel] = to_byte((colour[channel] * amount + old * below * (1.0 - amount)) / alpha);
+                if amount <= 0.0 {
+                    continue;
                 }
-                after[3] = to_byte(alpha);
-            }
-            if after != before {
-                pixels.data[at..at + 4].copy_from_slice(&after);
-                changed = changed.union(&Rect::new(x - layer.x, y - layer.y, 1, 1));
+                let at = (x - layer.x) as usize * 4;
+                let before = [line[at], line[at + 1], line[at + 2], line[at + 3]];
+                let below = f32::from(before[3]) / 255.0;
+                let mut after = before;
+                if keep_alpha {
+                    for channel in 0..3 {
+                        let old = f32::from(before[channel]) / 255.0;
+                        after[channel] = to_byte(old + (colour[channel] - old) * amount);
+                    }
+                } else {
+                    let alpha = amount + below * (1.0 - amount);
+                    for channel in 0..3 {
+                        let old = f32::from(before[channel]) / 255.0;
+                        after[channel] = to_byte((colour[channel] * amount + old * below * (1.0 - amount)) / alpha);
+                    }
+                    after[3] = to_byte(alpha);
+                }
+                if after != before {
+                    line[at..at + 4].copy_from_slice(&after);
+                    own = own.union(&Rect::new(x - layer.x, y - layer.y, 1, 1));
+                }
             }
         }
-    }
+        let mut changed = changed.lock().unwrap_or_else(PoisonError::into_inner);
+        *changed = changed.union(&own);
+    });
+    let changed = changed.into_inner().unwrap_or_else(PoisonError::into_inner);
     (!changed.is_empty()).then_some(changed)
 }
 
@@ -305,9 +337,129 @@ struct Sums {
 }
 
 impl Sums {
-    /// Over `rect`, each pixel weighted by `weight(x, y)` and its alpha.
-    /// Colours are summed as bytes and scaled once, in `mean`.
-    fn new(source: &[u8], width: u32, rect: Rect, weight: impl Fn(i32, i32) -> f64) -> Self {
+    /// Over each part's rect, each pixel weighted by its alpha, times
+    /// what the stroke leaves of it when the part has the stroke's
+    /// coverage. Colours are summed as bytes and scaled once, in `mean`.
+    /// Only the rows the part's `reach` says are read in each column are
+    /// summed, each band of columns from its first such row, as a box's
+    /// sum takes the same column's sum away at both its rows, so where the
+    /// band starts makes no difference. One band of columns per share of
+    /// the cores sums down its columns, each row starting from what the
+    /// bands to its left hold in that row, worked out first in bands of
+    /// rows; every part side by side. So each sum is written once, and adds
+    /// as one thread would but for where it starts, which can move it by a
+    /// rounding of the last bit.
+    fn made(source: &[u8], width: u32, parts: &[Part<'_>]) -> Vec<Sums> {
+        let cores = parts.iter().map(|part| shares(part.rect)).max().unwrap_or(1);
+        // How wide each part's bands of columns are, and the rows each band
+        // sums, first and last, which are clear when it sums none.
+        let widths: Vec<usize> = parts.iter().map(|part| (part.rect.w as usize).div_ceil(cores).max(1)).collect();
+        let spans: Vec<Vec<[usize; 2]>> = parts
+            .iter()
+            .zip(&widths)
+            .map(|(part, wide)| {
+                (0..cores)
+                    .map(|band| {
+                        // The band's columns, after the first, which is clear.
+                        let columns = (1 + band * wide).min(part.reach.len())..(1 + (band + 1) * wide).min(part.reach.len());
+                        part.reach[columns].iter().fold([usize::MAX, 0], |[first, last], reach| [first.min(reach[0]), last.max(reach[1])])
+                    })
+                    .collect()
+            })
+            .collect();
+        // What each band of each row holds before it, for the rows a band
+        // to its right sums from.
+        let mut befores: Vec<Vec<[f64; 4]>> = parts.iter().map(|part| vec![[0.0; 4]; part.rect.h as usize * cores]).collect();
+        {
+            let mut pieces: Vec<Vec<(usize, usize, &mut [[f64; 4]])>> = (0..cores).map(|_| Vec::new()).collect();
+            for (index, (before, part)) in befores.iter_mut().zip(parts).enumerate() {
+                let band = (part.rect.h as usize).div_ceil(cores).max(1);
+                for (share, rows) in before.chunks_mut(band * cores).enumerate() {
+                    pieces[share].push((index, share * band, rows));
+                }
+            }
+            run_apart(pieces, |_, pieces| {
+                for (index, first, rows) in pieces {
+                    let (part, wide) = (&parts[index], widths[index]);
+                    for (local, row) in rows.chunks_exact_mut(cores).enumerate() {
+                        let y = first + local;
+                        let needed = spans[index].iter().rposition(|[from, to]| *from <= y && y < *to).map_or(0, |band| band + 1);
+                        let py = part.rect.y + y as i32;
+                        let mut sum = [0.0f64; 4];
+                        for (band, before) in row.iter_mut().enumerate().take(needed) {
+                            *before = sum;
+                            let x0 = (band * wide).min(part.rect.w as usize);
+                            let x1 = ((band + 1) * wide).min(part.rect.w as usize);
+                            for add in terms(source, part.coverage, width, part.rect.x + x0 as i32, py, x1 - x0) {
+                                for channel in 0..4 {
+                                    sum[channel] += add[channel];
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        // Into the memory the last sums used, as a long stroke's are large.
+        let mut tables: Vec<Vec<[f64; 4]>> = parts
+            .iter()
+            .map(|part| {
+                // Every sum read is written, so it is only ever grown.
+                let mut data = SUMS.lock().unwrap_or_else(PoisonError::into_inner).pop().unwrap_or_default();
+                let size = (part.rect.w as usize + 1) * (part.rect.h as usize + 1);
+                if data.len() < size {
+                    data.resize(size, [0.0; 4]);
+                }
+                data
+            })
+            .collect();
+        // Each band of columns of every part, its own part of the rows it
+        // sums; the first column clear.
+        let mut pieces: Vec<Vec<(usize, usize, Vec<&mut [[f64; 4]]>)>> = (0..cores).map(|_| Vec::new()).collect();
+        for (index, (data, part)) in tables.iter_mut().zip(parts).enumerate() {
+            let mut own: Vec<Vec<&mut [[f64; 4]]>> = (0..cores).map(|_| Vec::new()).collect();
+            let columns = part.rect.w as usize + 1;
+            for (y, line) in data[..columns * (part.rect.h as usize + 1)].chunks_exact_mut(columns).enumerate() {
+                let (first, rest) = line.split_at_mut(1);
+                first[0] = [0.0; 4];
+                for (band, piece) in rest.chunks_mut(widths[index]).enumerate() {
+                    let [from, to] = spans[index][band];
+                    if from <= y && y <= to {
+                        own[band].push(piece);
+                    }
+                }
+            }
+            for (band, lines) in own.into_iter().enumerate().filter(|(_, lines)| !lines.is_empty()) {
+                pieces[band].push((index, spans[index][band][0], lines));
+            }
+        }
+        run_apart(pieces, |band, pieces| {
+            for (index, from, mut lines) in pieces {
+                let part = &parts[index];
+                let x0 = band * widths[index];
+                lines[0].fill([0.0; 4]);
+                for line in 1..lines.len() {
+                    let (above, below) = lines.split_at_mut(line);
+                    let y = from + line - 1;
+                    let mut row = befores[index][y * cores + band];
+                    let wide = below[0].len();
+                    let added = terms(source, part.coverage, width, part.rect.x + x0 as i32, part.rect.y + y as i32, wide);
+                    for ((cell, up), add) in below[0].iter_mut().zip(above[line - 1].iter()).zip(added) {
+                        for channel in 0..4 {
+                            row[channel] += add[channel];
+                        }
+                        *cell = [up[0] + row[0], up[1] + row[1], up[2] + row[2], up[3] + row[3]];
+                    }
+                }
+            }
+        });
+        tables.into_iter().zip(parts).map(|(data, part)| Sums { rect: part.rect, data }).collect()
+    }
+
+    /// Over `rect`, as [`Sums::made`] does, on one thread, a row at a time:
+    /// what the bands must equal.
+    #[cfg(test)]
+    fn alone(source: &[u8], width: u32, rect: Rect, weight: impl Fn(i32, i32) -> f64) -> Self {
         let columns = rect.w as usize + 1;
         let mut data = vec![[0.0f64; 4]; columns * (rect.h as usize + 1)];
         for y in 0..rect.h as usize {
@@ -352,28 +504,154 @@ impl Sums {
     }
 }
 
-/// What the healing brush paints at each pixel `p` of `area`: the source's
-/// detail and the light around where it lands,
+impl Drop for Sums {
+    fn drop(&mut self) {
+        let mut kept = SUMS.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() < 2 {
+            kept.push(std::mem::take(&mut self.data));
+        }
+    }
+}
+
+/// A part of the picture to sum: its rect, the stroke's coverage when the
+/// stroke is left out, and in each column of the sums, the first and last
+/// rows a box's average reads there.
+struct Part<'a> {
+    rect: Rect,
+    coverage: Option<&'a [f32]>,
+    reach: Vec<[usize; 2]>,
+}
+
+/// Each pixel's colour times its weight, and the weight, along row `py` of
+/// the picture from column `x`, `count` pixels: the weight is its alpha,
+/// times what the stroke leaves of it when `coverage` is given.
+fn terms<'a>(source: &'a [u8], coverage: Option<&'a [f32]>, width: u32, x: i32, py: i32, count: usize) -> impl Iterator<Item = [f64; 4]> + 'a {
+    let start = py as usize * width as usize + x as usize;
+    let left = coverage.map(|coverage| &coverage[start..start + count]);
+    source[start * 4..(start + count) * 4].chunks_exact(4).enumerate().map(move |(index, pixel)| {
+        let kept = left.map_or(1.0, |left| 1.0 - f64::from(left[index]).clamp(0.0, 1.0));
+        let w = kept * f64::from(pixel[3]);
+        [w * f64::from(pixel[0]), w * f64::from(pixel[1]), w * f64::from(pixel[2]), w]
+    })
+}
+
+/// The memory of the last sums, kept for the next: healing makes two.
+static SUMS: Mutex<Vec<Vec<[f64; 4]>>> = Mutex::new(Vec::new());
+
+/// What the healing brush paints at each pixel `p` of an area: the
+/// source's detail and the light around where it lands,
 /// `src(p + o) − blur(src)(p + o) + light(p)`, where `light` is the
 /// destination's blur with the stroke's own pixels left out, as `coverage`
 /// (the picture's size, row by row) says how much each is the stroke's.
 /// Both blurs are normalised boxes of `radius`; the source and the
-/// destination are the same picture, as the stroke began.
-pub fn heal_colours(source: &[u8], width: u32, height: u32, coverage: &[f32], area: Rect, offset: [i32; 2], radius: i32) -> Vec<Option<[f32; 4]>> {
+/// destination are the same picture, as the stroke began. Only the region
+/// the area and its source reach, with the blur's reach around them, is
+/// summed.
+pub struct Healer<'a> {
+    source: &'a [u8],
+    width: u32,
+    height: u32,
+    coverage: &'a [f32],
+    offset: [i32; 2],
+    radius: i32,
+    light: Option<Sums>,
+    blurred: Option<Sums>,
+}
+
+impl<'a> Healer<'a> {
+    pub fn new(source: &'a [u8], width: u32, height: u32, coverage: &'a [f32], area: Rect, offset: [i32; 2], radius: i32) -> Self {
+        let radius = radius.max(1);
+        let picture = Rect::new(0, 0, width as i32, height as i32);
+        let grown = |rect: Rect| Rect::new(rect.x - radius, rect.y - radius, rect.w + 2 * radius, rect.h + 2 * radius).intersect(&picture);
+        let around = grown(area);
+        let moved = grown(Rect::new(area.x + offset[0], area.y + offset[1], area.w, area.h));
+        // The rows the stroke reaches in each column of the area: only the
+        // sums its pixels' averages read are made.
+        let mut reached = vec![[i32::MAX, i32::MIN]; area.w.max(0) as usize];
+        for y in area.y..area.bottom() {
+            let start = y as usize * width as usize + area.x as usize;
+            for (rows, covered) in reached.iter_mut().zip(&coverage[start..start + area.w as usize]) {
+                if *covered > 0.0 {
+                    *rows = [rows[0].min(y), y];
+                }
+            }
+        }
+        // In each column of the sums over `rect`, the first and last rows
+        // the averages around the reached pixels, moved by `by`, read.
+        let reach = |rect: Rect, by: [i32; 2]| {
+            let mut reach = vec![[usize::MAX, 0]; rect.w as usize + 1];
+            for (column, [top, bottom]) in reached.iter().enumerate().filter(|(_, rows)| rows[0] <= rows[1]) {
+                let x = area.x + column as i32 + by[0];
+                let first = ((top + by[1] - radius).clamp(rect.y, rect.bottom()) - rect.y) as usize;
+                let last = ((bottom + by[1] + radius + 1).clamp(rect.y, rect.bottom()) - rect.y) as usize;
+                for corner in [x - radius, x + radius + 1] {
+                    let rows = &mut reach[(corner.clamp(rect.x, rect.right()) - rect.x) as usize];
+                    *rows = [rows[0].min(first), rows[1].max(last)];
+                }
+            }
+            reach
+        };
+        let mut parts = Vec::new();
+        if !around.is_empty() {
+            parts.push(Part { rect: around, coverage: Some(coverage), reach: reach(around, [0, 0]) });
+        }
+        if !moved.is_empty() {
+            parts.push(Part { rect: moved, coverage: None, reach: reach(moved, offset) });
+        }
+        let mut made = Sums::made(source, width, &parts).into_iter();
+        let light = if around.is_empty() { None } else { made.next() };
+        let blurred = if moved.is_empty() { None } else { made.next() };
+        Self { source, width, height, coverage, offset, radius, light, blurred }
+    }
+
+    /// What it paints at a pixel: nothing where the stroke does not reach
+    /// or the source has nothing.
+    pub fn colour(&self, x: i32, y: i32) -> Option<[f32; 4]> {
+        // A pixel the stroke does not reach is not painted, so its colour
+        // is not worked out.
+        if outside(self.coverage, self.width, x, y) >= 1.0 {
+            return None;
+        }
+        let (sx, sy) = (x + self.offset[0], y + self.offset[1]);
+        let own = sample(self.source, self.width, self.height, sx, sy)?;
+        let (detail_base, _) = self.blurred.as_ref().map_or(([0.0; 3], 0.0), |sums| sums.mean(sx, sy, self.radius));
+        let (lit, weight) = self.light.as_ref().map_or(([0.0; 3], 0.0), |sums| sums.mean(x, y, self.radius));
+        Some(lit_colour(own, detail_base, lit, weight))
+    }
+}
+
+/// How much of a pixel the stroke leaves out: 1 where it does not reach.
+fn outside(coverage: &[f32], width: u32, x: i32, y: i32) -> f64 {
+    1.0 - f64::from(coverage[y as usize * width as usize + x as usize]).clamp(0.0, 1.0)
+}
+
+/// A healed pixel: the source's own colour less its blur, plus the light.
+fn lit_colour(own: [f32; 4], detail_base: [f64; 3], lit: [f64; 3], weight: f64) -> [f32; 4] {
+    // With the whole window under the stroke, nothing is left to light it,
+    // and the source's own light stays.
+    let lit = if weight > 0.5 { lit } else { detail_base };
+    let mut colour = own;
+    for channel in 0..3 {
+        colour[channel] = (f64::from(own[channel]) - detail_base[channel] + lit[channel]).clamp(0.0, 1.0) as f32;
+    }
+    colour
+}
+
+/// What [`Healer`] paints at each pixel of `area`, on one thread, a row at
+/// a time, as healing was first made: what the bands must equal.
+#[cfg(test)]
+pub fn heal_colours_alone(source: &[u8], width: u32, height: u32, coverage: &[f32], area: Rect, offset: [i32; 2], radius: i32) -> Vec<Option<[f32; 4]>> {
     let radius = radius.max(1);
     let picture = Rect::new(0, 0, width as i32, height as i32);
     let grown = |rect: Rect| Rect::new(rect.x - radius, rect.y - radius, rect.w + 2 * radius, rect.h + 2 * radius).intersect(&picture);
     let around = grown(area);
     let moved = grown(Rect::new(area.x + offset[0], area.y + offset[1], area.w, area.h));
-    let outside = |x: i32, y: i32| 1.0 - f64::from(coverage[y as usize * width as usize + x as usize]).clamp(0.0, 1.0);
-    let light = (!around.is_empty()).then(|| Sums::new(source, width, around, outside));
-    let blurred = (!moved.is_empty()).then(|| Sums::new(source, width, moved, |_, _| 1.0));
+    let light = (!around.is_empty()).then(|| Sums::alone(source, width, around, |x, y| outside(coverage, width, x, y)));
+    let blurred = (!moved.is_empty()).then(|| Sums::alone(source, width, moved, |_, _| 1.0));
     let mut out = Vec::with_capacity(area.w as usize * area.h as usize);
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
-            // A pixel the stroke does not reach is not painted, so its
-            // colour is not worked out.
-            if outside(x, y) >= 1.0 {
+            if outside(coverage, width, x, y) >= 1.0 {
                 out.push(None);
                 continue;
             }
@@ -384,14 +662,7 @@ pub fn heal_colours(source: &[u8], width: u32, height: u32, coverage: &[f32], ar
             };
             let (detail_base, _) = blurred.as_ref().map_or(([0.0; 3], 0.0), |sums| sums.mean(sx, sy, radius));
             let (lit, weight) = light.as_ref().map_or(([0.0; 3], 0.0), |sums| sums.mean(x, y, radius));
-            // With the whole window under the stroke, nothing is left to
-            // light it, and the source's own light stays.
-            let lit = if weight > 0.5 { lit } else { detail_base };
-            let mut colour = own;
-            for channel in 0..3 {
-                colour[channel] = (f64::from(own[channel]) - detail_base[channel] + lit[channel]).clamp(0.0, 1.0) as f32;
-            }
-            out.push(Some(colour));
+            out.push(Some(lit_colour(own, detail_base, lit, weight)));
         }
     }
     out
@@ -782,5 +1053,51 @@ mod tests {
         let edge = soft.at(10, 20);
         assert!(edge > 60 && edge < 200, "{edge}");
         assert!(soft.at(8, 20) > 0);
+    }
+
+    /// Catches healing in bands that paints otherwise than healing a row at
+    /// a time: a long wavy stroke healed over a busy, partly clear picture,
+    /// large enough to be split among the cores, paints within one level of
+    /// what the sums made on one thread paint, and paints.
+    #[test]
+    fn healing_in_bands_paints_as_healing_alone() {
+        let (width, height) = (700u32, 420u32);
+        let mut picture = Pixels::filled(width, height, [0, 0, 0, 0]);
+        for (index, pixel) in picture.data.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (index % width as usize, index / width as usize);
+            let alpha = if (x / 50 + y / 40) % 7 == 0 { 0 } else { 255 - (x % 90) as u8 };
+            pixel.copy_from_slice(&[(x * 7 % 256) as u8, (y * 5 % 256) as u8, ((x * y) % 251) as u8, alpha]);
+        }
+        let points: Vec<[f64; 3]> = (0..=160).map(|k| [30.0 + 4.0 * f64::from(k), 260.0 + 110.0 * (f64::from(k) / 16.0).sin(), 1.0]).collect();
+        let stroke = stroke_coverage(&points, &Brush { size: 60.0, hardness: 0.5, ..brush(60.0, 0.5, 1.0) }).unwrap();
+        let area = stroke.rect.intersect(&Rect::new(0, 0, width as i32, height as i32));
+        let mut coverage = vec![0.0f32; (width * height) as usize];
+        let mut values = Vec::new();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let value = stroke.values[((y - stroke.rect.y) * stroke.rect.w + x - stroke.rect.x) as usize];
+                coverage[(y as u32 * width + x as u32) as usize] = value;
+                values.push(value);
+            }
+        }
+        assert!(area.w * area.h > 65_536, "the stroke is too small to be split");
+        let (offset, radius) = ([0, -150], 30);
+        let colours = heal_colours_alone(&picture.data, width, height, &coverage, area, offset, radius);
+        let mut alone = picture.clone();
+        apply_colours(&mut alone, [0, 0], area, &values, &colours, None, 1.0, false);
+        // The memory sums reuse holds the last stroke's; any of it read
+        // and not written again would paint here.
+        {
+            let mut kept = SUMS.lock().unwrap_or_else(PoisonError::into_inner);
+            kept.push(vec![[f64::NAN; 4]; ((width + 1) * (height + 1)) as usize]);
+            kept.push(vec![[f64::NAN; 4]; ((width + 1) * (height + 1)) as usize]);
+        }
+        let healer = Healer::new(&picture.data, width, height, &coverage, area, offset, radius);
+        let mut banded = picture.clone();
+        apply_with(&mut banded, [0, 0], area, &values, |x, y| healer.colour(x, y), None, 1.0, false);
+        assert!(alone.data != picture.data, "healing painted nothing");
+        let worst = banded.data.iter().zip(&alone.data).map(|(banded, alone)| banded.abs_diff(*alone)).max().unwrap();
+        let differ = banded.data.iter().zip(&alone.data).filter(|(banded, alone)| banded != alone).count();
+        assert!(worst <= 1, "healing in bands differs from healing alone by up to {worst} levels, in {differ} bytes");
     }
 }

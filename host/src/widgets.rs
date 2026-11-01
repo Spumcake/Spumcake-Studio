@@ -79,9 +79,17 @@ where
     let key = id.with("sent");
     let pass = ui.ctx().cumulative_pass_nr();
     let Some(next) = next else {
-        ui.data_mut(|data| data.remove::<(u64, T)>(key));
+        // Let go: what it sent last stays shown until the application's
+        // echo catches up, so the knob does not flick back.
+        if let Some((_, last)) = ui.data(|data| data.get_temp::<(u64, T)>(key)) {
+            ui.data_mut(|data| {
+                data.remove::<(u64, T)>(key);
+                data.insert_temp(id.with("settling"), (pass, last));
+            });
+        }
         return None;
     };
+    ui.data_mut(|data| data.remove::<(u64, T)>(id.with("settling")));
     // A hold not seen on the last passes ended unseen, as when its row
     // went away while it was held.
     let last = ui
@@ -94,14 +102,33 @@ where
     fresh.then_some(next)
 }
 
-/// What a held control last sent, while it is held: shown in place of the
-/// application's lagging echo.
-pub(crate) fn held<T>(ui: &egui::Ui, id: egui::Id) -> Option<T>
+/// What a held control last sent, while it is held, and after it is let go
+/// until `echoed`, the application's value, matches it, a moment passes, or
+/// the pointer is pressed again anywhere (a row keyed by its property shows
+/// another layer's value once one is picked): shown in place of the lagging
+/// echo.
+pub(crate) fn held<T>(ui: &egui::Ui, id: egui::Id, echoed: &T) -> Option<T>
 where
-    T: Clone + Send + Sync + 'static,
+    T: PartialEq + Clone + Send + Sync + 'static,
 {
-    ui.data(|data| data.get_temp::<(u64, T)>(id.with("sent"))).map(|(_, last)| last)
+    if let Some((_, last)) = ui.data(|data| data.get_temp::<(u64, T)>(id.with("sent"))) {
+        return Some(last);
+    }
+    let key = id.with("settling");
+    let (since, last) = ui.data(|data| data.get_temp::<(u64, T)>(key))?;
+    let pass = ui.ctx().cumulative_pass_nr();
+    let pressed = ui.input(|input| input.pointer.any_pressed());
+    if last == *echoed || pressed || pass.saturating_sub(since) > SETTLE_PASSES {
+        ui.data_mut(|data| data.remove::<(u64, T)>(key));
+        return None;
+    }
+    ui.ctx().request_repaint();
+    Some(last)
 }
+
+/// How many frames a let-go control waits for the application's echo
+/// before showing it anyway, about half a second.
+const SETTLE_PASSES: u64 = 30;
 
 /// A rail with a dark fill and knob. `t` is the position in `0..=1`. While the
 /// pointer is down on it, the second value is the position the pointer asks

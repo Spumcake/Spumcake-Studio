@@ -605,6 +605,28 @@ impl Session {
         out
     }
 
+    /// While the program is idle, before anything else it does then: the
+    /// picture shown keeps the picture beneath its active layer, made now,
+    /// so a slider's first value is as quick as the rest; every other
+    /// picture lets its go. Returns whether one was made.
+    pub fn keep_ahead(&mut self) -> bool {
+        let active = self.active;
+        for (index, image) in self.images.iter_mut().enumerate() {
+            let shown = image.gallery.shown;
+            for (position, frame) in image.gallery.frames.iter_mut().enumerate() {
+                if index != active || position != shown {
+                    frame.doc.let_beneath_go();
+                }
+            }
+        }
+        self.images.get_mut(active).is_some_and(|image| image.doc_mut().keep_ahead())
+    }
+
+    /// Whether the picture shown has a picture beneath to make when idle.
+    pub fn ahead_due(&self) -> bool {
+        self.active_image().is_some_and(|image| image.doc().ahead_due())
+    }
+
     /// Writes whole every picture file a stroke left behind, while nothing
     /// is being drawn, and tells the host the picture shown is whole again.
     fn catch_up(&mut self) -> Vec<AppMessage> {

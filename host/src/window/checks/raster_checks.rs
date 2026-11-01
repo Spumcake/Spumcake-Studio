@@ -1686,6 +1686,46 @@ fn a_held_slider_sends_no_repeated_values_while_replies_lag() {
     window.until(|_| !commands(&dir, "finish_edit").is_empty());
     let contrast: Vec<Value> = of_type(&dir, "property").into_iter().filter(|line| line["prop"] == "contrast").map(|line| line["value"].clone()).collect();
     assert!((2..=3).contains(&contrast.len()) && repeats(&contrast).is_empty(), "the panel's slider sent {contrast:?}");
+    // Let go while the stand-in has not answered: the knob stays where it
+    // was let go rather than flicking back to the old value.
+    for _ in 0..5 {
+        window.step();
+    }
+    let after = window
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Circle(dot) if dot.fill == crate::widgets::INK && (dot.center.y - label.center().y).abs() < 3.0 => Some(dot.center),
+            _ => None,
+        })
+        .expect("the slider has no knob");
+    assert!((after.x - (knob.x + 30.0)).abs() < 4.0, "the knob flicked back after it was let go: {after:?}, let go at {}", knob.x + 30.0);
+    // The stand-in never takes the value, so after a moment, or at once when
+    // the pointer is pressed elsewhere, the knob shows the application's.
+    let contrast_knob = |window: &Window| {
+        window
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Circle(dot) if dot.fill == crate::widgets::INK && (dot.center.y - label.center().y).abs() < 3.0 => Some(dot.center),
+                _ => None,
+            })
+            .expect("the slider has no knob")
+    };
+    for _ in 0..40 {
+        window.step();
+    }
+    let waited = contrast_knob(&window);
+    assert!((waited.x - knob.x).abs() < 4.0, "the knob never showed the application's value: {waited:?}, the application's at {}", knob.x);
+    hold_along(&mut window, &[knob, knob + egui::vec2(30.0, 0.0)]);
+    window.events.push(egui::Event::PointerMoved(label.center()));
+    window.step();
+    press(&mut window, label.center(), true);
+    window.step();
+    press(&mut window, label.center(), false);
+    window.step();
+    let pressed = contrast_knob(&window);
+    assert!((pressed.x - knob.x).abs() < 4.0, "a press elsewhere left the knob where it was let go: {pressed:?}, the application's at {}", knob.x);
     close(window, dir);
 }
 

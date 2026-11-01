@@ -22,7 +22,9 @@ fn main() {
     let greeting = session.greeting();
     send(&greeting);
     // Lines arrive on their own thread, so the loop also wakes with no
-    // message and writes a project's changes that are due.
+    // message and writes a project's changes that are due. When the
+    // picture beneath the active layer is to be made, it wakes sooner, as
+    // soon as the lines pause, so it is ready before a slider is reached.
     let (lines, incoming) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -35,10 +37,13 @@ fn main() {
         }
     });
     loop {
-        let line = match incoming.recv_timeout(std::time::Duration::from_millis(250)) {
+        let wait = if session.ahead_due() { 30 } else { 250 };
+        let line = match incoming.recv_timeout(std::time::Duration::from_millis(wait)) {
             Ok(line) => line,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                send(&session.tick());
+                if !session.keep_ahead() {
+                    send(&session.tick());
+                }
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,

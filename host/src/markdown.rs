@@ -147,6 +147,21 @@ fn cells(row: &str) -> Vec<String> {
     row.trim().trim_matches('|').split('|').map(|cell| cell.trim().to_string()).collect()
 }
 
+thread_local! {
+    /// Whether text is laid out slanted, as a cell's generated text is;
+    /// its emphasis then stands upright.
+    static SLANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `text` laid out as `lay_out` lays it out, in italic: a cell's generated
+/// text, as the owner set on 2026-11-01.
+pub(crate) fn lay_out_slanted(painter: &Painter, text: &str, color: Color32, width: f32) -> Laid {
+    SLANT.with(|slant| slant.set(true));
+    let laid = lay_out(painter, text, color, width);
+    SLANT.with(|slant| slant.set(false));
+    laid
+}
+
 /// `text` laid out to `width`, in `color`.
 pub(crate) fn lay_out(painter: &Painter, text: &str, color: Color32, width: f32) -> Laid {
     let text = &visible(text);
@@ -297,7 +312,7 @@ fn inline(text: &str, color: Color32, size: f32, line: f32, strong: bool, width:
     let mut job = LayoutJob::default();
     job.wrap.max_width = width.max(20.0);
     let mut bold = false;
-    let mut italic = false;
+    let mut italic = SLANT.with(std::cell::Cell::get);
     let mut plain = String::new();
     let mut rest = text;
     let push = |job: &mut LayoutJob, plain: &mut String, bold: bool, italic: bool, underline: bool| {

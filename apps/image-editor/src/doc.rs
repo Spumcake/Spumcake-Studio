@@ -151,12 +151,14 @@ pub struct Doc {
     /// Curves layer's histogram, or a file's copy of the layers, holds while
     /// it stays the same.
     pub generation: u64,
-    /// The picture as the top-level nodes beneath a held slider's layer
-    /// combine it, with its generation and those nodes; and the generation
-    /// and top-level nodes as last composited, to find the first that
-    /// changed.
-    beneath: Option<(u64, Vec<Node>, Beneath)>,
+    /// The picture as the nodes beneath a held slider's layer combine it,
+    /// or beneath the active layer, made while the program was idle; and
+    /// the generation and top-level nodes as last composited, to find the
+    /// first that changed.
+    beneath: Option<KeptBeneath>,
     composited: Option<(u64, Vec<Node>)>,
+    /// How many times a picture beneath was made, ahead or for a slider.
+    pub beneaths_made: u64,
     /// A Curves layer's histograms, kept while what lies beneath it stays.
     histograms: RefCell<Option<Histograms>>,
     /// How many times histograms were made.
@@ -190,6 +192,7 @@ impl Doc {
             generation: next_generation(),
             beneath: None,
             composited: None,
+            beneaths_made: 0,
             histograms: RefCell::new(None),
             histograms_made: Cell::new(0),
             outlines: None,
@@ -231,54 +234,112 @@ impl Doc {
             self.composite = vec![0; size];
             self.stale = Some(self.picture.bounds());
         }
+        // A mask blurred again or a text drawn again changes only what is
+        // made from its node's settings, which the picture beneath compares
+        // for itself, so the pixels' generation stays.
         if let Some(touched) = self.picture.prepare() {
-            self.touch(touched);
+            self.touch_made(touched);
         }
         let Some(rect) = self.stale.take() else {
-            if self.pending.is_none() {
-                self.beneath = None;
-            }
+            self.let_slider_beneath_go();
             return false;
         };
         match self.keep_beneath() {
-            Some(count) if rect == self.picture.bounds() => {
-                let beneath = self.picture.composite_keeping(count, &mut self.composite);
-                self.beneath = Some((self.generation, self.picture.nodes[..count].to_vec(), beneath));
+            Some(path) if rect == self.picture.bounds() => {
+                let beneath = self.picture.beneath(&path);
+                self.beneaths_made += 1;
+                self.picture.composite_over(Some(&beneath), rect, &mut self.composite);
+                self.beneath = Some(KeptBeneath { generation: self.generation, beneath, ahead: false });
             }
-            _ => self.picture.composite_over(self.beneath.as_ref().map(|(_, _, beneath)| beneath), rect, &mut self.composite),
+            _ => self.picture.composite_over(self.beneath.as_ref().map(|kept| &kept.beneath), rect, &mut self.composite),
         }
         self.composited = Some((self.generation, self.picture.nodes.clone()));
-        // Let go, the slider's picture beneath is not needed any more: it
-        // is kept only while a slider is held, as it is the picture's size
-        // in floating point.
-        if self.pending.is_none() {
-            self.beneath = None;
-        }
+        self.let_slider_beneath_go();
         self.changed = Some(self.changed.map_or(rect, |changed| changed.union(&rect)));
         self.revision += 1;
         true
     }
 
-    /// Keeps the picture beneath what a held slider changes, while its
-    /// nodes and the pixels are as they were. Without one, when only the
-    /// tree's settings changed since the last composite, returns how many
-    /// top-level nodes lie beneath the first that changed, for a new one.
-    fn keep_beneath(&mut self) -> Option<usize> {
-        let nodes = &self.picture.nodes;
-        let generation = self.generation;
-        let holds = |(made, kept, _): &(u64, Vec<Node>, Beneath)| *made == generation && nodes.get(..kept.len()) == Some(&kept[..]);
-        if !self.beneath.as_ref().is_some_and(holds) {
+    /// Let go, a slider's picture beneath is not needed any more: one made
+    /// for it is kept only while it is held, as it is the picture's size in
+    /// floating point. One made ahead stays for the next.
+    fn let_slider_beneath_go(&mut self) {
+        if self.pending.is_none() && self.beneath.as_ref().is_some_and(|kept| !kept.ahead) {
+            self.beneath = None;
+        }
+    }
+
+    /// Whether the picture beneath that is kept still holds: its nodes and
+    /// the pixels are as they were.
+    fn beneath_holds(&self) -> bool {
+        self.beneath.as_ref().is_some_and(|kept| kept.generation == self.generation && kept.beneath.holds(&self.picture))
+    }
+
+    /// Keeps the picture beneath what a held slider changes, while it
+    /// holds. Without one, when only the tree's settings changed since the
+    /// last composite, returns the path to the first node that changed, for
+    /// a new one.
+    fn keep_beneath(&mut self) -> Option<Vec<usize>> {
+        if !self.beneath_holds() {
             self.beneath = None;
         }
         if self.beneath.is_some() || self.pending.is_none() {
             return None;
         }
         let (made, before) = self.composited.as_ref()?;
-        if *made != generation {
+        if *made != self.generation {
             return None;
         }
-        let same = nodes.iter().zip(before).take_while(|(now, then)| now == then).count();
-        (same > 0 && same < nodes.len()).then_some(same)
+        let path = changed_path(&self.picture.nodes, before);
+        (path[0] < self.picture.nodes.len() && worth_keeping(&path)).then_some(path)
+    }
+
+    /// The path to the active layer the picture beneath it would be kept
+    /// at, when the program is idle and none that holds is kept there.
+    fn ahead_path(&self) -> Option<Vec<usize>> {
+        if self.pending.is_some() || self.drawing() || self.typing.is_some() || self.stale.is_some() || self.composite.is_empty() {
+            return None;
+        }
+        let path = path_to(&self.picture.nodes, self.active?).filter(|path| worth_keeping(path))?;
+        let kept = self.beneath.as_ref().is_some_and(|kept| kept.beneath.path() == path) && self.beneath_holds();
+        (!kept).then_some(path)
+    }
+
+    /// Whether the program, when idle, has the picture beneath the active
+    /// layer to make.
+    pub fn ahead_due(&self) -> bool {
+        self.ahead_path().is_some()
+    }
+
+    /// While the program is idle: makes the picture beneath the active
+    /// layer, at each depth of the groups it lies in, so the first value of
+    /// a slider held on it, a group, or its mask's feather combines only it
+    /// and what lies above, as every later value does. Returns whether it
+    /// made one.
+    pub fn keep_ahead(&mut self) -> bool {
+        let Some(path) = self.ahead_path() else {
+            return false;
+        };
+        let beneath = self.picture.beneath(&path);
+        self.beneaths_made += 1;
+        self.beneath = Some(KeptBeneath { generation: self.generation, beneath, ahead: true });
+        true
+    }
+
+    /// Lets go of the picture kept beneath, for a picture not shown.
+    pub fn let_beneath_go(&mut self) {
+        if self.pending.is_none() {
+            self.beneath = None;
+        }
+    }
+
+    /// A slider begins on `id`: the picture beneath kept for another node
+    /// is let go, so it keeps its own.
+    fn begin_slider(&mut self, id: u64) {
+        self.pending = Some((self.picture.nodes.clone(), self.active));
+        if self.beneath.as_ref().is_some_and(|kept| path_to(&self.picture.nodes, id) != Some(kept.beneath.path())) {
+            self.beneath = None;
+        }
     }
 
     /// The part of the composite that changed since this was last asked.
@@ -299,7 +360,7 @@ impl Doc {
     /// How many top-level nodes the picture kept beneath a held slider holds.
     #[cfg(test)]
     fn beneath_count(&self) -> Option<usize> {
-        self.beneath.as_ref().map(|(_, nodes, _)| nodes.len())
+        self.beneath.as_ref().map(|kept| kept.beneath.path()[0])
     }
 
     /// A Curves layer's histogram of what lies beneath it, for `channel`:
@@ -329,6 +390,16 @@ impl Doc {
             Some(stale) => stale.union(&rect),
             None => rect,
         });
+    }
+
+    /// Only what is made from the tree's settings changed in `rect`, such
+    /// as a mask blurred again or a text drawn again: the pixels' generation
+    /// stays.
+    fn touch_made(&mut self, rect: Rect) {
+        let rect = rect.intersect(&self.picture.bounds());
+        if !rect.is_empty() {
+            self.stale = Some(self.stale.map_or(rect, |stale| stale.union(&rect)));
+        }
     }
 
     fn touch_all(&mut self) {
@@ -677,16 +748,16 @@ impl Doc {
                 let coverage = paint::Coverage { rect: area, values };
                 paint::apply(pixels, live.offset, &coverage, clip, selection.as_ref(), &brush, keep_alpha);
             }
+            Tool::Sampler(sampler) if sampler.heal => {
+                // The light comes from within the brush's radius, so a
+                // nearby edge, such as a hairline, is not pulled in.
+                let radius = (sampler.brush.size / 2.0).round().max(1.0) as i32;
+                let healer = paint::Healer::new(&live.source, width, height, &live.coverage, area, sampler.offset, radius);
+                paint::apply_with(pixels, live.offset, area, &values, |x, y| healer.colour(x, y), selection.as_ref(), 1.0, keep_alpha);
+            }
             Tool::Sampler(sampler) => {
-                let colours = if sampler.heal {
-                    // The light comes from within the brush's radius, so a
-                    // nearby edge, such as a hairline, is not pulled in.
-                    let radius = (sampler.brush.size / 2.0).round().max(1.0) as i32;
-                    paint::heal_colours(&live.source, width, height, &live.coverage, area, sampler.offset, radius)
-                } else {
-                    paint::stamp_colours(&live.source, width, height, area, sampler.offset)
-                };
-                let opacity = if sampler.heal { 1.0 } else { sampler.brush.opacity.clamp(0.0, 1.0) as f32 };
+                let colours = paint::stamp_colours(&live.source, width, height, area, sampler.offset);
+                let opacity = sampler.brush.opacity.clamp(0.0, 1.0) as f32;
                 paint::apply_colours(pixels, live.offset, area, &values, &colours, selection.as_ref(), opacity, keep_alpha);
             }
         }
@@ -1279,9 +1350,7 @@ impl Doc {
             return Ok(());
         }
         if self.pending.is_none() {
-            self.pending = Some((self.picture.nodes.clone(), self.active));
-            // A new slider keeps its own picture beneath.
-            self.beneath = None;
+            self.begin_slider(id);
         }
         *self.picture.find_mut(id).ok_or("There is no active layer.")? = node;
         self.edits += 1;
@@ -1325,9 +1394,7 @@ impl Doc {
         }
         self.end_typing();
         if self.pending.is_none() {
-            self.pending = Some((self.picture.nodes.clone(), self.active));
-            // A new slider keeps its own picture beneath.
-            self.beneath = None;
+            self.begin_slider(id);
         }
         *self.picture.find_mut(id).ok_or("The layer is gone.")? = node;
         self.picture.sync_texts();
@@ -2084,6 +2151,51 @@ fn histogram(rows: &[u8], channel: usize) -> Vec<f32> {
     counts.iter().map(|count| (*count as f32 / most as f32).sqrt()).collect()
 }
 
+/// The picture kept beneath a node, the pixels' generation it was made
+/// from, and whether it was made ahead, while the program was idle, rather
+/// than for a held slider.
+struct KeptBeneath {
+    generation: u64,
+    beneath: Beneath,
+    ahead: bool,
+}
+
+/// The path to the first node of `now` that differs from `then`: how many
+/// siblings lie beneath it at each depth, going into a group that changed
+/// as far as its children are the same.
+fn changed_path(now: &[Node], then: &[Node]) -> Vec<usize> {
+    let same = now.iter().zip(then).take_while(|(now, then)| now == then).count();
+    let mut path = vec![same];
+    if let (Some(Some(now)), Some(Some(then))) = (now.get(same).map(|node| node.children.as_deref()), then.get(same).map(|node| node.children.as_deref())) {
+        path.extend(changed_path(now, then));
+    }
+    path
+}
+
+/// The path to node `id`: how many siblings lie beneath it at each depth.
+/// A group's goes on into it past all its children, so its own settings
+/// change only how it blends.
+fn path_to(nodes: &[Node], id: u64) -> Option<Vec<usize>> {
+    for (index, node) in nodes.iter().enumerate() {
+        if node.id == id {
+            return Some(match &node.children {
+                Some(children) => vec![index, children.len()],
+                None => vec![index],
+            });
+        }
+        if let Some(mut path) = node.children.as_deref().and_then(|children| path_to(children, id)) {
+            path.insert(0, index);
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Whether anything lies beneath a path, so keeping it saves work.
+fn worth_keeping(path: &[usize]) -> bool {
+    path.iter().any(|count| *count > 0)
+}
+
 /// A generation no picture has had: pictures are copied between galleries,
 /// so one picture's never matches another's by chance.
 fn next_generation() -> u64 {
@@ -2817,6 +2929,56 @@ mod tests {
         whole(&mut doc);
         doc.set_curve(curve, 1, &[[0.0, 0.0], [0.4, 0.9], [1.0, 1.0]], true, None).unwrap();
         whole(&mut doc);
+    }
+
+    /// Catches a slider's first value that combines every layer again:
+    /// with the program idle, the picture beneath the active layer is made
+    /// once, ahead, for a grade over two translucent layers, a grade within
+    /// a group, and a group's own opacity, and every held value, the first
+    /// too, combines from it, to the same bytes as the whole picture; let
+    /// go, it stays for the next; and a stroke beneath has it made again.
+    #[test]
+    fn a_sliders_first_value_starts_from_the_picture_made_ahead() {
+        let mut doc = painted(300, 260, |x, y| [(x * 7 % 256) as u8, (y * 5 % 256) as u8, ((x + y) % 251) as u8, 255]);
+        let lower = doc.add_layer("Lower", None, None).unwrap();
+        doc.picture.pixels.insert(lower, Pixels::filled(300, 260, [200, 30, 90, 140]));
+        let upper = doc.add_layer("Upper", None, None).unwrap();
+        doc.picture.pixels.insert(upper, Pixels::filled(300, 260, [20, 200, 120, 100]));
+        doc.touch_all();
+        let grade = doc.add_adjustment(Kind::Grade(Grade::default()), Some(upper), None).unwrap();
+        let whole = |doc: &mut Doc| {
+            doc.refresh();
+            let expected = doc.picture.clone().composite();
+            assert!(doc.composite() == expected.as_slice(), "the held slider's picture differs from the whole picture's");
+        };
+        // Held values on `id`, from the picture made ahead and only it.
+        let held = |doc: &mut Doc, id: u64, change: &dyn Fn(&mut Doc, f32)| {
+            doc.refresh();
+            assert!(doc.keep_ahead(), "nothing was made ahead");
+            assert!(!doc.ahead_due(), "the picture made ahead was not kept");
+            let made = doc.beneaths_made;
+            for step in 1..=3 {
+                change(doc, step as f32);
+                whole(doc);
+                assert_eq!(doc.beneaths_made, made, "held value {step} on {id} made the picture beneath again");
+            }
+            doc.finish_edit();
+            whole(doc);
+            assert!(!doc.ahead_due(), "the picture made ahead was let go with the slider");
+        };
+        held(&mut doc, grade, &|doc, step| doc.set_grade(grade, Grade { exposure: 0.2 * step, ..Grade::default() }, true, None).unwrap());
+        assert_eq!(doc.beneath_count(), Some(3));
+        doc.activate(upper);
+        let group = doc.group_active().unwrap();
+        let inside = doc.add_adjustment(Kind::Grade(Grade::default()), Some(upper), None).unwrap();
+        held(&mut doc, inside, &|doc, step| doc.set_grade(inside, Grade { contrast: 15.0 * step, ..Grade::default() }, true, None).unwrap());
+        doc.activate(group);
+        held(&mut doc, group, &|doc, step| doc.set_setting(Setting::Opacity(1.0 - 0.2 * f64::from(step)), true).unwrap());
+        doc.activate(lower);
+        doc.stroke(&[[150.0, 130.0, 1.0], [160.0, 130.0, 1.0]], &Brush { size: 30.0, ..brush() }).unwrap();
+        whole(&mut doc);
+        doc.activate(group);
+        assert!(doc.ahead_due(), "a stroke beneath left the old picture made ahead");
     }
 
     /// The pixels of the text layer `id` that have ink.
