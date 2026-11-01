@@ -22,8 +22,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// The gray around the picture, as 0.10's approved views show it.
-pub(crate) const GROUND: Color32 = Color32::from_rgb(234, 236, 240);
+/// White around the picture, as the owner set on 2026-11-01.
+pub(crate) const GROUND: Color32 = Color32::WHITE;
+/// The picture's border, a dark grey, as the owner set the same day.
+const EDGE: Color32 = Color32::from_rgb(0x6E, 0x6E, 0x6E);
+/// The workspace's bar beside a picture: black, as the owner set the same
+/// day.
+pub(crate) const BAR: Color32 = Color32::BLACK;
 /// The squares drawn under transparency.
 const CHECK_LIGHT: Color32 = Color32::from_rgb(255, 255, 255);
 const CHECK_DARK: Color32 = Color32::from_rgb(224, 226, 230);
@@ -33,6 +38,8 @@ const CHECK: f32 = 8.0;
 const BOUNDS: Color32 = Color32::from_rgb(37, 99, 235);
 /// What lies outside the crop box is dimmed this much, as crop.png shows.
 const CROP_DIM: Color32 = Color32::from_black_alpha(110);
+/// The faint dark line under the crop box's white edge.
+const CROP_SHADE: Color32 = Color32::from_black_alpha(90);
 
 /// A raster tab zooms further than a drawing does, so single pixels can be
 /// worked on and large photographs can be seen whole.
@@ -611,7 +618,7 @@ impl Pointer {
             }
             None => checker(ui.ctx(), &painter, picture),
         }
-        widgets::outlined(&painter, picture.expand(1.0), 0.0, Color32::TRANSPARENT, widgets::RAIL);
+        widgets::outlined(&painter, picture.expand(1.0), 0.0, Color32::TRANSPARENT, EDGE);
 
         let lives = self.held.iter().map(|held| &held.live).chain(self.drag.iter().map(|drag| &drag.live));
         let mut crop = view.crop;
@@ -665,7 +672,9 @@ impl Pointer {
         if let (Some(text), Some(box_)) = (&view.text, text_box) {
             self.paint_text(ui, &painter, &camera, rect, text, box_);
         }
-        let hover = ui.input(|input| input.pointer.hover_pos()).filter(|pos| rect.contains(*pos) && self.pan.is_none());
+        // Only where the picture's view is uppermost: over the workspace's
+        // bar, the pointer is the bar's.
+        let hover = ui.input(|input| input.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(rect) && self.pan.is_none());
         if let RasterTool::Brush { size, .. } | RasterTool::Erase { size, .. } | RasterTool::Sampler { size, .. } = view.tool
             && let Some(pos) = hover
         {
@@ -1051,27 +1060,30 @@ fn paint_crop(painter: &egui::Painter, camera: &Camera, rect: Rect, picture: Rec
             painter.rect_filled(dim, 0.0, CROP_DIM);
         }
     }
-    let line = (1.0, Color32::WHITE);
     for third in [1.0 / 3.0, 2.0 / 3.0] {
         let x = frame.left() + frame.width() * third;
         let y = frame.top() + frame.height() * third;
         painter.line_segment([pos2(x, frame.top()), pos2(x, frame.bottom())], (1.0, Color32::from_white_alpha(190)));
         painter.line_segment([pos2(frame.left(), y), pos2(frame.right(), y)], (1.0, Color32::from_white_alpha(190)));
     }
-    painter.line_segment([frame.left_top(), frame.right_top()], line);
-    painter.line_segment([frame.right_top(), frame.right_bottom()], line);
-    painter.line_segment([frame.right_bottom(), frame.left_bottom()], line);
-    painter.line_segment([frame.left_bottom(), frame.left_top()], line);
+    // The edge and its corners, white over a faint dark line, so they show
+    // on a white picture and on the white around it.
     let arm = 14.0_f32.min(frame.width() / 2.0).min(frame.height() / 2.0);
-    let heavy = (3.0, Color32::WHITE);
-    for (corner, dx, dy) in [
+    let corners = [
         (frame.left_top(), 1.0, 1.0),
         (frame.right_top(), -1.0, 1.0),
         (frame.right_bottom(), -1.0, -1.0),
         (frame.left_bottom(), 1.0, -1.0),
-    ] {
-        painter.line_segment([corner, corner + vec2(dx * arm, 0.0)], heavy);
-        painter.line_segment([corner, corner + vec2(0.0, dy * arm)], heavy);
+    ];
+    for (width, color, heavy) in [(3.0, CROP_SHADE, 5.0), (1.0, Color32::WHITE, 3.0)] {
+        painter.line_segment([frame.left_top(), frame.right_top()], (width, color));
+        painter.line_segment([frame.right_top(), frame.right_bottom()], (width, color));
+        painter.line_segment([frame.right_bottom(), frame.left_bottom()], (width, color));
+        painter.line_segment([frame.left_bottom(), frame.left_top()], (width, color));
+        for (corner, dx, dy) in corners {
+            painter.line_segment([corner, corner + vec2(dx * arm, 0.0)], (heavy, color));
+            painter.line_segment([corner, corner + vec2(0.0, dy * arm)], (heavy, color));
+        }
     }
 }
 

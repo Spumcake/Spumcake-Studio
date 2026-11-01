@@ -1253,6 +1253,16 @@ fn a_sampler_shows_its_source_and_alt_click_sets_it() {
     assert!(crossed(&window, screen(&window, SOURCE)), "the cross is not at the source: {:?}", segments(&window, CROSS_DARK));
     let ring = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Circle(ring) if (ring.center - pointer).length() < 0.01 && (ring.radius - 20.0).abs() < 0.01));
     assert!(ring, "the brush's ring is not at the pointer");
+    // Over the workspace's bar, which lies on the picture's view, the
+    // pointer is the bar's, so no ring is drawn.
+    let bar = window.app.bar_rect.center();
+    window.events.push(egui::Event::PointerMoved(bar));
+    window.step();
+    window.step();
+    let ringed = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Circle(ring) if (ring.center - bar).length() < 0.01));
+    assert!(!ringed, "the brush's ring is drawn over the workspace's bar at {bar:?}");
+    window.events.push(egui::Event::PointerMoved(pointer));
+    window.step();
 
     let at = screen(&window, [8.0, 8.0]);
     hold(&mut window, egui::Modifiers::ALT);

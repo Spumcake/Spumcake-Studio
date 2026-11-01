@@ -765,7 +765,10 @@ impl eframe::App for HostWindow {
                 if workspace_open {
                     self.drag_panel_edge(ui, edge, full);
                 }
-                let (rect, pressed) = workspace_bar(ui, edge, workspace_open, full);
+                // Beside a picture, the bar is black.
+                let picture = workspace_open
+                    && tab.as_deref().is_some_and(|tab| self.apps.get(app).is_some_and(|started| started.running.declared.rasters.contains_key(tab)));
+                let (rect, pressed) = workspace_bar(ui, edge, workspace_open, full, if picture { crate::raster::BAR } else { BAR_GRAY });
                 self.bar_rect = rect;
                 bar_pressed = pressed;
             });
@@ -1958,7 +1961,7 @@ impl HostWindow {
 /// edge, so it is never taken for the conversation's scroll bar, as the
 /// owner set on 2026-10-29; closed, it sits just inside the window's right
 /// edge. Returns its rect and whether it was clicked.
-fn workspace_bar(ui: &egui::Ui, edge_x: f32, inside_workspace: bool, bounds: Rect) -> (Rect, bool) {
+fn workspace_bar(ui: &egui::Ui, edge_x: f32, inside_workspace: bool, bounds: Rect, color: Color32) -> (Rect, bool) {
     let x = if inside_workspace { edge_x + 8.0 } else { edge_x - 8.0 };
     let center = egui::pos2(x, bounds.center().y);
     let bar = Rect::from_center_size(center, egui::vec2(5.0, 56.0));
@@ -1972,7 +1975,7 @@ fn workspace_bar(ui: &egui::Ui, edge_x: f32, inside_workspace: bool, bounds: Rec
         .fade_in(false)
         .show(ui.ctx(), |ui| {
             let (rect, response) = ui.allocate_exact_size(hit.size(), egui::Sense::click_and_drag());
-            ui.painter().rect_filled(Rect::from_center_size(rect.center(), bar.size()), 3.0, BAR_GRAY);
+            ui.painter().rect_filled(Rect::from_center_size(rect.center(), bar.size()), 3.0, color);
             // The ordinary arrow over it, as the owner set on 2026-10-29. A
             // press that drifts, as a pen's does, still counts.
             let response = response.on_hover_cursor(egui::CursorIcon::Default);
