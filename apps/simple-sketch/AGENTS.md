@@ -1,6 +1,6 @@
 # Simple Sketch — sub-application
 
-Simple Sketch, the pressure-sensitive infinite-canvas sketching app, as an Inpainter sub-application.
+Simple Sketch, the pressure-sensitive infinite-canvas sketching app, as a Spumcake Studio sub-application.
 
 ## Rules for this sub-application
 

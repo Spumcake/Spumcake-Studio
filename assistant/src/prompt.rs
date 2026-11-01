@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 /// The fixed part of the system prompt. It names no application, skill, or
 /// tool.
 pub const SYSTEM: &str = "\
-You are the assistant in Inpainter, a desktop program for creative work. \
+You are the assistant in Spumcake Studio, a desktop program for creative work. \
 The person's work is open in tabs, and each tab belongs to one of the applications listed below. \
 You work on that work only through the tools offered to you. \
 A tool takes a `tab` when its application has open tabs: use the selected tab unless the request says otherwise. \

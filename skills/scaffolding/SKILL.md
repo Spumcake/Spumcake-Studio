@@ -1,6 +1,6 @@
 ---
 name: scaffolding
-description: Set up a new Inpainter sub-application the conventional way by copying apps/template — its own program and crate, a manifest the host finds, declarations through the protocol, and no dependency on the host. Use when a task needs a new sub-application, or brings an existing program into Inpainter as one. Sets up the skeleton only; the features come after.
+description: Set up a new Spumcake Studio sub-application the conventional way by copying apps/template — its own program and crate, a manifest the host finds, declarations through the protocol, and no dependency on the host. Use when a task needs a new sub-application, or brings an existing program into Inpainter as one. Sets up the skeleton only; the features come after.
 ---
 
 # Scaffold a sub-application
@@ -28,7 +28,7 @@ Check that `apps/<id>` does not exist yet.
 ## Check
 
 - `cargo build` succeeds.
-- `cargo run -p inpainter -- --app <id>` opens the Inpainter window with one tab labeled with the name, the empty toolbar, and only the shared components the sub-application declares. The host's common UI is all there: the tab strip with its menu button and plus, and the toolbar.
+- `cargo run -p inpainter -- --app <id>` opens the Studio window with one tab labeled with the name, the empty toolbar, and only the shared components the sub-application declares. The host's common UI is all there: the tab strip with its menu button and plus, and the toolbar.
 - With no host, `printf '{"type":"shutdown"}\n' | target/debug/<id>` prints the declaration, starting with `{"type":"hello","protocol":1}`, with a `skills` line before it ends with `{"type":"end"}`, and exits with status 0.
 - With no host, `printf '{"type":"shutdown"}\n' | target/debug/<id> --restore` prints the declaration with no `tab`, `contents`, or `panel` line. Then `printf '{"type":"open"}\n{"type":"shutdown"}\n' | target/debug/<id> --restore` prints, after the declaration, the tab's `contents` and `panel`, then a `tabs` line listing it.
 - With no host, `printf '{"type":"invoke","call":"c1","tab":"<id>","tool":"<id>__tab__rename_tab","input":{"label":"Renamed"},"group":"g1"}\n{"type":"shutdown"}\n' | target/debug/<id>` prints, after the declaration, a `tabs` line with the label Renamed, then `{"type":"result","call":"c1","ok":true,...}`.
@@ -68,7 +68,7 @@ The host sends these; a sub-application that declares no skills never receives `
 
   The host asks before a file from outside comes in, and sends only the imported copy's path.
 
-The host starts each sub-application with `--data-dir <folder>`, its own folder inside Inpainter's data folder, for its preferences and recovery files.
+The host starts each sub-application with `--data-dir <folder>`, its own folder inside Studio's data folder, for its preferences and recovery files.
 
 ## When the protocol cannot say something
 

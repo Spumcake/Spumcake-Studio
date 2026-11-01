@@ -252,7 +252,7 @@ fn logo_button(ui: &mut egui::Ui, center: Pos2, chat: &mut Chat, events: &mut Ve
         );
     }
     widgets::chevron(ui.painter(), chevron, MUTED, widgets::Scale(1.15));
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Inpainter"));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Spumcake Studio"));
 
     let waits = !chat.working;
     egui::Popup::menu(&response).show(|ui| {

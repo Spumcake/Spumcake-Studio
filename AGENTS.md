@@ -1,6 +1,6 @@
-# AGENTS.md — Inpainter Studio
+# AGENTS.md — Spumcake Studio
 
-Inpainter Studio is the open-source computer graphics (CG) authoring application behind the Inpainter platform. One host program draws a shared shell, and each kind of work is a separate sub-application that the host starts and draws through one protocol. This repository holds the code, and what Studio is lives in `docs/overview.md`. The product's mission and version documents live in the team repository, https://github.com/Spumcake/Inpainter-Team.
+Spumcake Studio is the open-source production software of Spumcake, an AI-native entertainment and technology company: a Codex for creatives, the computer graphics (CG) authoring application behind the Spumcake platform. Its earlier name was Inpainter, which the program, its app ID, the keyring entry, and the data folders still use until a version moves them; what a person reads on screen says Spumcake Studio. One host program draws a shared shell, and each kind of work is a separate sub-application that the host starts and draws through one protocol. This repository holds the code, and what Studio is lives in `docs/overview.md`. Spumcake's mission, which says how Studio fits with Spumcake's productions, community platform, and streaming platform, and Studio's version documents live in the team repository, https://github.com/Spumcake/spumcake-team.
 
 The stack is Rust, egui through eframe, and Iconoir icons.
 
@@ -40,9 +40,9 @@ These hold for every agent building Studio, in every session, as the owner set o
 
 Developer skills for working on this code are in `skills/`, one folder each with a `SKILL.md`. Read the one that matches the task before starting.
 
-- `skills/scaffolding/` — when a task creates a new sub-application, or brings an existing program into Inpainter as one.
+- `skills/scaffolding/` — when a task creates a new sub-application, or brings an existing program into Spumcake Studio as one.
 
-These are for agents developing Inpainter. They are not the assistant skills a sub-application declares to Inpainter's assistant through the protocol.
+These are for agents developing Spumcake Studio. They are not the assistant skills a sub-application declares to Studio's assistant through the protocol.
 
 ## Commands
 

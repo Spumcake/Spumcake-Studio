@@ -143,8 +143,8 @@ fn send(
         request = request.header("Authorization", &format!("Bearer {key}"));
     }
     request
-        .header("HTTP-Referer", "https://github.com/Spumcake/Inpainter")
-        .header("X-Title", "Inpainter")
+        .header("HTTP-Referer", "https://github.com/Spumcake/Spumcake-Studio")
+        .header("X-Title", "Spumcake Studio")
         .header("Content-Type", "application/json")
         .send(body.to_string())
 }
@@ -442,8 +442,8 @@ pub fn make_image(base_url: &str, key: &str, model: &str, prompt: &str) -> Resul
         request = request.header("Authorization", &format!("Bearer {key}"));
     }
     let response = request
-        .header("HTTP-Referer", "https://github.com/Spumcake/Inpainter")
-        .header("X-Title", "Inpainter")
+        .header("HTTP-Referer", "https://github.com/Spumcake/Spumcake-Studio")
+        .header("X-Title", "Spumcake Studio")
         .header("Content-Type", "application/json")
         .send(body.to_string());
     let reply = read(response)?;

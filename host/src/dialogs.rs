@@ -55,7 +55,7 @@ pub(crate) fn pick_folder(parent: &eframe::Frame) -> Option<PathBuf> {
 pub(crate) fn unavailable() {
     rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
-        .set_title("Inpainter")
+        .set_title("Spumcake Studio")
         .set_description("The data folder is not available.")
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
@@ -66,7 +66,7 @@ pub(crate) fn unavailable() {
 pub(crate) fn already_open() {
     rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Info)
-        .set_title("Inpainter")
+        .set_title("Spumcake Studio")
         .set_description(crate::workspace::ALREADY_OPEN)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();

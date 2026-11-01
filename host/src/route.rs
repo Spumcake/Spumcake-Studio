@@ -185,7 +185,7 @@ fn host_target(settings: &Settings) -> Target {
     skills.extend(your_skills(settings));
     Target {
         app: HOST_ID.into(),
-        name: "Inpainter".into(),
+        name: "Spumcake Studio".into(),
         tabs: Vec::new(),
         skills,
         tabless: true,

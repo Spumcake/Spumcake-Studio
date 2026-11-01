@@ -29,7 +29,7 @@ const SESSIONS_DIR: &str = "sessions";
 const LOCK_NAME: &str = "lock";
 
 /// What a second start should tell the person, when the lock is held.
-pub(crate) const ALREADY_OPEN: &str = "Inpainter is already open.";
+pub(crate) const ALREADY_OPEN: &str = "Spumcake Studio is already open.";
 
 /// The project file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,7 +258,7 @@ impl SessionFile {
 /// A line for a project file this host does not understand.
 pub(crate) fn version_line(version: u32) -> String {
     format!(
-        "It is version {version} of the project file, and this Inpainter reads version {VERSION}."
+        "It is version {version} of the project file, and this Spumcake Studio reads version {VERSION}."
     )
 }
 

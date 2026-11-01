@@ -1,6 +1,6 @@
-# Inpainter Studio — overview
+# Spumcake Studio — overview
 
-Inpainter Studio is the open-source computer graphics (CG) authoring application behind the Inpainter platform. It is where a person and an assistant shape the staged intermediates of a production together, before anything goes to a final render. It works fully on its own, with the person's own generation endpoints, such as OpenAI, fal.ai, or ComfyUI, or with the Inpainter platform.
+Spumcake Studio is the open-source production software of Spumcake, an AI-native entertainment and technology company: a Codex for creatives. It is a computer graphics (CG) authoring application for creative professionals, from indie artists up, that standardizes their production pipeline and helps enthusiasts and professionals make an animated pilot in months instead of years. It is where a person and an assistant shape the staged intermediates of a production together, before anything goes to a final render. It works fully on its own, with the person's own generation endpoints, such as OpenAI, fal.ai, or ComfyUI, or with the Spumcake platform, whose credits pay for generation. Spumcake's original media is fully open for remixing and editing in it.
 
 Studio is one host window that runs separate sub-applications, each its own program owning one kind of creative work. Simple Sketch, a pressure-sensitive infinite-canvas sketching app, is the first. The person meets Studio as they would an agentic tool such as Codex: it opens on a session, a conversation with the assistant inside a project, and the work of the sub-applications opens beside that conversation. Each sub-application provides skills that tell the assistant what it can do with its work, and strategies above them describe how to use several sub-applications together. Studio ships with general skills for creative work, and a person overrides any skill with a skill cell of their own. Mission Control is the workspace where a person gathers cells into notebooks: each notebook is a list of cells in one place, such as a brief's story, references, skills, and results, that the assistant draws on when it generates. A production can keep as many notebooks as it needs. The assistant discovers its capabilities from those skills, plans from them, and carries out the plan. Working with the assistant and working by hand are one seamless flow: every sub-application works fully without the assistant, and with it, the assistant amplifies what the person does by hand.
 
@@ -22,7 +22,7 @@ Studio is one host window that runs separate sub-applications, each its own prog
 
 ## References
 
-**Simple Sketch** 1.0.1 (at `887f6f4`) is part of Inpainter Studio. Its chrome is the host shell: the window, tab strip and new-tab button, menu button, toolbar, and the properties panel that opens from a tab at its edge, as the [interface description](https://github.com/Spumcake/Inpainter-Team/blob/master/INTERFACE.md) in the Inpainter-Team repository describes and shows. Its sketching is the Simple Sketch sub-application. Both were carried over from its code, not rewritten, and the shell is that chrome without what belongs only to sketching.
+**Simple Sketch** 1.0.1 (at `887f6f4`) is part of Spumcake Studio. Its chrome is the host shell: the window, tab strip and new-tab button, menu button, toolbar, and the properties panel that opens from a tab at its edge. Its sketching is the Simple Sketch sub-application. Both were carried over from its code, not rewritten, and the shell is that chrome without what belongs only to sketching.
 
 ## What it will never be
 
@@ -30,7 +30,7 @@ A monolith that tries to do everything in one program. A general-purpose AI chat
 
 ## Words we use
 
-- **Host:** Inpainter Studio itself: the shell, the protocol, and the assistant.
+- **Host:** Spumcake Studio itself: the shell, the protocol, and the assistant.
 - **Sub-application:** a separate program that owns one kind of creative work.
 - **Activity:** one piece of work, such as a sketch or a notebook, kept as a file in its project's folder and opened in its workspace.
 - **Declarations:** what a sub-application tells the host it offers, as data.
