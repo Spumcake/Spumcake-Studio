@@ -224,13 +224,12 @@ fn name_area(
         );
         let lifted = dragging.is_some_and(|id| id == node.id) && response.dragged();
         if !lifted {
-            ui.painter().text(
-                pos2(name_rect.left(), name_rect.center().y),
-                Align2::LEFT_CENTER,
-                &node.name,
-                name_font(),
-                TEXT,
-            );
+            // A long name stops with an ellipsis before the row's mark.
+            let mut job = egui::text::LayoutJob::simple_singleline(node.name.clone(), name_font(), TEXT);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(name_rect.width().max(1.0));
+            let galley = ui.painter().layout_job(job);
+            let top = name_rect.center().y - galley.size().y / 2.0;
+            ui.painter().galley(pos2(name_rect.left(), top), galley, TEXT);
         }
         match widgets::action_menu(&response, &node.menu) {
             Some(row) if row.rename => begin_rename(ui, target, &node.name),
@@ -301,8 +300,10 @@ const PICKED: Color32 = Color32::from_rgb(226, 236, 252);
 const PICKED_EDGE: Color32 = Color32::from_rgb(37, 99, 235);
 
 /// A row as the asset-editor mockup draws it: the eye, the layer's picture
-/// in a small box, its name, and its lock when it is locked or the pointer is
-/// over the row. A group shows its icon in the box and a disclosure arrow.
+/// in a small box, its name, its mark muted at the right, and its lock when
+/// it is locked or the pointer is over the row, before the mark. A group, or
+/// a layer with no picture, shows its icon in the box; a group also shows a
+/// disclosure arrow.
 #[allow(clippy::too_many_arguments)]
 fn picture_row(
     ui: &mut egui::Ui,
@@ -370,8 +371,22 @@ fn picture_row(
         None => toolbar::paint_icon(ui.painter(), frame.center(), &node.icon, 18.0, TEXT),
     }
     ui.painter().rect_stroke(frame, 4.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
-    let lock_x = rect.right() - 30.0;
-    let name_rect = Rect::from_min_max(pos2(frame.right() + 12.0, rect.top()), pos2(lock_x - 4.0, rect.bottom()));
+    // A mark, such as a mask's link, sits at the right, as layers.png shows.
+    let mut lock_x = rect.right() - 30.0;
+    if let Some(mark) = &node.mark {
+        toolbar::paint_icon(ui.painter(), pos2(rect.right() - 12.0, rect.center().y), mark, S.of(13.0), MUTED);
+        lock_x -= 18.0;
+    }
+    // The name runs to the lock when it shows, or else to the mark, or to
+    // the row's end.
+    let name_right = if node.locked || hovered {
+        lock_x - 4.0
+    } else if node.mark.is_some() {
+        rect.right() - 26.0
+    } else {
+        rect.right() - 6.0
+    };
+    let name_rect = Rect::from_min_max(pos2(frame.right() + 12.0, rect.top()), pos2(name_right, rect.bottom()));
     // The whole row between the eye and the lock takes the pointer, so the
     // picture is clicked and dragged as the name is.
     let area = Rect::from_min_max(pos2(frame.left(), rect.top()), name_rect.max);

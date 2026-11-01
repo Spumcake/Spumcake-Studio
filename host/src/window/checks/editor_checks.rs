@@ -235,3 +235,116 @@ fn a_gallery_adds_shows_renames_and_comes_back() {
     assert_eq!(back.items[0].name, "Beach");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+fn hold(window: &mut Window, modifiers: egui::Modifiers) {
+    window.events.push(egui::Event::ModifiersChanged(modifiers));
+}
+
+fn key(window: &mut Window, key: egui::Key, modifiers: egui::Modifiers) {
+    hold(window, modifiers);
+    window.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+    window.step();
+    window.events.push(egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+    hold(window, egui::Modifiers::NONE);
+    window.step();
+}
+
+/// Whether any pixel of the picture inside `rect` is dark.
+fn dark_inside(window: &Window, rect: [f64; 4]) -> bool {
+    let view = &display(window).expect("no raster tab").view;
+    let bytes = std::fs::read(&view.picture).expect("the picture file is missing");
+    let (width, height) = (view.width as usize, view.height as usize);
+    let x0 = (rect[0].max(0.0) as usize).min(width);
+    let y0 = (rect[1].max(0.0) as usize).min(height);
+    let x1 = ((rect[0] + rect[2]).ceil().max(0.0) as usize).min(width);
+    let y1 = ((rect[1] + rect[3]).ceil().max(0.0) as usize).min(height);
+    (y0..y1).any(|y| (x0..x1).any(|x| bytes[(y * width + x) * 4] < 128))
+}
+
+fn choose_tool(window: &mut Window, tool: &str, is: fn(&RasterTool) -> bool) {
+    window.app.run_action(&Action::with_arg("tool", json!({ "tool": tool })));
+    window.until(move |app| app.apps[0].running.declared.rasters.values().next().is_some_and(|display| is(&display.view.tool)));
+    // The tool's settings row may move the picture: it settles first.
+    for _ in 0..5 {
+        window.step();
+    }
+}
+
+/// Catches typing that never reaches the picture, or that Undo cannot take
+/// back: with the real Image Editor, the T tool's click on the picture
+/// starts a text, typed letters through the window's keyboard become dark
+/// pixels in its box, and Ctrl+Z takes back the typing, leaving the box
+/// white and the text gone.
+#[test]
+fn a_text_is_typed_on_the_picture_and_undone() {
+    let dir = scratch("editor-text");
+    let stand_in = StandIn::start(Vec::new());
+    let mut window = editor(&dir, &stand_in);
+    choose_tool(&mut window, "text", |tool| *tool == RasterTool::Text);
+    let at = screen(&window, [400.0, 300.0]);
+    window.events.push(egui::Event::PointerMoved(at));
+    window.step();
+    press(&mut window, at, egui::PointerButton::Primary);
+    window.until(|app| app.apps[0].running.declared.rasters.values().next().is_some_and(|display| display.view.text.is_some()));
+    window.events.push(egui::Event::Text("Hello there".into()));
+    window.step();
+    window.until(|app| {
+        app.apps[0].running.declared.rasters.values().next().and_then(|display| display.view.text.as_ref()).is_some_and(|text| text.rect[2] > 40.0)
+    });
+    let rect = display(&window).unwrap().view.text.as_ref().unwrap().rect;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dark_inside(&window, rect) && std::time::Instant::now() < deadline {
+        window.step();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(dark_inside(&window, rect), "the typed words are not on the picture");
+
+    key(&mut window, egui::Key::Z, egui::Modifiers::COMMAND);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while dark_inside(&window, rect) && std::time::Instant::now() < deadline {
+        window.step();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!dark_inside(&window, rect), "Ctrl+Z did not take back the typing");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Catches a stamp that only looks like one through the window: a black
+/// dot painted with the brush, Alt-clicked with the stamp, is copied where
+/// the stamp is then dragged.
+#[test]
+fn the_stamp_copies_what_alt_click_chose() {
+    let dir = scratch("editor-stamp");
+    let stand_in = StandIn::start(Vec::new());
+    let mut window = editor(&dir, &stand_in);
+    choose_tool(&mut window, "brush", |tool| matches!(tool, RasterTool::Brush { .. }));
+    let dot = screen(&window, [300.0, 300.0]);
+    window.events.push(egui::Event::PointerMoved(dot));
+    window.step();
+    press(&mut window, dot, egui::PointerButton::Primary);
+    until_pixel(&mut window, 300, 300, |pixel| pixel[0] < 64);
+    assert!(pixel(&window, 300, 300)[0] < 64, "the brush's dot was not painted");
+
+    choose_tool(&mut window, "stamp", |tool| matches!(tool, RasterTool::Sampler { .. }));
+    // The view may have moved with the new tool's settings row.
+    let dot = screen(&window, [300.0, 300.0]);
+    hold(&mut window, egui::Modifiers::ALT);
+    window.events.push(egui::Event::PointerMoved(dot));
+    window.step();
+    for pressed in [true, false] {
+        window.events.push(egui::Event::PointerButton { pos: dot, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::ALT });
+        window.step();
+    }
+    hold(&mut window, egui::Modifiers::NONE);
+    window.until(|app| {
+        app.apps[0].running.declared.rasters.values().next().is_some_and(|display| matches!(display.view.tool, RasterTool::Sampler { source: Some(_), .. }))
+    });
+    assert_eq!(pixel(&window, 900, 600), [255, 255, 255, 255]);
+    let target = screen(&window, [900.0, 600.0]);
+    window.events.push(egui::Event::PointerMoved(target));
+    window.step();
+    press(&mut window, target, egui::PointerButton::Primary);
+    until_pixel(&mut window, 900, 600, |pixel| pixel[0] < 64);
+    assert!(pixel(&window, 900, 600)[0] < 64, "the stamp did not copy the dot");
+    let _ = std::fs::remove_dir_all(dir);
+}

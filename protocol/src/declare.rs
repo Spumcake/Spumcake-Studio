@@ -191,7 +191,17 @@ pub enum ToolItem {
     Choice { caption: String, options: Vec<String>, selected: usize, set: Action },
     /// A caption and a number that can be typed, with its suffix. A change
     /// sends `set` with `{"value": n}`.
-    Number { caption: String, value: f64, min: f64, max: f64, suffix: String, set: Action },
+    Number {
+        caption: String,
+        value: f64,
+        min: f64,
+        max: f64,
+        suffix: String,
+        set: Action,
+        /// Drawn in place of the caption.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<String>,
+    },
     /// A button of words, bordered, or `dark` for the one that commits.
     Push {
         label: String,
@@ -281,6 +291,9 @@ pub enum RowKind {
         max: f64,
         percent: bool,
         places: u8,
+        /// The slider fills from its middle, for a value that goes either way.
+        #[serde(default, skip_serializing_if = "is_false")]
+        centered: bool,
     },
     Text,
     Choice {
@@ -298,7 +311,28 @@ pub enum RowKind {
         #[serde(default)]
         quick: Vec<[u8; 3]>,
     },
-    Curve,
+    /// A curve of points from 0 to 1, drawn as the monotone cubic Hermite
+    /// through them (Fritsch–Carlson). `histogram`, each 0 to 1, is drawn
+    /// faintly behind it, left to right; `square` draws the plot as tall
+    /// as it is wide, with a faint diagonal from corner to corner. `free`
+    /// lifts the pressure curve's limits: up to sixteen points, the end
+    /// points move inward and to any height, and any point to any height,
+    /// so a curve can fall as well as rise.
+    Curve {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        histogram: Vec<f32>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        square: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        free: bool,
+    },
+    /// A full-width row: an icon tile, the row's label, a muted `detail`
+    /// line, and a plus at the right. A click sends `action`.
+    Item { icon: String, detail: String, action: Action },
+    /// A bordered button holding the row's label. A click sends `action`.
+    Button { action: Action },
+    /// The row's label as muted words, wrapped to the panel.
+    Note,
     /// A row of icons that each turn on and off, such as a layer's locks.
     /// A click sends `property` with the icon's index as `Index`.
     Icons { icons: Vec<IconToggle> },
@@ -334,6 +368,9 @@ pub struct IconToggle {
 pub struct Section {
     pub title: String,
     pub rows: Vec<Row>,
+    /// Drawn before the title, which is then semibold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A palette color's row: in the outliner under its canvas, or in an
@@ -385,6 +422,9 @@ pub struct LayerRow {
     /// A small picture of the layer, drawn in place of its icon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<crate::Thumbnail>,
+    /// An icon drawn muted at the row's right, such as `link` for a mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<String>,
 }
 
 /// The outliner. Dragging a row among its siblings sends `reorder` with

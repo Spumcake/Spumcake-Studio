@@ -18,7 +18,7 @@ const TURNED_ICONS: &[(&str, &str, u8)] = &[("flip-vertical", "flip", 1)];
 
 /// Icons the Iconoir pack does not have, drawn by the toolbar in Iconoir's
 /// style instead of taken from the font.
-pub(crate) const DRAWN_ICONS: &[&str] = &["brush"];
+pub(crate) const DRAWN_ICONS: &[&str] = &["brush", "bandage", "stamp"];
 
 pub(crate) fn icon_spec(name: &str) -> IconSpec<'_> {
     if let Some((_, glyph, turns)) = TURNED_ICONS.iter().find(|(alias, _, _)| *alias == name) {

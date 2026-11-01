@@ -341,7 +341,8 @@ impl Server {
             | HostMessage::MoveCell { .. }
             | HostMessage::DeleteCell { .. }
             | HostMessage::ShowSource { .. }
-            | HostMessage::OpenAsNew { .. } => {}
+            | HostMessage::OpenAsNew { .. }
+            | HostMessage::RasterText { .. } => {}
         }
         if self.project.is_some() {
             self.write_due(Instant::now());

@@ -30,6 +30,9 @@ pub enum AppMessage {
     Tab { id: String, label: String },
     /// What the host draws in that tab's contents area.
     Contents { tab: String, kind: ContentsKind },
+    /// Words for the host to put on the system clipboard, such as a text's
+    /// selection copied.
+    Clipboard { text: String },
     /// This application edits files of these media types, such as
     /// `image/png`: the host may offer to edit one there, with `open_as_new`.
     Edits { media_types: Vec<String> },
@@ -190,6 +193,8 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// The keyboard, while a raster tab's text is being typed in.
+    RasterText { tab: String, input: TextInput },
     /// Open that file as new work, as `edits` declared: a new tab called
     /// `name`, never the file itself. `from` says what it came from.
     OpenAsNew {
@@ -423,7 +428,8 @@ impl Declaration {
             | AppMessage::RunCell { .. }
             | AppMessage::StopCell { .. }
             | AppMessage::Claimed { .. }
-            | AppMessage::Edits { .. } => Accept::More,
+            | AppMessage::Edits { .. }
+            | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
         }
     }
@@ -778,6 +784,10 @@ mod tests {
             cell: "c1".into(),
         });
         round_trip_app(AppMessage::Edits { media_types: vec!["image/png".into(), "image/jpeg".into()] });
+        round_trip_host(HostMessage::RasterText { tab: "1".into(), input: TextInput::Insert { text: "Hi".into() } });
+        round_trip_host(HostMessage::RasterText { tab: "1".into(), input: TextInput::Key { key: TextKey::Left, shift: true, word: false } });
+        round_trip_host(HostMessage::RasterText { tab: "1".into(), input: TextInput::Place { at: [1.0, 2.0], extend: true } });
+        round_trip_app(AppMessage::Clipboard { text: "Hi".into() });
         round_trip_host(HostMessage::OpenAsNew {
             path: "/p/images/a.png".into(),
             name: "A girl on a beach".into(),

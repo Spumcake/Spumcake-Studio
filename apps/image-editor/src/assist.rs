@@ -1,13 +1,16 @@
 //! The assistant's "Image Editor" skill: it sees the tab's pictures and
 //! their layers, arranges the gallery, and manages the shown picture's
-//! layers. Painting stays the person's. Each call goes through the same
-//! changes the filmstrip and the Layers page make, so it honours the same
-//! locks. Every layer call of one request is one undo step of the picture;
-//! each gallery call is one step of the strip's history.
+//! layers, texts, masks, and adjustments. Painting, cloning, healing, and
+//! moving pixels stay the person's. Each call goes through the same changes
+//! the filmstrip and the panel make, so it honours the same locks. Every
+//! layer call of one request is one undo step of the picture; each gallery
+//! call is one step of the strip's history.
 
 use crate::doc::Doc;
 use crate::files;
 use crate::gallery::Gallery;
+use crate::picture::{Curves, Grade, Kind};
+use crate::text::Style;
 use protocol::{AppMessage, Skill, Tool, ToolResult};
 use serde_json::{Value, json};
 
@@ -17,6 +20,24 @@ const LOOK_SIZE: u32 = 1024;
 pub fn skills() -> Vec<Skill> {
     let layer = json!({"type": "integer", "description": "The layer's or group's id, from list_layers."});
     let picture = json!({"type": "integer", "minimum": 0, "description": "The picture's position on the filmstrip, from list_pictures, 0 being the first."});
+    let style = json!({
+        "type": "object",
+        "description": "A text's style. Leave out any part to keep it as it is, or as the default for a new text: Inter, 96 px, black, left, line height 1.2.",
+        "properties": {
+            "face": {"type": "string", "enum": ["inter", "mono"]},
+            "size": {"type": "number", "description": "In picture pixels."},
+            "bold": {"type": "boolean"},
+            "italic": {"type": "boolean"},
+            "underline": {"type": "boolean"},
+            "color": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}, "minItems": 3, "maxItems": 3, "description": "[red, green, blue]."},
+            "align": {"type": "string", "enum": ["left", "center", "right", "justify"]},
+            "line_height": {"type": "number", "description": "A multiple of the face's own line spacing."},
+            "letter_spacing": {"type": "number", "description": "Pixels after every character but the last on a line."},
+            "all_caps": {"type": "boolean"},
+        },
+        "additionalProperties": false,
+    });
+    let points = json!({"type": "array", "items": {"type": "array", "items": {"type": "number", "minimum": 0, "maximum": 1}, "minItems": 2, "maxItems": 2}, "minItems": 2, "maxItems": 16, "description": "[input, output] pairs from 0 to 1, left to right; the curve runs smoothly through them."});
     let object = |properties: Value, required: &[&str]| {
         json!({
             "type": "object",
@@ -28,8 +49,8 @@ pub fn skills() -> Vec<Skill> {
     vec![Skill {
         id: "image".into(),
         name: "Image Editor".into(),
-        description: "See the pictures in an Image Editor tab's gallery, arrange them on its filmstrip (show, add, duplicate, rename, reorder, and remove pictures), and manage the shown picture's layers: add, rename, hide or show, reorder, and delete them.".into(),
-        instructions: "An Image Editor tab is a gallery: a filmstrip of pictures, one of them shown. Call list_pictures to see them in order, with which is shown; pictures are named by their position, 0 being the first, and positions change when pictures are added, moved, or removed. The layer tools act on the picture shown, so call show_picture first to work on another. Call list_layers first: it gives each layer's id, name, kind, and settings, top of the stack first, as the Layers panel shows them. Call look to see a picture itself. Positions in move_layer count from the top among the layer's siblings, 0 being the top. A layer whose lock is on refuses what it locks; renaming and deleting are always allowed. The gallery keeps at least one picture. You cannot paint; painting stays the person's.".into(),
+        description: "See the pictures in an Image Editor tab's gallery, arrange them on its filmstrip (show, add, duplicate, rename, reorder, and remove pictures), and manage the shown picture's layers: add, rename, hide or show, reorder, and delete them; add and set texts, masks, and Curves and Color Grade adjustments.".into(),
+        instructions: "An Image Editor tab is a gallery: a filmstrip of pictures, one of them shown. Call list_pictures to see them in order, with which is shown; pictures are named by their position, 0 being the first, and positions change when pictures are added, moved, or removed. The layer tools act on the picture shown, so call show_picture first to work on another. Call list_layers first: it gives each layer's id, name, kind (pixels, group, text, curves, or grade), and settings, with a text's words and style, a Curves layer's curves, a Color Grade's values, and a layer's mask, top of the stack first, as the Layers panel shows them. Call look to see a picture itself. Positions in move_layer count from the top among the layer's siblings, 0 being the top. A layer whose lock is on refuses what it locks; renaming and deleting are always allowed. The gallery keeps at least one picture. A mask belongs to its layer: white shows the layer and black hides it. An adjustment changes everything beneath it within its group. You cannot paint, clone, heal, or move pixels; those stay the person's.".into(),
         tools: vec![
             Tool {
                 name: "look".into(),
@@ -79,7 +100,7 @@ pub fn skills() -> Vec<Skill> {
             },
             Tool {
                 name: "list_layers".into(),
-                description: "List the picture's size and every layer and group, top first, with ids, names, visibility, blend mode, opacity, fill, and locks.".into(),
+                description: "List the picture's size and every layer and group, top first, with ids, names, kinds, visibility, blend mode, opacity, fill, locks, masks, and each text's, curve's, or grade's settings.".into(),
                 input: object(json!({}), &[]),
             },
             Tool {
@@ -115,6 +136,81 @@ pub fn skills() -> Vec<Skill> {
                 name: "delete_layer".into(),
                 description: "Delete a layer, or a group with everything in it. The picture keeps at least one layer.".into(),
                 input: object(json!({"layer": layer}), &["layer"]),
+            },
+            Tool {
+                name: "add_text".into(),
+                description: "Add a text layer that stays editable, its box's top-left corner at x, y in picture pixels, above the active layer. Returns its id.".into(),
+                input: object(
+                    json!({
+                        "text": {"type": "string", "description": "The words; a line break starts a new paragraph."},
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "width": {"type": "number", "description": "The box's width the lines wrap in. Leave out for one line per paragraph."},
+                        "style": style,
+                    }),
+                    &["text", "x", "y"],
+                ),
+            },
+            Tool {
+                name: "set_text".into(),
+                description: "Change a text layer's words, style, or box.".into(),
+                input: object(
+                    json!({
+                        "layer": layer,
+                        "text": {"type": "string"},
+                        "style": style,
+                        "box": {
+                            "type": "object",
+                            "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "width": {"type": ["number", "null"], "description": "The width the lines wrap in, or null for one line per paragraph."}},
+                            "required": ["x", "y"],
+                            "additionalProperties": false,
+                        },
+                    }),
+                    &["layer"],
+                ),
+            },
+            Tool {
+                name: "add_mask".into(),
+                description: "Put a white mask on a layer, text, adjustment, or group, which shows all of it. The person paints it to hide parts. Returns the mask's id.".into(),
+                input: object(json!({"layer": layer}), &["layer"]),
+            },
+            Tool {
+                name: "set_mask".into(),
+                description: "Set a layer's mask: its feather in pixels, and invert: true flips it once, white for black.".into(),
+                input: object(
+                    json!({"layer": layer, "feather": {"type": "number", "minimum": 0, "maximum": 250}, "invert": {"type": "boolean"}}),
+                    &["layer"],
+                ),
+            },
+            Tool {
+                name: "add_adjustment".into(),
+                description: "Add a Curves or Color Grade layer, which changes everything beneath it within its group, above a layer or above the active one. Returns its id.".into(),
+                input: object(
+                    json!({"kind": {"type": "string", "enum": ["curves", "grade"]}, "above": {"type": "integer", "description": "The layer to put it above. Leave out for above the active layer."}}),
+                    &["kind"],
+                ),
+            },
+            Tool {
+                name: "set_curves".into(),
+                description: "Set one curve of a Curves layer: rgb for all three channels, applied after each channel's own, or red, green, or blue.".into(),
+                input: object(
+                    json!({"layer": layer, "channel": {"type": "string", "enum": ["rgb", "red", "green", "blue"]}, "points": points}),
+                    &["layer", "channel", "points"],
+                ),
+            },
+            Tool {
+                name: "set_grade".into(),
+                description: "Set a Color Grade layer: exposure in stops from -3 to 3, and contrast, saturation, and temperature from -100 to 100, each 0 at rest. Leave out what stays.".into(),
+                input: object(
+                    json!({
+                        "layer": layer,
+                        "exposure": {"type": "number", "minimum": -3, "maximum": 3},
+                        "contrast": {"type": "number", "minimum": -100, "maximum": 100},
+                        "saturation": {"type": "number", "minimum": -100, "maximum": 100},
+                        "temperature": {"type": "number", "minimum": -100, "maximum": 100},
+                    }),
+                    &["layer"],
+                ),
             },
         ],
     }]
@@ -229,9 +325,95 @@ pub fn run_doc(doc: &mut Doc, tool: &str, input: &Value, group: &str) -> (Result
             (_, None) => Err("Give the new position as `to`.".into()),
         },
         "delete_layer" => layer().and_then(|id| doc.delete(id, by).map(|()| json!({"deleted": id}))),
+        "add_text" => {
+            let words = input.get("text").and_then(Value::as_str);
+            let (x, y) = (input.get("x").and_then(Value::as_f64), input.get("y").and_then(Value::as_f64));
+            match (words, x, y, style_of(input.get("style"), Style::default())) {
+                (Some(words), Some(x), Some(y), Ok(style)) if x.is_finite() && y.is_finite() => {
+                    let width = input.get("width").and_then(Value::as_f64).filter(|width| width.is_finite() && *width > 0.0).map(|width| width as f32);
+                    doc.add_text(words, [x.round() as i32, y.round() as i32], width, style, by).map(|id| json!({"id": id}))
+                }
+                (_, _, _, Err(reason)) => Err(reason),
+                (None, _, _, _) => Err("Give the words as `text`.".into()),
+                _ => Err("Give the box's corner as `x` and `y`.".into()),
+            }
+        }
+        "set_text" => layer().and_then(|id| {
+            let text = doc.picture.find(id).and_then(|node| node.text()).cloned().ok_or_else(|| format!("Layer {id} is not a text."))?;
+            let style = match input.get("style") {
+                Some(given) => Some(style_of(Some(given), text.style)?),
+                None => None,
+            };
+            let place = match input.get("box") {
+                Some(given) => {
+                    let (x, y) = (given.get("x").and_then(Value::as_f64), given.get("y").and_then(Value::as_f64));
+                    let (Some(x), Some(y)) = (x, y) else {
+                        return Err("Give the box's `x` and `y`.".into());
+                    };
+                    let width = match given.get("width") {
+                        Some(Value::Null) => None,
+                        Some(width) => Some(width.as_f64().filter(|width| width.is_finite() && *width > 0.0).ok_or("Give the box's `width` as a positive number, or null.")? as f32),
+                        None => text.width,
+                    };
+                    Some(([x.round() as i32, y.round() as i32], width))
+                }
+                None => None,
+            };
+            doc.set_text(id, input.get("text").and_then(Value::as_str), style, place, by).map(|()| json!({"id": id}))
+        }),
+        "add_mask" => layer().and_then(|id| doc.add_mask(id, by).map(|mask| json!({"layer": id, "mask": mask}))),
+        "set_mask" => layer().and_then(|id| {
+            if let Some(feather) = input.get("feather").and_then(Value::as_f64) {
+                doc.set_feather(id, feather, false, by)?;
+            }
+            if input.get("invert").and_then(Value::as_bool) == Some(true) {
+                doc.invert_mask(id, by)?;
+            }
+            Ok(json!({"layer": id}))
+        }),
+        "add_adjustment" => {
+            let kind = match input.get("kind").and_then(Value::as_str) {
+                Some("curves") => Ok(Kind::Curves(Curves::default())),
+                Some("grade") => Ok(Kind::Grade(Grade::default())),
+                _ => Err(String::from("Give `kind` as curves or grade.")),
+            };
+            kind.and_then(|kind| doc.add_adjustment(kind, input.get("above").and_then(Value::as_u64), by).map(|id| json!({"id": id})))
+        }
+        "set_curves" => layer().and_then(|id| {
+            let channel = input.get("channel").and_then(Value::as_str).and_then(|name| Curves::CHANNELS.iter().position(|own| *own == name)).ok_or("Give `channel` as rgb, red, green, or blue.")?;
+            let points: Vec<[f64; 2]> = serde_json::from_value(input.get("points").cloned().unwrap_or(Value::Null)).map_err(|_| "Give `points` as [input, output] pairs.")?;
+            doc.set_curve(id, channel, &points, false, by).map(|()| json!({"id": id}))
+        }),
+        "set_grade" => layer().and_then(|id| {
+            let mut grade = match doc.picture.find(id).map(|node| &node.kind) {
+                Some(Kind::Grade(grade)) => *grade,
+                _ => return Err(format!("Layer {id} is not a Color Grade layer.")),
+            };
+            let value = |key: &str| input.get(key).and_then(Value::as_f64).map(|value| value as f32);
+            grade.exposure = value("exposure").unwrap_or(grade.exposure);
+            grade.contrast = value("contrast").unwrap_or(grade.contrast);
+            grade.saturation = value("saturation").unwrap_or(grade.saturation);
+            grade.temperature = value("temperature").unwrap_or(grade.temperature);
+            doc.set_grade(id, grade, false, by).map(|()| json!({"id": id}))
+        }),
         other => Err(format!("The Image Editor has no tool {other}.")),
     };
     (outcome, None)
+}
+
+/// A style given as JSON over `base`: what it leaves out stays.
+fn style_of(given: Option<&Value>, base: Style) -> Result<Style, String> {
+    let Some(given) = given else {
+        return Ok(base);
+    };
+    let Some(given) = given.as_object() else {
+        return Err("Give `style` as an object.".into());
+    };
+    let mut merged = serde_json::to_value(base).map_err(|error| error.to_string())?;
+    for (key, value) in given {
+        merged[key] = value.clone();
+    }
+    serde_json::from_value::<Style>(merged).map(Style::clamped).map_err(|error| format!("The style is not one: {error}."))
 }
 
 /// Every layer, top first, as the Layers panel lists them.
@@ -243,7 +425,13 @@ fn list(doc: &Doc) -> Value {
             let mut row = json!({
                 "id": node.id,
                 "name": node.name,
-                "kind": if node.is_group() { "group" } else { "layer" },
+                "kind": match &node.kind {
+                    _ if node.is_group() => "group",
+                    Kind::Pixels => "pixels",
+                    Kind::Text(_) => "text",
+                    Kind::Curves(_) => "curves",
+                    Kind::Grade(_) => "grade",
+                },
                 "parent": parent,
                 "position": count - 1 - index,
                 "visible": node.visible,
@@ -260,7 +448,18 @@ fn list(doc: &Doc) -> Value {
             if !node.is_group() {
                 row["fill"] = json!((node.fill * 100.0).round());
                 row["offset"] = json!(node.offset);
-                row["size"] = json!(size);
+                if node.has_pixels() {
+                    row["size"] = json!(size);
+                }
+            }
+            match &node.kind {
+                Kind::Text(text) if !node.is_group() => row["text"] = json!({"words": text.words, "style": text.style, "width": text.width}),
+                Kind::Curves(curves) if !node.is_group() => row["curves"] = json!(curves),
+                Kind::Grade(grade) if !node.is_group() => row["grade"] = json!(grade),
+                _ => {}
+            }
+            if let Some(mask) = &node.mask {
+                row["mask"] = json!({"id": mask.id, "name": mask.name, "feather": mask.feather, "visible": mask.visible});
             }
             out.push(row);
             if let Some(children) = &node.children {
@@ -344,7 +543,7 @@ mod tests {
             [
                 "look", "list_pictures", "show_picture", "add_picture", "duplicate_picture", "rename_picture",
                 "move_picture", "remove_picture", "list_layers", "add_layer", "rename_layer", "set_visible", "move_layer",
-                "delete_layer",
+                "delete_layer", "add_text", "set_text", "add_mask", "set_mask", "add_adjustment", "set_curves", "set_grade",
             ]
         );
     }
@@ -390,5 +589,48 @@ mod tests {
         assert_eq!(gallery.frames[0].name, "Untitled Asset");
         // The last picture stays.
         assert!(call(&mut gallery, "remove_picture", json!({"picture": 0})).is_err());
+    }
+
+    /// Catches the assistant's text, mask, and adjustment tools doing
+    /// nothing, more than one step a request, or a list that does not say
+    /// what each layer is: it adds a text and sets its words and style, puts
+    /// a mask on a layer and inverts it, adds Curves and Color Grade and
+    /// sets them, and list_layers reports every kind with its settings.
+    #[test]
+    fn the_assistant_adds_and_sets_texts_masks_and_adjustments() {
+        let mut doc = Doc::new(Picture::blank(64, 36));
+        let background = doc.active.unwrap();
+        let before = doc.composite().to_vec();
+        let text = call(&mut doc, "add_text", json!({"text": "Hi", "x": 4, "y": 4, "style": {"size": 20, "color": [200, 0, 0]}}), "r1").unwrap()["id"].as_u64().unwrap();
+        call(&mut doc, "set_text", json!({"layer": text, "text": "Hello", "style": {"bold": true}, "box": {"x": 2, "y": 3, "width": 40}}), "r1").unwrap();
+        assert!(doc.undo() && !doc.can_undo() && doc.picture.find(text).is_none(), "one request took more than one step");
+        assert!(doc.redo());
+        let node = doc.picture.find(text).unwrap();
+        let words = node.text().unwrap();
+        assert_eq!((words.words.as_str(), words.style.bold, words.style.size, words.width), ("Hello", true, 20.0, Some(40.0)));
+        assert_eq!(node.offset, [2, 3]);
+        assert_ne!(doc.composite(), &before[..], "the text drew nothing");
+
+        let mask = call(&mut doc, "add_mask", json!({"layer": background}), "r2").unwrap()["mask"].as_u64().unwrap();
+        call(&mut doc, "set_mask", json!({"layer": background, "feather": 4, "invert": true}), "r2").unwrap();
+        assert_eq!(doc.picture.find(background).unwrap().mask.as_ref().map(|mask| mask.feather), Some(4.0));
+        assert_eq!(doc.picture.pixels[&mask].data[0], 0, "invert did not flip the mask");
+        let curves = call(&mut doc, "add_adjustment", json!({"kind": "curves", "above": background}), "r3").unwrap()["id"].as_u64().unwrap();
+        call(&mut doc, "set_curves", json!({"layer": curves, "channel": "red", "points": [[0, 0], [0.5, 0.8], [1, 1]]}), "r3").unwrap();
+        let grade = call(&mut doc, "add_adjustment", json!({"kind": "grade"}), "r4").unwrap()["id"].as_u64().unwrap();
+        call(&mut doc, "set_grade", json!({"layer": grade, "saturation": -100, "exposure": 9}), "r4").unwrap();
+        assert!(call(&mut doc, "set_grade", json!({"layer": curves, "contrast": 10}), "r5").is_err());
+        assert!(call(&mut doc, "set_curves", json!({"layer": curves, "channel": "red", "points": [[0.5, 0.5]]}), "r5").is_err());
+
+        let listed = call(&mut doc, "list_layers", json!({}), "r6").unwrap();
+        let layers = listed["layers"].as_array().unwrap();
+        let kinds: Vec<&str> = layers.iter().map(|row| row["kind"].as_str().unwrap()).collect();
+        // The grade went above the active layer, the curves.
+        assert_eq!(kinds, ["text", "grade", "curves", "pixels"]);
+        assert_eq!(layers[1]["grade"]["saturation"], -100.0);
+        assert_eq!(layers[1]["grade"]["exposure"], 3.0, "exposure was not kept within its range");
+        assert_eq!(layers[0]["text"]["words"], "Hello");
+        assert_eq!(layers[2]["curves"]["red"][1], json!([0.5, 0.8]));
+        assert_eq!(layers[3]["mask"]["id"], mask);
     }
 }

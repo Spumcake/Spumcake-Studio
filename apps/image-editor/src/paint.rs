@@ -1,5 +1,6 @@
-//! The brush, the eraser, and the selection: what a stroke covers, how it
-//! changes a layer's pixels, and the selection's coverage mask and outline.
+//! The brush, the eraser, the clone stamp, the healing brush, and the
+//! selection: what a stroke covers, how it changes a layer's pixels, and the
+//! selection's coverage mask and outline.
 
 use crate::picture::{Pixels, Rect};
 
@@ -215,6 +216,188 @@ fn to_byte(value: f32) -> u8 {
     (value * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
+/// Paints a colour of its own at each pixel of `area`, in picture pixels,
+/// into a layer whose pixels sit at `offset`: straight RGBA from 0 to 1,
+/// mixed in by the coverage there, the selection, `opacity`, and the
+/// colour's own alpha. The clone stamp and the healing brush paint so.
+/// Returns the part of the layer that changed, in its own pixels.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_colours(
+    pixels: &mut Pixels,
+    offset: [i32; 2],
+    area: Rect,
+    coverage: &[f32],
+    colours: &[Option<[f32; 4]>],
+    selection: Option<&Mask>,
+    opacity: f32,
+    keep_alpha: bool,
+) -> Option<Rect> {
+    let layer = Rect::new(offset[0], offset[1], pixels.width as i32, pixels.height as i32);
+    let shared = area.intersect(&layer);
+    let mut changed = Rect::new(0, 0, 0, 0);
+    for y in shared.y..shared.bottom() {
+        for x in shared.x..shared.right() {
+            let cell = (y - area.y) as usize * area.w as usize + (x - area.x) as usize;
+            let Some(colour) = colours[cell] else {
+                continue;
+            };
+            let mut amount = coverage[cell] * opacity * colour[3];
+            if let Some(mask) = selection {
+                amount *= f32::from(mask.at(x, y)) / 255.0;
+            }
+            if amount <= 0.0 {
+                continue;
+            }
+            let at = ((y - layer.y) as usize * pixels.width as usize + (x - layer.x) as usize) * 4;
+            let before = [pixels.data[at], pixels.data[at + 1], pixels.data[at + 2], pixels.data[at + 3]];
+            let below = f32::from(before[3]) / 255.0;
+            let mut after = before;
+            if keep_alpha {
+                for channel in 0..3 {
+                    let old = f32::from(before[channel]) / 255.0;
+                    after[channel] = to_byte(old + (colour[channel] - old) * amount);
+                }
+            } else {
+                let alpha = amount + below * (1.0 - amount);
+                for channel in 0..3 {
+                    let old = f32::from(before[channel]) / 255.0;
+                    after[channel] = to_byte((colour[channel] * amount + old * below * (1.0 - amount)) / alpha);
+                }
+                after[3] = to_byte(alpha);
+            }
+            if after != before {
+                pixels.data[at..at + 4].copy_from_slice(&after);
+                changed = changed.union(&Rect::new(x - layer.x, y - layer.y, 1, 1));
+            }
+        }
+    }
+    (!changed.is_empty()).then_some(changed)
+}
+
+/// What the clone stamp copies at each pixel of `area`: the picture
+/// `source`, straight RGBA8 the picture's size, at the pixel plus `offset`.
+pub fn stamp_colours(source: &[u8], width: u32, height: u32, area: Rect, offset: [i32; 2]) -> Vec<Option<[f32; 4]>> {
+    let mut out = Vec::with_capacity(area.w as usize * area.h as usize);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            out.push(sample(source, width, height, x + offset[0], y + offset[1]));
+        }
+    }
+    out
+}
+
+fn sample(source: &[u8], width: u32, height: u32, x: i32, y: i32) -> Option<[f32; 4]> {
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+        return None;
+    }
+    let at = (y as usize * width as usize + x as usize) * 4;
+    if source[at + 3] == 0 {
+        return None;
+    }
+    Some([0, 1, 2, 3].map(|channel| f32::from(source[at + channel]) / 255.0))
+}
+
+/// Sums over a part of the picture, each pixel's colour times a weight and
+/// the weight, so the average over any box inside it costs four reads.
+struct Sums {
+    rect: Rect,
+    data: Vec<[f64; 4]>,
+}
+
+impl Sums {
+    /// Over `rect`, each pixel weighted by `weight(x, y)` and its alpha.
+    /// Colours are summed as bytes and scaled once, in `mean`.
+    fn new(source: &[u8], width: u32, rect: Rect, weight: impl Fn(i32, i32) -> f64) -> Self {
+        let columns = rect.w as usize + 1;
+        let mut data = vec![[0.0f64; 4]; columns * (rect.h as usize + 1)];
+        for y in 0..rect.h as usize {
+            let mut row = [0.0f64; 4];
+            let py = rect.y + y as i32;
+            let line = py as usize * width as usize;
+            for x in 0..rect.w as usize {
+                let px = rect.x + x as i32;
+                let at = (line + px as usize) * 4;
+                let w = weight(px, py) * f64::from(source[at + 3]);
+                row[0] += w * f64::from(source[at]);
+                row[1] += w * f64::from(source[at + 1]);
+                row[2] += w * f64::from(source[at + 2]);
+                row[3] += w;
+                let above = data[y * columns + x + 1];
+                data[(y + 1) * columns + x + 1] = [above[0] + row[0], above[1] + row[1], above[2] + row[2], above[3] + row[3]];
+            }
+        }
+        Self { rect, data }
+    }
+
+    /// The weighted average colour within `radius` of a pixel, and the
+    /// weight it rests on.
+    fn mean(&self, x: i32, y: i32, radius: i32) -> ([f64; 3], f64) {
+        let x0 = (x - radius).max(self.rect.x) - self.rect.x;
+        let y0 = (y - radius).max(self.rect.y) - self.rect.y;
+        let x1 = (x + radius + 1).min(self.rect.right()) - self.rect.x;
+        let y1 = (y + radius + 1).min(self.rect.bottom()) - self.rect.y;
+        if x1 <= x0 || y1 <= y0 {
+            return ([0.0; 3], 0.0);
+        }
+        let columns = self.rect.w as usize + 1;
+        let get = |x: i32, y: i32| self.data[y as usize * columns + x as usize];
+        let (a, b, c, d) = (get(x1, y1), get(x0, y1), get(x1, y0), get(x0, y0));
+        let sum = [0, 1, 2, 3].map(|channel| a[channel] - b[channel] - c[channel] + d[channel]);
+        if sum[3] <= 1e-9 {
+            return ([0.0; 3], 0.0);
+        }
+        // The colours were summed as bytes, the weight with alpha as a byte.
+        let scale = 255.0 * sum[3];
+        ([sum[0] / scale, sum[1] / scale, sum[2] / scale], sum[3] / 255.0)
+    }
+}
+
+/// What the healing brush paints at each pixel `p` of `area`: the source's
+/// detail and the light around where it lands,
+/// `src(p + o) − blur(src)(p + o) + light(p)`, where `light` is the
+/// destination's blur with the stroke's own pixels left out, as `coverage`
+/// (the picture's size, row by row) says how much each is the stroke's.
+/// Both blurs are normalised boxes of `radius`; the source and the
+/// destination are the same picture, as the stroke began.
+pub fn heal_colours(source: &[u8], width: u32, height: u32, coverage: &[f32], area: Rect, offset: [i32; 2], radius: i32) -> Vec<Option<[f32; 4]>> {
+    let radius = radius.max(1);
+    let picture = Rect::new(0, 0, width as i32, height as i32);
+    let grown = |rect: Rect| Rect::new(rect.x - radius, rect.y - radius, rect.w + 2 * radius, rect.h + 2 * radius).intersect(&picture);
+    let around = grown(area);
+    let moved = grown(Rect::new(area.x + offset[0], area.y + offset[1], area.w, area.h));
+    let outside = |x: i32, y: i32| 1.0 - f64::from(coverage[y as usize * width as usize + x as usize]).clamp(0.0, 1.0);
+    let light = (!around.is_empty()).then(|| Sums::new(source, width, around, outside));
+    let blurred = (!moved.is_empty()).then(|| Sums::new(source, width, moved, |_, _| 1.0));
+    let mut out = Vec::with_capacity(area.w as usize * area.h as usize);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            // A pixel the stroke does not reach is not painted, so its
+            // colour is not worked out.
+            if outside(x, y) >= 1.0 {
+                out.push(None);
+                continue;
+            }
+            let (sx, sy) = (x + offset[0], y + offset[1]);
+            let Some(own) = sample(source, width, height, sx, sy) else {
+                out.push(None);
+                continue;
+            };
+            let (detail_base, _) = blurred.as_ref().map_or(([0.0; 3], 0.0), |sums| sums.mean(sx, sy, radius));
+            let (lit, weight) = light.as_ref().map_or(([0.0; 3], 0.0), |sums| sums.mean(x, y, radius));
+            // With the whole window under the stroke, nothing is left to
+            // light it, and the source's own light stays.
+            let lit = if weight > 0.5 { lit } else { detail_base };
+            let mut colour = own;
+            for channel in 0..3 {
+                colour[channel] = (f64::from(own[channel]) - detail_base[channel] + lit[channel]).clamp(0.0, 1.0) as f32;
+            }
+            out.push(Some(colour));
+        }
+    }
+    out
+}
+
+
 /// How a new selection shape joins the one there is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Combine {
@@ -355,6 +538,32 @@ impl Mask {
         for value in &mut self.data {
             *value = 255 - *value;
         }
+    }
+
+    /// The smallest rectangle holding every selected pixel.
+    pub fn bounds(&self) -> Rect {
+        let width = self.width as usize;
+        let mut rect = Rect::new(0, 0, 0, 0);
+        for (y, row) in self.data.chunks(width.max(1)).enumerate() {
+            let Some(first) = row.iter().position(|value| *value > 0) else {
+                continue;
+            };
+            let last = row.iter().rposition(|value| *value > 0).unwrap_or(first);
+            rect = rect.union(&Rect::new(first as i32, y as i32, (last - first + 1) as i32, 1));
+        }
+        rect
+    }
+
+    /// The same selection moved by `dx` and `dy` pixels, as moving the
+    /// selected pixels moves it.
+    pub fn shifted(&self, dx: i32, dy: i32) -> Mask {
+        let mut out = Mask::empty(self.width, self.height);
+        for y in 0..self.height as i32 {
+            for x in 0..self.width as i32 {
+                out.data[y as usize * self.width as usize + x as usize] = self.at(x - dx, y - dy);
+            }
+        }
+        out
     }
 
     /// A part of the mask, as crop keeps it.

@@ -2,7 +2,8 @@
 //! raw pictures the host reads. The `.ipx` format is described in this
 //! application's AGENTS.md.
 
-use crate::picture::{Blend, Locks, Node, Picture, Pixels};
+use crate::picture::{Blend, Curves, Grade, Kind, LayerMask, Locks, Node, Picture, Pixels};
+use crate::text::Text;
 use image::{ImageDecoder, ImageEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,8 +11,9 @@ use std::path::{Path, PathBuf};
 
 /// The first line of every `.ipx` file.
 const MAGIC: &[u8] = b"IPX1\n";
-/// Version 2 holds a gallery of pictures; version 1, from 0.10, one.
-const VERSION: u32 = 2;
+/// Version 3 keeps each layer's kind and settings, and masks; version 2,
+/// from 0.11, a gallery of pictures; version 1, from 0.10, one.
+const VERSION: u32 = 3;
 /// The largest picture read or made: about 100 megapixels, so a damaged or
 /// huge file cannot take all the memory.
 const MOST_PIXELS: u64 = 100_000_000;
@@ -34,8 +36,8 @@ struct HeaderV1 {
     layers: Vec<NodeFile>,
 }
 
-/// Version 2's header: every picture of the gallery, in order, and which
-/// is shown.
+/// Version 2's and 3's header: every picture of the gallery, in order, and
+/// which is shown.
 #[derive(Serialize, Deserialize)]
 struct Header {
     version: u32,
@@ -76,6 +78,36 @@ struct NodeFile {
     /// A group's layers, bottom to top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     children: Option<Vec<NodeFile>>,
+    /// From version 3: `pixels`, `group`, `text`, `curves`, or `grade`.
+    /// Version 2's nodes have none, and are pixels or groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    /// A text's words, style, and box width; its box's corner is `offset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<Text>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    curves: Option<Curves>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grade: Option<Grade>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mask: Option<MaskFile>,
+}
+
+/// A node's mask: its own id and settings, and its grey PNG among the bytes
+/// after the header line.
+#[derive(Serialize, Deserialize)]
+struct MaskFile {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    feather: f32,
+    #[serde(default = "shown")]
+    visible: bool,
+    png: [u64; 2],
+}
+
+fn shown() -> bool {
+    true
 }
 
 /// One picture read from a file: its name, layers, and active layer.
@@ -97,8 +129,9 @@ pub type Png = std::sync::Arc<Vec<u8>>;
 
 /// Encoded layers kept by layer id and the fingerprint of the pixels they
 /// were made from, so a file written again encodes only the layers that
-/// changed; and the document's edits when they were made, so a picture
-/// unchanged since is not looked at again.
+/// changed; and the document's pixel generation when they were made, so a
+/// picture whose pixels are unchanged since, such as after a change to an
+/// adjustment or a layer's settings only, is not copied or looked at again.
 #[derive(Default)]
 pub struct PngCache {
     layers: HashMap<u64, (u64, Png)>,
@@ -109,7 +142,7 @@ impl PngCache {
     /// Keeps what a write encoded for this picture.
     pub fn keep(&mut self, encoded: Encoded) {
         self.layers = encoded.layers;
-        self.made_at = Some(encoded.edits);
+        self.made_at = Some(encoded.generation);
     }
 }
 
@@ -132,16 +165,17 @@ pub struct Snapshot {
     active: Option<u64>,
     nodes: Vec<Node>,
     layers: HashMap<u64, LayerSnapshot>,
-    edits: u64,
+    generation: u64,
 }
 
 impl Snapshot {
-    /// The picture as it is: its layers' pixels copied, but only when the
-    /// document changed since its layers were encoded.
-    pub fn take(uid: u64, name: &str, picture: &Picture, active: Option<u64>, edits: u64, cache: &PngCache) -> Self {
-        let unchanged = cache.made_at == Some(edits);
+    /// The picture as it is: its layers' pixels copied, but only when its
+    /// pixels changed since they were encoded, as `generation`, the
+    /// document's, says.
+    pub fn take(uid: u64, name: &str, picture: &Picture, active: Option<u64>, generation: u64, cache: &PngCache) -> Self {
+        let unchanged = cache.made_at == Some(generation);
         let mut layers = HashMap::new();
-        for id in picture.all_layers() {
+        for id in picture.buffers() {
             let kept = cache.layers.get(&id).cloned();
             let pixels = if unchanged && kept.is_some() { None } else { picture.pixels.get(&id).cloned() };
             layers.insert(id, LayerSnapshot { pixels, kept });
@@ -154,15 +188,23 @@ impl Snapshot {
             active,
             nodes: picture.nodes.clone(),
             layers,
-            edits,
+            generation,
         }
+    }
+}
+
+#[cfg(test)]
+impl Snapshot {
+    /// How many buffers' pixels it copied.
+    pub fn copied(&self) -> usize {
+        self.layers.values().filter(|layer| layer.pixels.is_some()).count()
     }
 }
 
 /// What a write encoded for one picture, for its cache.
 pub struct Encoded {
     pub uid: u64,
-    edits: u64,
+    generation: u64,
     layers: HashMap<u64, (u64, Png)>,
 }
 
@@ -192,7 +234,7 @@ pub fn write_ipx(path: &Path, pictures: Vec<Snapshot>, shown: usize, source: Opt
             layers.push(node_file(node, &picture.layers, &mut made, &mut blobs)?);
         }
         files.push(PictureFile { name: picture.name, width: picture.width, height: picture.height, active: picture.active, layers });
-        encoded.push(Encoded { uid: picture.uid, edits: picture.edits, layers: made });
+        encoded.push(Encoded { uid: picture.uid, generation: picture.generation, layers: made });
     }
     let header = Header { version: VERSION, shown, pictures: files, source };
     let mut bytes = MAGIC.to_vec();
@@ -201,6 +243,28 @@ pub fn write_ipx(path: &Path, pictures: Vec<Snapshot>, shown: usize, source: Opt
     bytes.extend(blobs);
     write_atomic(path, &bytes)?;
     Ok(encoded)
+}
+
+/// One buffer's PNG, encoded again only when its pixels changed: a layer's
+/// in colour, a mask's in grey.
+fn buffer_png(id: u64, grey: bool, layers: &HashMap<u64, LayerSnapshot>, made: &mut HashMap<u64, (u64, Png)>, blobs: &mut Vec<u8>) -> Result<[u64; 2], String> {
+    let layer = layers.get(&id).ok_or_else(|| format!("Layer {id} has no pixels."))?;
+    let (print, png) = match (&layer.pixels, &layer.kept) {
+        (None, Some(kept)) => kept.clone(),
+        (Some(pixels), kept) => {
+            let print = fingerprint(pixels);
+            match kept {
+                Some((kept, png)) if *kept == print => (print, png.clone()),
+                _ if grey => (print, Png::new(encode_grey(pixels)?)),
+                _ => (print, Png::new(encode_png(pixels.width, pixels.height, &pixels.data)?)),
+            }
+        }
+        (None, None) => return Err(format!("Layer {id} has no pixels.")),
+    };
+    let place = [blobs.len() as u64, png.len() as u64];
+    blobs.extend_from_slice(&png);
+    made.insert(id, (print, png));
+    Ok(place)
 }
 
 fn node_file(node: &Node, layers: &HashMap<u64, LayerSnapshot>, made: &mut HashMap<u64, (u64, Png)>, blobs: &mut Vec<u8>) -> Result<NodeFile, String> {
@@ -215,31 +279,41 @@ fn node_file(node: &Node, layers: &HashMap<u64, LayerSnapshot>, made: &mut HashM
         offset: node.offset,
         png: None,
         children: None,
+        kind: None,
+        text: None,
+        curves: None,
+        grade: None,
+        mask: None,
     };
-    match &node.children {
-        Some(children) => {
+    if let Some(mask) = &node.mask {
+        let png = buffer_png(mask.id, true, layers, made, blobs)?;
+        file.mask = Some(MaskFile { id: mask.id, name: mask.name.clone(), feather: mask.feather, visible: mask.visible, png });
+    }
+    match (&node.children, &node.kind) {
+        (Some(children), _) => {
             let mut inner = Vec::new();
             for child in children {
                 inner.push(node_file(child, layers, made, blobs)?);
             }
             file.children = Some(inner);
+            file.kind = Some("group".into());
         }
-        None => {
-            let layer = layers.get(&node.id).ok_or_else(|| format!("Layer {} has no pixels.", node.id))?;
-            let (print, png) = match (&layer.pixels, &layer.kept) {
-                (None, Some(kept)) => kept.clone(),
-                (Some(pixels), kept) => {
-                    let print = fingerprint(pixels);
-                    match kept {
-                        Some((kept, png)) if *kept == print => (print, png.clone()),
-                        _ => (print, Png::new(encode_png(pixels.width, pixels.height, &pixels.data)?)),
-                    }
-                }
-                (None, None) => return Err(format!("Layer {} has no pixels.", node.id)),
-            };
-            file.png = Some([blobs.len() as u64, png.len() as u64]);
-            blobs.extend_from_slice(&png);
-            made.insert(node.id, (print, png));
+        (None, Kind::Pixels) => {
+            file.png = Some(buffer_png(node.id, false, layers, made, blobs)?);
+            file.kind = Some("pixels".into());
+        }
+        // A text keeps its words, style, and box, not its pixels.
+        (None, Kind::Text(text)) => {
+            file.text = Some(text.clone());
+            file.kind = Some("text".into());
+        }
+        (None, Kind::Curves(curves)) => {
+            file.curves = Some(curves.clone());
+            file.kind = Some("curves".into());
+        }
+        (None, Kind::Grade(grade)) => {
+            file.grade = Some(*grade);
+            file.kind = Some("grade".into());
         }
     }
     Ok(file)
@@ -274,7 +348,7 @@ pub fn read_ipx(path: &Path) -> Result<Read, String> {
             let file = PictureFile { name, width: header.width, height: header.height, active: header.active, layers: header.layers };
             Ok(Read { pictures: vec![read_picture(file, blobs)?], shown: 0, source: None })
         }
-        VERSION => {
+        2 | VERSION => {
             let header: Header = serde_json::from_slice(line).map_err(|_| damaged())?;
             let mut pictures = Vec::new();
             for file in header.pictures {
@@ -287,7 +361,7 @@ pub fn read_ipx(path: &Path) -> Result<Read, String> {
             Ok(Read { pictures, shown, source: header.source })
         }
         other => Err(format!(
-            "It is version {other} of an image file, and this Image Editor reads versions 1 and {VERSION}."
+            "It is version {other} of an image file, and this Image Editor reads versions 1 to {VERSION}."
         )),
     }
 }
@@ -297,13 +371,7 @@ fn read_picture(file: PictureFile, blobs: &[u8]) -> Result<ReadPicture, String> 
     if file.width == 0 || file.height == 0 || u64::from(file.width) * u64::from(file.height) > MOST_PIXELS {
         return Err(damaged());
     }
-    let mut picture = Picture {
-        width: file.width,
-        height: file.height,
-        nodes: Vec::new(),
-        pixels: HashMap::new(),
-        next_id: 1,
-    };
+    let mut picture = Picture::empty(file.width, file.height);
     for layer in file.layers {
         let node = read_node(layer, blobs, &mut picture)?;
         picture.nodes.push(node);
@@ -311,6 +379,7 @@ fn read_picture(file: PictureFile, blobs: &[u8]) -> Result<ReadPicture, String> 
     if picture.nodes.is_empty() {
         return Err(damaged());
     }
+    picture.sync_texts();
     let active = file.active.filter(|id| picture.find(*id).is_some());
     Ok(ReadPicture { name: file.name, picture, active })
 }
@@ -328,6 +397,44 @@ fn read_node(file: NodeFile, blobs: &[u8], picture: &mut Picture) -> Result<Node
     node.fill = file.fill.clamp(0.0, 1.0);
     node.locks = file.locks;
     node.offset = file.offset;
+    let read_png = |place: [u64; 2]| -> Result<Pixels, String> {
+        let start = usize::try_from(place[0]).map_err(|_| damaged())?;
+        let length = usize::try_from(place[1]).map_err(|_| damaged())?;
+        let png = blobs.get(start..start.checked_add(length).ok_or_else(damaged)?).ok_or_else(damaged)?;
+        decode(png, Some(image::ImageFormat::Png))
+    };
+    if let Some(mask) = file.mask {
+        if picture.find(mask.id).is_some() || picture.pixels.contains_key(&mask.id) {
+            return Err(damaged());
+        }
+        picture.next_id = picture.next_id.max(mask.id + 1);
+        picture.pixels.insert(mask.id, read_png(mask.png)?);
+        let feather = if mask.feather.is_finite() { mask.feather.clamp(0.0, 250.0) } else { 0.0 };
+        node.mask = Some(LayerMask { id: mask.id, name: mask.name, feather, visible: mask.visible });
+    }
+    match file.kind.as_deref() {
+        Some("text") => {
+            let mut text = file.text.ok_or_else(damaged)?;
+            text.style = text.style.clamped();
+            node.kind = Kind::Text(text);
+            return Ok(node);
+        }
+        Some("curves") => {
+            let mut curves = file.curves.ok_or_else(damaged)?;
+            for channel in 0..4 {
+                let points = crate::picture::clean_points(curves.channel(channel)).ok_or_else(damaged)?;
+                *curves.channel_mut(channel) = points;
+            }
+            node.kind = Kind::Curves(curves);
+            return Ok(node);
+        }
+        Some("grade") => {
+            node.kind = Kind::Grade(file.grade.ok_or_else(damaged)?.clamped());
+            return Ok(node);
+        }
+        None | Some("pixels" | "group") => {}
+        Some(_) => return Err(damaged()),
+    }
     match (file.children, file.png) {
         (Some(children), _) => {
             let mut inner = Vec::new();
@@ -336,11 +443,8 @@ fn read_node(file: NodeFile, blobs: &[u8], picture: &mut Picture) -> Result<Node
             }
             node.children = Some(inner);
         }
-        (None, Some([start, length])) => {
-            let start = usize::try_from(start).map_err(|_| damaged())?;
-            let length = usize::try_from(length).map_err(|_| damaged())?;
-            let png = blobs.get(start..start.checked_add(length).ok_or_else(damaged)?).ok_or_else(damaged)?;
-            picture.pixels.insert(file.id, decode(png, Some(image::ImageFormat::Png))?);
+        (None, Some(place)) => {
+            picture.pixels.insert(file.id, read_png(place)?);
         }
         (None, None) => return Err(damaged()),
     }
@@ -391,6 +495,16 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out)
         .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|error| error.to_string())?;
+    Ok(out)
+}
+
+/// A mask's grey pixels as a grey PNG.
+fn encode_grey(pixels: &Pixels) -> Result<Vec<u8>, String> {
+    let grey: Vec<u8> = pixels.data.chunks_exact(4).map(crate::picture::grey).collect();
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(&grey, pixels.width, pixels.height, image::ExtendedColorType::L8)
         .map_err(|error| error.to_string())?;
     Ok(out)
 }
@@ -662,5 +776,110 @@ mod tests {
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// Catches a file that loses a kind of layer, or keeps a text's pixels
+    /// rather than its words: a picture with a pixel layer and its
+    /// feathered mask, a text, and Curves and Color Grade layers in a group
+    /// with a mask of its own, written and read back, has the same tree
+    /// and the same composite, and its header keeps the words.
+    #[test]
+    fn every_kind_of_layer_round_trips() {
+        use crate::picture::{Curves, Grade, LayerMask};
+        use crate::text::{Style, Text};
+        let dir = scratch("kinds");
+        let mut picture = Picture::blank(60, 40);
+        let background = picture.nodes[0].id;
+        let mut speckles = Pixels::filled(60, 40, [200, 120, 40, 255]);
+        for (index, byte) in speckles.data.iter_mut().enumerate().filter(|(index, _)| index % 4 == 1) {
+            *byte = (index * 13 % 256) as u8;
+        }
+        picture.pixels.insert(background, speckles);
+        let mask = picture.take_id();
+        let mut grey = Pixels::filled(60, 40, [255, 255, 255, 255]);
+        for pixel in grey.data.chunks_exact_mut(4).take(800) {
+            pixel.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        picture.pixels.insert(mask, grey);
+        picture.nodes[0].mask = Some(LayerMask { id: mask, name: "Subject Mask".into(), feather: 3.0, visible: true });
+        let text = picture.take_id();
+        let words = Text { words: "Golden hour".into(), style: Style { size: 14.0, bold: true, color: [250, 250, 250], ..Style::default() }, width: Some(50.0) };
+        let mut node = Node::of_kind(text, "Golden hour", Kind::Text(words));
+        node.offset = [4, 6];
+        let curves = picture.take_id();
+        let mut bent = Curves::default();
+        bent.red = vec![[0.0, 0.1], [0.4, 0.6], [1.0, 0.9]];
+        let grade = picture.take_id();
+        let group = picture.take_id();
+        let group_mask = picture.take_id();
+        picture.pixels.insert(group_mask, Pixels::filled(60, 40, [128, 128, 128, 255]));
+        let mut folder = Node::group(
+            group,
+            "Looks",
+            vec![
+                Node::of_kind(curves, "Curves", Kind::Curves(bent)),
+                Node::of_kind(grade, "Color Grade", Kind::Grade(Grade { exposure: 0.5, contrast: 12.0, saturation: -30.0, temperature: 20.0 })),
+            ],
+        );
+        folder.mask = Some(LayerMask { id: group_mask, name: "Looks Mask".into(), feather: 0.0, visible: true });
+        picture.nodes.push(node);
+        picture.nodes.push(folder);
+        let composite = picture.composite();
+        let path = dir.join("Kinds.ipx");
+        let snapshot = Snapshot::take(1, "Kinds", &picture, Some(text), 0, &PngCache::default());
+        assert!(!snapshot.layers.contains_key(&text), "the text's pixels were taken for the file");
+        write_ipx(&path, vec![snapshot], 0, None).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let line = &bytes[MAGIC.len()..MAGIC.len() + bytes[MAGIC.len()..].iter().position(|byte| *byte == b'\n').unwrap()];
+        let header: serde_json::Value = serde_json::from_slice(line).unwrap();
+        assert_eq!(header["version"], 3);
+        let saved = &header["pictures"][0]["layers"][1];
+        assert_eq!(saved["kind"], "text");
+        assert_eq!(saved["text"]["words"], "Golden hour");
+        assert!(saved.get("png").is_none(), "a text kept its pixels");
+        let mut read = read_ipx(&path).unwrap();
+        let back = &mut read.pictures[0].picture;
+        assert_eq!(back.nodes, picture.nodes);
+        assert_eq!(back.composite(), composite, "the picture read back looks different");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Catches a 0.12 file that no longer opens: version 2, whose nodes have
+    /// no kind, opens with its layers as pixels and groups.
+    #[test]
+    fn a_version_2_file_still_opens() {
+        let dir = scratch("v2");
+        let mut picture = Picture::blank(6, 4);
+        let id = picture.nodes[0].id;
+        picture.pixels.insert(id, Pixels::filled(6, 4, [9, 8, 7, 255]));
+        let inner = picture.take_id();
+        picture.pixels.insert(inner, Pixels::filled(2, 2, [1, 2, 3, 255]));
+        picture.nodes.push(Node::group(picture.next_id, "Folder", vec![Node::layer(inner, "Inner")]));
+        picture.next_id += 1;
+        let path = dir.join("Old.ipx");
+        write_ipx(&path, vec![Snapshot::take(1, "Old", &picture, Some(id), 0, &PngCache::default())], 0, None).unwrap();
+        // The same file as 0.12 wrote it: version 2, and no kinds.
+        let bytes = std::fs::read(&path).unwrap();
+        let end = MAGIC.len() + bytes[MAGIC.len()..].iter().position(|byte| *byte == b'\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_slice(&bytes[MAGIC.len()..end]).unwrap();
+        header["version"] = serde_json::json!(2);
+        fn strip(layers: &mut serde_json::Value) {
+            for layer in layers.as_array_mut().unwrap() {
+                layer.as_object_mut().unwrap().remove("kind");
+                if let Some(children) = layer.get_mut("children") {
+                    strip(children);
+                }
+            }
+        }
+        strip(&mut header["pictures"][0]["layers"]);
+        let mut old = MAGIC.to_vec();
+        old.extend(serde_json::to_vec(&header).unwrap());
+        old.extend_from_slice(&bytes[end..]);
+        assert!(!String::from_utf8_lossy(&old[..end + 40]).contains("\"kind\""));
+        std::fs::write(&path, old).unwrap();
+        let read = read_ipx(&path).unwrap();
+        assert_eq!(read.pictures[0].picture.nodes, picture.nodes);
+        assert_eq!(read.pictures[0].picture.pixels, picture.pixels);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

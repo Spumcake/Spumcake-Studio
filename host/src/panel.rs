@@ -95,7 +95,7 @@ pub(crate) fn show(ui: &mut egui::Ui, properties: Option<&Properties>, rect: Rec
             if !properties.pages.is_empty() {
                 page_tabs(ui, &properties.pages, &mut sent);
                 for (index, section) in properties.sections.iter().enumerate() {
-                    draw_section(ui, &section.title, &section.rows, &properties.finish, index == 0, &mut sent);
+                    draw_section(ui, section, &properties.finish, index == 0, &mut sent);
                 }
                 if let Some(layers) = &properties.layers {
                     if !properties.sections.is_empty() {
@@ -120,8 +120,7 @@ pub(crate) fn show(ui: &mut egui::Ui, properties: Option<&Properties>, rect: Rec
             for (index, section) in properties.sections.iter().enumerate() {
                 draw_section(
                     ui,
-                    &section.title,
-                    &section.rows,
+                    section,
                     &properties.finish,
                     index == 0 && properties.back.is_none(),
                     &mut sent,
@@ -315,15 +314,16 @@ fn back_row(ui: &mut egui::Ui, label: &str, action: &Action, sent: &mut Vec<Sent
 }
 
 /// A section: a hairline above every section but the first, its heading,
+/// with its icon before it when it has one, as the Properties views show,
 /// then its rows.
 fn draw_section(
     ui: &mut egui::Ui,
-    title: &str,
-    rows: &[Row],
+    section: &protocol::Section,
     finish: &Action,
     first: bool,
     sent: &mut Vec<Sent>,
 ) {
+    let (title, rows) = (section.title.as_str(), &section.rows);
     let width = ui.available_width();
     if first {
         ui.add_space(TOP);
@@ -339,8 +339,13 @@ fn draw_section(
         Rect::from_min_size(ui.cursor().min, vec2(width, 0.0))
     } else {
         let (heading, _) = ui.allocate_exact_size(vec2(width, HEADING), Sense::hover());
+        let mut left = heading.left();
+        if let Some(icon) = &section.icon {
+            crate::toolbar::paint_icon(ui.painter(), pos2(left + S.of(9.0), heading.center().y), icon, S.of(18.0), TEXT);
+            left += S.of(26.0);
+        }
         ui.painter().text(
-            heading.left_center(),
+            pos2(left, heading.center().y),
             Align2::LEFT_CENTER,
             title,
             widgets::semibold(S.of(15.0)),
@@ -407,8 +412,25 @@ fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>
         crate::outliner::palette(ui, *owner, colors, sort.as_ref(), flags, sent);
         return;
     }
+    match &desc.kind {
+        RowKind::Item { icon, detail, action } => {
+            item_row(ui, &desc.prop, &desc.label, icon, detail, action, sent);
+            return;
+        }
+        RowKind::Button { action } => {
+            button_row(ui, &desc.prop, &desc.label, action, sent);
+            return;
+        }
+        RowKind::Note => {
+            note_row(ui, &desc.label);
+            return;
+        }
+        _ => {}
+    }
     let height = match desc.kind {
-        RowKind::Curve => CURVE_H,
+        // A square plot is as tall as it is wide.
+        RowKind::Curve { square: true, .. } => width,
+        RowKind::Curve { .. } => CURVE_H,
         _ => ROW,
     };
     let (row, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
@@ -435,6 +457,7 @@ fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>
                 max,
                 percent,
                 places,
+                centered,
             },
             PropValue::Number(number),
         ) => {
@@ -445,8 +468,7 @@ fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>
                 control,
                 id,
                 (*min, *max),
-                *percent,
-                *places,
+                (*percent, *places, *centered),
                 number,
                 false,
                 finish,
@@ -475,6 +497,7 @@ fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>
                 max,
                 percent,
                 places,
+                centered,
             },
             PropValue::Mixed,
         ) => {
@@ -486,8 +509,7 @@ fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>
                 control,
                 id,
                 (*min, *max),
-                *percent,
-                *places,
+                (*percent, *places, *centered),
                 mid,
                 true,
                 finish,
@@ -601,11 +623,82 @@ fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>
                 set(sent, prop, PropValue::Index(chosen as u8));
             }
         }
-        (RowKind::Curve, PropValue::Curve(points)) => {
-            curve_editor(ui, prop, row, id, &points, finish, sent);
+        (RowKind::Curve { histogram, square, free }, PropValue::Curve(points)) => {
+            let plot = Plot { histogram, square: *square, free: *free };
+            curve_editor(ui, prop, row, id, &points, &plot, finish, sent);
         }
         _ => {}
     }
+}
+
+/// An item's height, its icon tile's side, and its words, as
+/// adjustments.png shows them.
+const ITEM_H: f32 = S.of(56.0);
+const ITEM_TILE: f32 = S.of(34.0);
+const ITEM_TEXT: f32 = S.of(16.0);
+const ITEM_DETAIL: f32 = S.of(12.5);
+const BUTTON_PAD: f32 = S.of(24.0);
+const NOTE_TEXT: f32 = S.of(13.0);
+
+/// A full-width row, as adjustments.png shows: an icon tile, the label, a
+/// muted detail line under it, and a plus at the right. Pale while the
+/// pointer is over it; a click sends `action`.
+fn item_row(ui: &mut egui::Ui, prop: &Value, label: &str, icon: &str, detail: &str, action: &Action, sent: &mut Vec<Sent>) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, ITEM_H), Sense::hover());
+    let response = ui.interact(rect, ui.id().with(("panel-item", prop.to_string(), label)), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, S.of(8.0), widgets::SELECTED);
+    }
+    let tile = Rect::from_min_size(pos2(rect.left() + S.of(10.0), rect.center().y - ITEM_TILE / 2.0), vec2(ITEM_TILE, ITEM_TILE));
+    widgets::outlined(ui.painter(), tile, S.of(6.0), Color32::WHITE, BORDER);
+    crate::toolbar::paint_icon(ui.painter(), tile.center(), icon, S.of(18.0), TEXT);
+    let x = tile.right() + S.of(14.0);
+    let plus = S.of(22.0);
+    let room = (rect.right() - plus - S.of(6.0) - x).max(0.0);
+    let name = ui.painter().layout(label.to_string(), egui::FontId::proportional(ITEM_TEXT), TEXT, room);
+    let more = ui.painter().layout(detail.to_string(), egui::FontId::proportional(ITEM_DETAIL), MUTED, room);
+    let gap = S.of(3.0);
+    let top = rect.center().y - (name.size().y + gap + more.size().y) / 2.0;
+    let below = top + name.size().y + gap;
+    ui.painter().galley(pos2(x, top), name, TEXT);
+    ui.painter().galley(pos2(x, below), more, MUTED);
+    crate::toolbar::paint_icon(ui.painter(), pos2(rect.right() - plus / 2.0 - S.of(4.0), rect.center().y), "plus", S.of(16.0), MUTED);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    if response.clicked() {
+        sent.push(Sent::Run(action.clone()));
+    }
+}
+
+/// A bordered button holding the label, such as Reset or Invert, as the
+/// Properties views show. A click sends `action`.
+fn button_row(ui: &mut egui::Ui, prop: &Value, label: &str, action: &Action, sent: &mut Vec<Sent>) {
+    let width = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(width, ROW), Sense::hover());
+    let words = ui.painter().layout_no_wrap(label.to_string(), widgets::body(S), TEXT);
+    let button = Rect::from_min_size(row.min, vec2((words.size().x + 2.0 * BUTTON_PAD).min(width), row.height()));
+    let response = ui.interact(button, ui.id().with(("panel-button", prop.to_string(), label)), Sense::click());
+    let fill = if response.hovered() { widgets::SELECTED } else { Color32::WHITE };
+    widgets::outlined(ui.painter(), button, S.of(6.0), fill, BORDER);
+    ui.painter().galley(button.center() - words.size() / 2.0, words, TEXT);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    if response.clicked() {
+        sent.push(Sent::Run(action.clone()));
+    }
+}
+
+/// The label as muted words, wrapped to the panel, as properties-mask.png
+/// shows its note.
+fn note_row(ui: &mut egui::Ui, label: &str) {
+    let width = ui.available_width();
+    let mut job = egui::text::LayoutJob::single_section(
+        label.to_string(),
+        egui::TextFormat { font_id: egui::FontId::proportional(NOTE_TEXT), color: MUTED, line_height: Some(S.of(20.0)), ..Default::default() },
+    );
+    job.wrap.max_width = width;
+    let words = ui.painter().layout_job(job);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, words.size().y), Sense::hover());
+    ui.painter().galley(rect.min, words, MUTED);
 }
 
 /// A choice cell's content: a cap sample or a line sample.
@@ -639,6 +732,8 @@ fn paint_option(
     }
 }
 
+/// A slider and a typed number. `centered` fills the slider from its
+/// middle, for a value that goes either way.
 #[allow(clippy::too_many_arguments)]
 fn number_row(
     ui: &mut egui::Ui,
@@ -646,8 +741,7 @@ fn number_row(
     control: Rect,
     id: egui::Id,
     (min, max): (f64, f64),
-    percent: bool,
-    places: u8,
+    (percent, places, centered): (bool, u8, bool),
     value: f64,
     mixed: bool,
     finish: &Action,
@@ -660,7 +754,6 @@ fn number_row(
     };
     let shown_min = (min * scale).round() as i32;
     let shown_max = (max * scale).round() as i32;
-    let shown = (value * scale).round() as i32;
     let track = Rect::from_min_max(
         control.min,
         pos2(control.right() - NUMBER_W - GAP, control.bottom()),
@@ -669,18 +762,25 @@ fn number_row(
 
     let span = (max - min).max(f64::EPSILON);
     let t = ((value - min) / span) as f32;
-    let (response, asked) = widgets::slider(ui, track, id.with("slider"), t);
-    if let Some(asked) = asked {
-        let next = min + f64::from(asked) * span;
-        let next = (next * scale).round() / scale;
-        if (next - value).abs() > f64::EPSILON {
-            preview(sent, prop, PropValue::Number(next));
-        }
+    let (response, asked) = if centered {
+        widgets::slider_from(ui, track, id.with("slider"), t, 0.5)
+    } else {
+        widgets::slider(ui, track, id.with("slider"), t)
+    };
+    // Only a change from what this hold last sent is sent: the value shown
+    // is the application's, and lags while its replies queue.
+    let asked = asked.map(|asked| ((min + f64::from(asked) * span) * scale).round() / scale);
+    let echoed = (value * scale).round() / scale;
+    if let Some(next) = widgets::unsent(ui, id.with("slider"), asked, &echoed) {
+        preview(sent, prop, PropValue::Number(next));
     }
     if response.drag_stopped() || response.clicked() {
         sent.push(Sent::Run(finish.clone()));
     }
 
+    // While the slider is held, its field shows what it asked for.
+    let value = widgets::held(ui, id.with("slider")).unwrap_or(value);
+    let shown = (value * scale).round() as i32;
     let suffix = if percent { "%" } else { "" };
     let edit = widgets::number_field(
         ui,
@@ -691,6 +791,7 @@ fn number_row(
         suffix,
         mixed,
         places,
+        centered,
         S,
     );
     match (edit.value, edit.finished) {
@@ -876,28 +977,93 @@ fn color_well(
     }
 }
 
+/// How a curve row is drawn and edited, as its kind declares.
+struct Plot<'a> {
+    /// Drawn faintly behind the curve, left to right, each 0 to 1.
+    histogram: &'a [f32],
+    /// As tall as it is wide, with a faint diagonal, as
+    /// properties-curves.png shows.
+    square: bool,
+    /// Up to sixteen points, end points that move inward, and any point to
+    /// any height.
+    free: bool,
+}
+
+/// The most points a curve holds: the pressure curve's five, or sixteen
+/// for a free one.
+fn most_points(free: bool) -> usize {
+    if free { 16 } else { 5 }
+}
+
+/// The faint bars behind a curve.
+const HISTOGRAM: Color32 = Color32::from_rgb(226, 228, 232);
+const DIAGONAL: Color32 = Color32::from_rgb(206, 210, 216);
+
+/// A point held on a curve, and the curve as the drag has made it. The
+/// drag moves the point on this, and the plot shows it, rather than the
+/// application's echo, which lags while its replies queue.
+#[derive(Clone)]
+struct CurveHold {
+    index: usize,
+    points: Vec<(f64, f64)>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn curve_editor(
     ui: &mut egui::Ui,
     prop: &Value,
     rect: Rect,
     id: egui::Id,
     points: &[(f64, f64)],
+    look: &Plot,
     finish: &Action,
     sent: &mut Vec<Sent>,
 ) {
     let response = ui.interact(rect, id, Sense::click_and_drag());
-    ui.painter().rect(
-        rect,
-        S.of(8.0),
-        PLOT,
-        Stroke::new(1.0, BORDER),
-        egui::StrokeKind::Inside,
-    );
-    let plot = rect.shrink(S.of(16.0));
+    let hold = if response.dragged() {
+        ui.data(|data| data.get_temp::<CurveHold>(response.id))
+    } else {
+        ui.data_mut(|data| data.remove::<CurveHold>(response.id));
+        None
+    };
+    let points = hold.as_ref().map_or(points, |hold| hold.points.as_slice());
+    let plot = if look.square {
+        // The plot fills the row, with room around it for the end points.
+        let plot = rect.shrink(S.of(6.0));
+        ui.painter().rect(plot, 0.0, Color32::WHITE, Stroke::new(1.0, BORDER), egui::StrokeKind::Outside);
+        for step in 1..4 {
+            let x = plot.left() + plot.width() * (step as f32 / 4.0);
+            ui.painter().vline(x, plot.top()..=plot.bottom(), Stroke::new(1.0, PLOT_GRID));
+        }
+        plot
+    } else {
+        ui.painter().rect(
+            rect,
+            S.of(8.0),
+            PLOT,
+            Stroke::new(1.0, BORDER),
+            egui::StrokeKind::Inside,
+        );
+        rect.shrink(S.of(16.0))
+    };
+    let bins = look.histogram.len();
+    for (index, height) in look.histogram.iter().enumerate() {
+        let height = height.clamp(0.0, 1.0);
+        if height <= 0.0 {
+            continue;
+        }
+        let left = plot.left() + plot.width() * index as f32 / bins as f32;
+        let right = plot.left() + plot.width() * (index + 1) as f32 / bins as f32;
+        let bar = Rect::from_min_max(pos2(left, plot.bottom() - height * plot.height()), pos2(right, plot.bottom()));
+        ui.painter().rect_filled(bar, 0.0, HISTOGRAM);
+    }
     for step in 1..4 {
         let y = plot.bottom() - plot.height() * (step as f32 / 4.0);
         ui.painter()
             .hline(plot.left()..=plot.right(), y, Stroke::new(1.0, PLOT_GRID));
+    }
+    if look.square {
+        ui.painter().line_segment([plot.left_bottom(), plot.right_top()], Stroke::new(1.0, DIAGONAL));
     }
     let curve: Vec<CurvePoint> = points
         .iter()
@@ -926,36 +1092,57 @@ fn curve_editor(
     {
         let mut next = points.to_vec();
         next.remove(index);
-        pin_curve_ends(&mut next);
+        if !look.free {
+            pin_curve_ends(&mut next);
+        }
         set(sent, prop, PropValue::Curve(next));
         return;
     }
     if response.drag_started()
         && let Some(index) = hit
     {
-        ui.data_mut(|data| data.insert_temp(response.id, index));
-    }
-    if response.dragged()
-        && let Some(index) = ui.data(|data| data.get_temp::<usize>(response.id))
+        ui.data_mut(|data| data.insert_temp(response.id, CurveHold { index, points: points.to_vec() }));
+    } else if response.drag_started()
+        && points.len() < most_points(look.free)
         && let Some(pos) = pointer
-        && index < points.len()
     {
+        // A drag that starts away from a point adds one where it starts,
+        // and carries it, as a click would add it.
         let (x, y) = plot_value(plot, pos);
         let mut next = points.to_vec();
-        move_curve_point(&mut next, index, x, y);
-        preview(sent, prop, PropValue::Curve(next));
+        if insert_curve_point(&mut next, x, y, look.free)
+            && let Some(index) = next.iter().position(|point| (point.0 - x).abs() < 1e-9)
+        {
+            ui.data_mut(|data| data.insert_temp(response.id, CurveHold { index, points: next.clone() }));
+            preview(sent, prop, PropValue::Curve(next));
+        }
+    }
+    // The point held moves on the curve the drag has made, and only a
+    // change is sent.
+    if response.dragged()
+        && let Some(mut hold) = ui.data(|data| data.get_temp::<CurveHold>(response.id))
+        && let Some(pos) = pointer
+        && hold.index < hold.points.len()
+    {
+        let (x, y) = plot_value(plot, pos);
+        let mut next = hold.points.clone();
+        move_curve_point(&mut next, hold.index, x, y, look.free);
+        if next != hold.points {
+            hold.points = next.clone();
+            ui.data_mut(|data| data.insert_temp(response.id, hold));
+            preview(sent, prop, PropValue::Curve(next));
+        }
     }
     if response.drag_stopped() {
-        ui.data_mut(|data| data.remove::<usize>(response.id));
         sent.push(Sent::Run(finish.clone()));
     } else if response.clicked()
         && hit.is_none()
-        && points.len() < 5
+        && points.len() < most_points(look.free)
         && let Some(pos) = pointer
     {
         let (x, y) = plot_value(plot, pos);
         let mut next = points.to_vec();
-        if insert_curve_point(&mut next, x, y) {
+        if insert_curve_point(&mut next, x, y, look.free) {
             set(sent, prop, PropValue::Curve(next));
         }
     }
@@ -981,9 +1168,19 @@ fn hit_point(plot: Rect, points: &[(f64, f64)], pos: egui::Pos2) -> Option<usize
     })
 }
 
-fn move_curve_point(points: &mut [(f64, f64)], index: usize, x: f64, y: f64) {
+/// Moves a point, kept between its neighbours. The pressure curve keeps its
+/// ends at 0 and 1 and every point between its neighbours' heights; a free
+/// one lets its ends move inward and any point to any height.
+fn move_curve_point(points: &mut [(f64, f64)], index: usize, x: f64, y: f64, free: bool) {
     let last = points.len() - 1;
     let eps = 0.01;
+    if free {
+        let min_x = if index == 0 { 0.0 } else { points[index - 1].0 + eps };
+        let max_x = if index == last { 1.0 } else { points[index + 1].0 - eps };
+        points[index].0 = x.clamp(min_x, max_x.max(min_x));
+        points[index].1 = y.clamp(0.0, 1.0);
+        return;
+    }
     if index == 0 {
         points[0].0 = 0.0;
     } else if index == last {
@@ -1002,9 +1199,21 @@ fn move_curve_point(points: &mut [(f64, f64)], index: usize, x: f64, y: f64) {
     points[index].1 = y.clamp(min_y, max_y.max(min_y));
 }
 
-fn insert_curve_point(points: &mut Vec<(f64, f64)>, x: f64, y: f64) -> bool {
-    if points.len() >= 5 || points.len() < 2 {
+/// Adds a point where it falls by x, so the points stay in order. A free
+/// curve takes it at any height, and before or after its ends when they
+/// have moved inward.
+fn insert_curve_point(points: &mut Vec<(f64, f64)>, x: f64, y: f64, free: bool) -> bool {
+    if points.len() >= most_points(free) || points.len() < 2 {
         return false;
+    }
+    if free {
+        let index = points.iter().position(|point| point.0 > x).unwrap_or(points.len());
+        let near = |neighbour: Option<&(f64, f64)>| neighbour.is_some_and(|point| (point.0 - x).abs() < 0.02);
+        if near(index.checked_sub(1).and_then(|before| points.get(before))) || near(points.get(index)) {
+            return false;
+        }
+        points.insert(index, (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+        return true;
     }
     let mut index = 1;
     while index < points.len() && points[index].0 < x {

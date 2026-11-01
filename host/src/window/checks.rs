@@ -330,6 +330,10 @@ struct Window {
     pictures: Vec<Rect>,
     /// Everything the last frame painted.
     shapes: Vec<egui::epaint::ClippedShape>,
+    /// Every texture upload since the check last emptied this: the texture,
+    /// where the part goes or None for the whole, its size, and its first
+    /// pixel.
+    uploads: Vec<(egui::TextureId, Option<[usize; 2]>, [usize; 2], egui::Color32)>,
 }
 
 impl Window {
@@ -351,6 +355,7 @@ impl Window {
         texts: Vec::new(),
         pictures: Vec::new(),
         shapes: Vec::new(),
+        uploads: Vec::new(),
             events: Vec::new(),
         };
         // Every application here declares skills just after its greeting.
@@ -379,6 +384,12 @@ impl Window {
         input.events.append(&mut self.events);
         let Self { ctx, app, frame, .. } = self;
         let mut output = ctx.run_ui(input, |ui| app.ui(ui, frame));
+        for (texture, deltas) in &output.textures_delta.set {
+            for delta in deltas {
+                let egui::ImageData::Color(image) = &delta.image;
+                self.uploads.push((*texture, delta.pos, image.size, image.pixels.first().copied().unwrap_or_default()));
+            }
+        }
         output.textures_delta.clear();
         self.shapes = output.shapes.clone();
         self.texts = output
@@ -731,6 +742,7 @@ fn project_window(specs: Vec<super::AppSpec>, stand_in: &StandIn, data: &Path) -
         texts: Vec::new(),
         pictures: Vec::new(),
         shapes: Vec::new(),
+        uploads: Vec::new(),
         events: Vec::new(),
     };
     window.until(|app| {

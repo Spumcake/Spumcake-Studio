@@ -223,6 +223,53 @@ fn paint_drawn_icon(
             ));
             true
         }
+        "bandage" => {
+            // As the mockup draws healing: a plaster across the diagonal,
+            // its pad between two lines, with four holes in it.
+            let along = vec2(1.0, -1.0).normalized();
+            let across = vec2(1.0, 1.0).normalized();
+            let middle = vec2(12.0, 12.0);
+            let point = |a: f32, c: f32| {
+                let p = middle + along * a + across * c;
+                at(p.x, p.y)
+            };
+            let (reach, half) = (6.0_f32, 4.0_f32);
+            let mut outline = Vec::new();
+            for (end, sign) in [(reach, 1.0_f32), (-reach, -1.0)] {
+                for step in 0..=12 {
+                    // Each end's half-turn, from one side over the end to the other.
+                    let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * step as f32 / 12.0;
+                    outline.push(point(end + sign * half * angle.cos(), sign * half * angle.sin()));
+                }
+            }
+            painter.add(egui::Shape::closed_line(outline, stroke));
+            for a in [-3.0, 3.0] {
+                painter.line_segment([point(a, -half), point(a, half)], stroke);
+            }
+            for (a, c) in [(-1.2, -1.4), (1.2, -1.4), (-1.2, 1.4), (1.2, 1.4)] {
+                painter.circle_filled(point(a, c), 0.8 * unit, color);
+            }
+            true
+        }
+        "stamp" => {
+            // As the mockup draws the clone stamp: a round knob on a neck
+            // that flares to a base, with a line across the base.
+            let (center, radius) = (egui::Pos2::new(12.0, 6.5), 3.0_f32);
+            let mut handle = vec![at(5.0, 15.0), at(8.0, 13.5), at(10.0, 12.5), at(10.2, 9.0)];
+            let start = std::f32::consts::PI - 0.7;
+            let sweep = std::f32::consts::PI + 1.4;
+            for step in 0..=16 {
+                let angle = start + sweep * step as f32 / 16.0;
+                let p = center + vec2(angle.cos(), angle.sin()) * radius;
+                handle.push(at(p.x, p.y));
+            }
+            handle.extend([at(13.8, 9.0), at(14.0, 12.5), at(16.0, 13.5), at(19.0, 15.0)]);
+            painter.add(egui::Shape::line(handle, stroke));
+            let base = egui::Rect::from_min_max(at(4.0, 15.0), at(20.0, 20.5));
+            painter.rect_stroke(base, 1.5 * unit, stroke, egui::StrokeKind::Middle);
+            painter.line_segment([at(4.0, 17.75), at(20.0, 17.75)], stroke);
+            true
+        }
         _ => false,
     }
 }
@@ -314,7 +361,27 @@ pub(crate) fn icon_button(
 /// the other groups instead. The settings row's trailing group ends
 /// `options_inset` short of the right edge, above the contents' own edge
 /// when the panel is open. Returns the actions chosen.
+///
+/// The rows take exactly the width they are given. Items too wide for a row
+/// are scrolled or cut at its edge, never laid out past it: a row wider than
+/// the window would widen everything under it, pushing the contents and the
+/// panel past the window's right edge.
 pub(crate) fn show(ui: &mut egui::Ui, toolbar: Option<&Toolbar>, options_inset: f32) -> Vec<Action> {
+    let room = ui.available_rect_before_wrap();
+    let mut rows = ui.new_child(
+        UiBuilder::new()
+            .id_salt("toolbar-rows")
+            .max_rect(room)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    rows.set_clip_rect(room.intersect(ui.clip_rect()));
+    let chosen = show_rows(&mut rows, toolbar, options_inset);
+    // Only the rows' height is taken from what they drew.
+    ui.advance_cursor_after_rect(Rect::from_min_size(room.min, vec2(room.width(), rows.min_rect().height())));
+    chosen
+}
+
+fn show_rows(ui: &mut egui::Ui, toolbar: Option<&Toolbar>, options_inset: f32) -> Vec<Action> {
     let mut chosen = Vec::new();
     let empty = Toolbar::default();
     let toolbar = toolbar.unwrap_or(&empty);
@@ -396,17 +463,25 @@ fn options_row(ui: &mut egui::Ui, toolbar: &Toolbar, inset: f32, chosen: &mut Ve
             ui.set_height(OPTION);
             ui.spacing_mut().item_spacing.x = OPTION_GAP;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if inset > 0.0 {
+                // With no right-hand group, the row's own items may run
+                // on above the panel.
+                if inset > 0.0 && !toolbar.options_trailing.is_empty() {
                     // The frame's own margin already stands in for the gap.
                     ui.add_space((inset - OPTION_GAP).max(0.0));
                 }
                 for item in toolbar.options_trailing.iter().rev() {
-                    option_ui(ui, item, chosen);
+                    option_ui(ui, item, chosen, 1.0);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.set_height(OPTION);
+                    // What does not fit beside the right-hand group is cut
+                    // there, rather than drawn under it.
+                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                    // In a narrow window the sliders give up room first, so
+                    // every switch and field after them stays in reach.
+                    let squeeze = slider_squeeze(ui, &toolbar.options, ui.available_width());
                     for item in &toolbar.options {
-                        option_ui(ui, item, chosen);
+                        option_ui(ui, item, chosen, squeeze);
                     }
                 });
             });
@@ -415,9 +490,41 @@ fn options_row(ui: &mut egui::Ui, toolbar: &Toolbar, inset: f32, chosen: &mut Ve
     hairline(ui, rect.left(), rect.right(), rect.bottom());
 }
 
-/// One settings-row item, drawn at the row's size. Items the views do not
-/// show in the row are drawn as the toolbar draws them.
-fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
+/// How much the row's sliders narrow so its items fit in `room`: 1 when
+/// they fit, and never below a third. The row is laid out once unseen to
+/// measure it; words, which stop with an ellipsis, are left out.
+fn slider_squeeze(ui: &mut egui::Ui, items: &[ToolItem], room: f32) -> f32 {
+    let sliders: f32 = items.iter().map(|item| if let ToolItem::Slider { width, .. } = item { *width } else { 0.0 }).sum();
+    if sliders <= 0.0 {
+        return 1.0;
+    }
+    let mut measure = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("option-measure")
+            .sizing_pass()
+            .invisible()
+            .max_rect(Rect::from_min_size(ui.max_rect().min, vec2(100_000.0, OPTION)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    measure.spacing_mut().item_spacing.x = OPTION_GAP;
+    let mut ignored = Vec::new();
+    for item in items.iter().filter(|item| !matches!(item, ToolItem::Label { .. })) {
+        option_ui(&mut measure, item, &mut ignored, 1.0);
+    }
+    let natural = measure.min_rect().width();
+    if natural <= room {
+        return 1.0;
+    }
+    ((sliders - (natural - room)) / sliders).clamp(SQUEEZE_LEAST, 1.0)
+}
+
+/// The narrowest a squeezed slider's track goes, as a share of its own.
+const SQUEEZE_LEAST: f32 = 0.35;
+
+/// One settings-row item, drawn at the row's size, its slider `squeeze`d
+/// as `slider_squeeze` found. Items the views do not show in the row are
+/// drawn as the toolbar draws them.
+fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>, squeeze: f32) {
     match item {
         ToolItem::Separator => {
             let (rect, _) = ui.allocate_exact_size(vec2(1.0, OPTION), Sense::hover());
@@ -429,7 +536,7 @@ fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
         }
         ToolItem::Label { text, strong } => {
             let color = if *strong { widgets::TEXT } else { widgets::MUTED };
-            caption(ui, text, color);
+            label(ui, text, color);
         }
         ToolItem::Color { rgb, tip, set } => color_chip(ui, *rgb, tip, set, chosen),
         ToolItem::Slider {
@@ -450,7 +557,7 @@ fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
                 caption: widgets::MUTED,
                 suffix: spaced(suffix),
             };
-            let edit = bar_slider(ui, id, caption, *width, *value, (*min, *max), tint, &look);
+            let edit = bar_slider(ui, id, caption, *width * squeeze, *value, (*min, *max), tint, &look);
             slider_actions(edit, set, finish.as_ref(), chosen);
         }
         ToolItem::Switch { caption: words, on, action } => {
@@ -503,12 +610,21 @@ fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
             max,
             suffix,
             set,
+            icon,
         } => {
             // Whole numbers unless the declared value or range has a fraction.
             let places: u8 = if [*value, *min, *max].iter().all(|number| number.fract() == 0.0) { 0 } else { 1 };
             let scale = 10f64.powi(i32::from(places));
-            let rect = captioned(ui, words, 64.0);
-            let id = ui.id().with(("option-number", words.as_str()));
+            // An icon, such as text.png's line height, stands in for the
+            // caption, which is then the icon's tip.
+            let rect = match icon {
+                Some(icon) => iconned(ui, icon, words, 56.0),
+                None => captioned(ui, words, 64.0),
+            };
+            // Its action names it: two numbers may share a caption, or have
+            // none, as one drawn with an icon does.
+            let arg = set.arg.as_ref().map(|arg| arg.to_string()).unwrap_or_default();
+            let id = ui.id().with(("option-number", words.as_str(), set.id.as_str(), arg));
             let shown = |number: f64| (number * scale).round() as i32;
             let edit = widgets::number_field(
                 ui,
@@ -519,6 +635,7 @@ fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
                 &spaced(suffix),
                 false,
                 places,
+                false,
                 widgets::Scale(1.0),
             );
             if let Some(next) = edit.value
@@ -559,12 +676,19 @@ fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
     }
 }
 
-/// Words in the settings row, such as a control's caption.
-fn caption(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let font = option_font();
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
-    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, OPTION), Sense::hover());
+/// Words the settings row shows, such as why a tool cannot act. Words
+/// longer than the room left in the row stop with an ellipsis there.
+fn label(ui: &mut egui::Ui, text: &str, color: Color32) {
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat::simple(option_font(), color));
+    job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width().max(0.0));
+    let galley = ui.painter().layout_job(job);
+    let cut = galley.elided;
+    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x, OPTION), Sense::hover());
     ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
+    // Words cut short show whole when pointed at.
+    if cut {
+        response.on_hover_text(text);
+    }
 }
 
 /// Room for a caption and a control `width` wide, taken as one piece so a
@@ -577,6 +701,19 @@ fn captioned(ui: &mut egui::Ui, words: &str, width: f32) -> Rect {
     let (rect, _) = ui.allocate_exact_size(vec2(lead + width, OPTION), Sense::hover());
     if !words.is_empty() {
         ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, widgets::MUTED);
+    }
+    Rect::from_min_max(pos2(rect.left() + lead, rect.top()), rect.max)
+}
+
+/// An icon, then room of `width` for a control: the icon in a caption's
+/// place, with the caption as its tip.
+fn iconned(ui: &mut egui::Ui, icon: &str, tip: &str, width: f32) -> Rect {
+    let lead = 18.0 + CAPTION_GAP;
+    let (rect, _) = ui.allocate_exact_size(vec2(lead + width, OPTION), Sense::hover());
+    let spot = Rect::from_min_size(rect.min, vec2(18.0, OPTION));
+    paint_icon(ui.painter(), spot.center(), icon, 17.0, widgets::MUTED);
+    if !tip.is_empty() {
+        ui.interact(spot, ui.id().with(("option-icon", tip)), Sense::hover()).on_hover_text(tip);
     }
     Rect::from_min_max(pos2(rect.left() + lead, rect.top()), rect.max)
 }
@@ -764,7 +901,7 @@ fn item_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
         | ToolItem::Push { .. } => {
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                option_ui(ui, item, chosen);
+                option_ui(ui, item, chosen, 1.0);
             });
         }
         ToolItem::Maximize {
@@ -1039,11 +1176,11 @@ fn bar_slider(
         finished: false,
     };
     let (response, asked) = widgets::slider_in(ui, track, id, t, tint);
-    if let Some(asked) = asked {
-        let next = (min as f32 + asked * span).round() as i32;
-        if next != value {
-            edit.value = Some((next, true));
-        }
+    // Only a change from what this hold last sent is sent: the value shown
+    // is the application's, and lags while its replies queue.
+    let asked = asked.map(|asked| (min as f32 + asked * span).round() as i32);
+    if let Some(next) = widgets::unsent(ui, id, asked, &value) {
+        edit.value = Some((next, true));
     }
     if response.drag_stopped() || response.clicked() {
         edit.finished = true;
@@ -1064,7 +1201,8 @@ fn bar_slider(
     visuals.widgets.inactive.fg_stroke.color = ICON;
     visuals.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-    let mut typed = value;
+    // While the slider is held, its number shows what it asked for.
+    let mut typed = widgets::held(ui, id).unwrap_or(value);
     let typed_response = field.add(
         egui::DragValue::new(&mut typed)
             .range(min..=max)
@@ -1073,7 +1211,14 @@ fn bar_slider(
             .suffix(look.suffix.as_str()),
     );
     if typed_response.changed() {
-        edit.value = Some((typed.clamp(min, max), typed_response.dragged()));
+        let typed = typed.clamp(min, max);
+        // A drag on the number sends each value once, as the slider does.
+        let scrubbed = typed_response.dragged().then_some(typed);
+        match widgets::unsent(ui, id.with("number"), scrubbed, &value) {
+            Some(next) => edit.value = Some((next, true)),
+            None if !typed_response.dragged() => edit.value = Some((typed, false)),
+            None => {}
+        }
     }
     if typed_response.drag_stopped() {
         edit.finished = true;

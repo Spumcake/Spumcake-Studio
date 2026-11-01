@@ -9,14 +9,15 @@
 //! outside a project.
 
 use crate::declare;
-use crate::doc::{Doc, Setting};
+use crate::doc::{Doc, Sampler, Setting};
 use crate::files;
 use crate::gallery::{Frame, Gallery};
 use crate::paint::{Brush, Combine, Mask};
-use crate::picture::{Blend, Picture, Pixels};
+use crate::picture::{Blend, Curves, Grade, Kind, Picture, Pixels};
+use crate::text::{Align, Face, Style};
 use protocol::{
     AppMessage, Ask, AskButton, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, PanelSide,
-    PropValue, RasterGesture, RasterTool, RasterView, Thumbnail,
+    PropValue, RasterGesture, RasterTool, RasterView, TextEditing, Thumbnail,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -52,21 +53,29 @@ pub enum ToolKind {
     Lasso,
     Crop,
     Eyedropper,
+    Heal,
+    Stamp,
     Brush,
     Eraser,
+    Text,
     Hand,
     Zoom,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 9] = [
+    /// In the mockup's order: healing and the stamp after the eyedropper,
+    /// and text after the eraser.
+    pub const ALL: [ToolKind; 12] = [
         ToolKind::Move,
         ToolKind::Marquee,
         ToolKind::Lasso,
         ToolKind::Crop,
         ToolKind::Eyedropper,
+        ToolKind::Heal,
+        ToolKind::Stamp,
         ToolKind::Brush,
         ToolKind::Eraser,
+        ToolKind::Text,
         ToolKind::Hand,
         ToolKind::Zoom,
     ];
@@ -78,8 +87,11 @@ impl ToolKind {
             ToolKind::Lasso => "lasso",
             ToolKind::Crop => "crop",
             ToolKind::Eyedropper => "eyedropper",
+            ToolKind::Heal => "heal",
+            ToolKind::Stamp => "stamp",
             ToolKind::Brush => "brush",
             ToolKind::Eraser => "eraser",
+            ToolKind::Text => "text",
             ToolKind::Hand => "hand",
             ToolKind::Zoom => "zoom",
         }
@@ -112,6 +124,20 @@ pub struct Tools {
     pub feather: f64,
     /// An index into `declare::RATIOS`.
     pub ratio: usize,
+    /// The clone stamp's and the healing brush's sizes and hardness, and
+    /// the stamp's opacity; pressure is not theirs.
+    pub stamp: BrushSettings,
+    pub heal: BrushSettings,
+    /// The stamp keeps its offset from one stroke to the next.
+    pub aligned: bool,
+    /// Where the stamp and healing copy from, set with Alt-click.
+    pub source: Option<[f64; 2]>,
+    /// The offset kept for the next stroke, aligned, and the offset of the
+    /// stroke being drawn.
+    pub kept: Option<[f64; 2]>,
+    pub stroke: Option<[f64; 2]>,
+    /// The style a new text takes, and the edited text's as it changes.
+    pub text: Style,
 }
 
 impl Default for Tools {
@@ -126,8 +152,24 @@ impl Default for Tools {
             combine: Combine::New,
             feather: 0.0,
             ratio: 0,
+            // As clone.png and heal.png show.
+            stamp: BrushSettings { size: 60, hardness: 50, opacity: 100, pressure: false },
+            heal: BrushSettings { size: 40, hardness: 30, opacity: 100, pressure: false },
+            aligned: true,
+            source: None,
+            kept: None,
+            stroke: None,
+            text: Style::default(),
         }
     }
+}
+
+/// The panel's pages, in their order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Layers,
+    Properties,
+    Adjustments,
 }
 
 /// One tab: a gallery of pictures, kept in one file.
@@ -149,6 +191,8 @@ pub struct Image {
     /// A camera to send with the next picture: the picture is new, opened,
     /// or newly shown.
     send_camera: bool,
+    /// Its thumbnails were left unwritten while a slider was held.
+    thumbs_owed: bool,
 }
 
 impl Image {
@@ -197,9 +241,22 @@ pub struct Session {
     next_tab: u64,
     pub tools: Tools,
     pub panel_open: bool,
+    /// The panel's page shown.
+    pub page: Page,
+    /// The curve the Properties page shows of a Curves layer: 0 for all
+    /// three channels, then red, green, and blue.
+    pub curve_channel: usize,
+    /// The curve point last moved, for its input and output.
+    pub curve_point: Option<[f64; 2]>,
     pub project: Option<PathBuf>,
-    /// Where pictures and thumbnails for the host are written.
+    /// Where pictures and thumbnails for the host are written, and whether
+    /// it is a folder of this session's own in memory, which stays when a
+    /// project is named.
     cache: PathBuf,
+    in_memory: bool,
+    /// A picture file for the host could not be written in memory: the
+    /// pictures move to disk, and are sent again.
+    display_failed: bool,
     viewport: [f64; 2],
     file: Option<(String, Purpose)>,
     next_file: u64,
@@ -209,6 +266,10 @@ pub struct Session {
     next_revision: u64,
     /// Points of a stroke were painted and the picture is not sent yet.
     live_due: bool,
+    /// A held slider changed the picture, which is sent, with everything
+    /// else, once the lines waiting have all been read, or before anything
+    /// else is answered.
+    emit_due: bool,
     /// The thread that writes images due inside a project, started with the
     /// first.
     writer: Option<Writer>,
@@ -237,19 +298,26 @@ impl Session {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64 * 1000)
             .unwrap_or(0);
+        let memory = memory_folder();
         Self {
             images: Vec::new(),
             active: 0,
             next_tab: 1,
             tools: Tools::default(),
             panel_open: true,
+            page: Page::Layers,
+            curve_channel: 0,
+            curve_point: None,
             project: None,
-            cache: scratch_folder(),
+            in_memory: memory.is_some(),
+            display_failed: false,
+            cache: memory.unwrap_or_else(scratch_folder),
             viewport: [1200.0, 800.0],
             file: None,
             next_file: 1,
             next_revision: seed,
             live_due: false,
+            emit_due: false,
             writer: None,
             quit_rest: Vec::new(),
             quitting: false,
@@ -276,14 +344,33 @@ impl Session {
     /// One message from the host, and every reply.
     pub fn handle(&mut self, message: HostMessage) -> Vec<AppMessage> {
         let mut out = Vec::new();
+        // A held slider's values are applied as they come, and the picture
+        // and panel they make are sent once for all the lines waiting. Any
+        // other message first sends what they changed, so every answer
+        // comes after the change before it, except a panel edit or the
+        // slider let go, which send everything themselves.
+        let sends_all = match &message {
+            HostMessage::Property { .. } => true,
+            HostMessage::Command { id, .. } => id == "finish_edit",
+            _ => false,
+        };
+        if !sends_all && self.emit_due {
+            out.extend(self.emit());
+        }
+        let looked = self.looks();
         // A stroke being drawn lasts while its points come. A message that
         // could change the picture takes it off first; the host's ping each
         // second, the camera, and the viewport leave it be, so a stroke held
         // longer than a second stays.
         let drawing = matches!(
             &message,
-            HostMessage::RasterGesture { gesture: RasterGesture::StrokePart { .. } | RasterGesture::Stroke { .. }, .. }
-                | HostMessage::Camera { .. }
+            HostMessage::RasterGesture {
+                gesture: RasterGesture::StrokePart { .. }
+                    | RasterGesture::Stroke { .. }
+                    | RasterGesture::DragPart { .. }
+                    | RasterGesture::Drag { .. },
+                ..
+            } | HostMessage::Camera { .. }
                 | HostMessage::Viewport { .. }
                 | HostMessage::Ping
                 | HostMessage::Keep { .. }
@@ -296,9 +383,38 @@ impl Session {
                 }
             }
         }
+        // A text being typed in stays open through the keyboard, the text
+        // tool's own gestures and settings, and the host's own messages;
+        // anything else ends its editing first, which makes its step.
+        let typing = match &message {
+            HostMessage::RasterText { .. }
+            | HostMessage::Camera { .. }
+            | HostMessage::Viewport { .. }
+            | HostMessage::Ping
+            | HostMessage::Keep { .. }
+            | HostMessage::Claim { .. }
+            | HostMessage::Answer { .. } => true,
+            HostMessage::RasterGesture { gesture: RasterGesture::Click { .. } | RasterGesture::Rect { .. } | RasterGesture::TextBox { .. }, .. } => {
+                self.tools.tool == ToolKind::Text
+            }
+            HostMessage::Command { id, .. } => {
+                matches!(id.as_str(), "text_style" | "undo" | "redo" | "toggle_panel" | "panel_page") || id.starts_with("canvas.")
+            }
+            _ => false,
+        };
+        if !typing && let Some(image) = self.images.get_mut(self.active) {
+            let before = image.doc().edits;
+            image.doc_mut().end_typing();
+            if image.doc().edits != before {
+                image.dirty = true;
+            }
+        }
         match message {
             HostMessage::Shutdown => return Vec::new(),
-            HostMessage::Ping => return vec![AppMessage::Pong],
+            HostMessage::Ping => {
+                out.push(AppMessage::Pong);
+                return out;
+            }
             HostMessage::Quit => {
                 if self.project.is_some() {
                     // Everything is written first, so the quit asks nothing.
@@ -311,27 +427,33 @@ impl Session {
             HostMessage::Project { folder } => {
                 let folder = PathBuf::from(folder);
                 let folder = folder.canonicalize().unwrap_or(folder);
-                if self.project.is_none() {
-                    // The scratch pictures written before the project was
-                    // known are not needed any more.
-                    let _ = std::fs::remove_dir_all(&self.cache);
+                // Pictures in memory stay where they are; otherwise they go
+                // into the project's cache.
+                if !self.in_memory {
+                    if self.project.is_none() {
+                        // The scratch pictures written before the project
+                        // was known are not needed any more.
+                        let _ = std::fs::remove_dir_all(&self.cache);
+                    }
+                    self.cache = folder.join(".inpainter").join("cache").join("image-editor");
+                    // Rows a stroke left there in an earlier run are not
+                    // needed.
+                    for entry in std::fs::read_dir(&self.cache).into_iter().flatten().flatten() {
+                        if entry.path().extension().is_some_and(|extension| extension == "patch") {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                    // Every picture is written again where the host now
+                    // looks.
+                    for image in &mut self.images {
+                        for frame in &mut image.gallery.frames {
+                            frame.written = None;
+                            frame.thumbs.clear();
+                            frame.film = None;
+                        }
+                    }
                 }
-                self.cache = folder.join(".inpainter").join("cache").join("image-editor");
                 self.project = Some(folder);
-                // Rows a stroke left there in an earlier run are not needed.
-                for entry in std::fs::read_dir(&self.cache).into_iter().flatten().flatten() {
-                    if entry.path().extension().is_some_and(|extension| extension == "patch") {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-                // Every picture is written again where the host now looks.
-                for image in &mut self.images {
-                    for frame in &mut image.gallery.frames {
-                        frame.written = None;
-                        frame.thumbs.clear();
-                        frame.film = None;
-                    }
-                }
                 out.extend(self.emit());
             }
             // An image file from outside the project opens nothing.
@@ -363,7 +485,34 @@ impl Session {
                 {
                     image.doc_mut().paint_live(from, &points, &brush);
                     self.live_due = true;
+                } else if let Some(sampler) = self.sampler((from == 0).then(|| points.first().map(|point| [point[0], point[1]])).flatten())
+                    && let Some(image) = self.images.get_mut(self.active)
+                {
+                    image.doc_mut().sample_live(from, &points, &sampler);
+                    self.live_due = true;
                 }
+            }
+            // The move tool's drag while it is open: with a selection, the
+            // selected pixels move as it goes; without one, the layer moves
+            // when it is let go.
+            HostMessage::RasterGesture { tab, gesture: RasterGesture::DragPart { from, to } } => {
+                self.activate(&tab);
+                self.picture_focus();
+                if self.tools.tool == ToolKind::Move
+                    && let Some(image) = self.images.get_mut(self.active)
+                    && image.doc().selection.is_some()
+                {
+                    let _ = image.doc_mut().drag_part(from, to);
+                    self.live_due = true;
+                }
+            }
+            HostMessage::RasterText { tab, input } => {
+                self.activate(&tab);
+                self.picture_focus();
+                if let Some(Some(text)) = self.change(|doc| doc.text_input(&input)) {
+                    out.push(AppMessage::Clipboard { text });
+                }
+                out.extend(self.emit());
             }
             HostMessage::RasterGesture { tab, gesture } => {
                 self.activate(&tab);
@@ -398,10 +547,17 @@ impl Session {
                     self.answer(&button, &mut out);
                 }
             }
+            // A held slider's value is sent with the lines waiting, and
+            // only when it changed something; the value let go is always
+            // sent.
             HostMessage::Property { prop, value, preview } => {
                 self.picture_focus();
                 self.property(&prop, &value, preview);
-                out.extend(self.emit());
+                if !preview {
+                    out.extend(self.emit());
+                } else if self.looks() != looked || self.active_image().is_some_and(|image| image.doc().out_of_date()) {
+                    self.emit_due = true;
+                }
             }
             HostMessage::FileResult { id, path } => self.file_result(&id, path, &mut out),
             HostMessage::Invoke { call, tab, tool, input, group } => {
@@ -435,6 +591,11 @@ impl Session {
     /// and sends what that changed, such as a tab's new name.
     pub fn tick(&mut self) -> Vec<AppMessage> {
         let mut out = self.catch_up();
+        // Thumbnails left while a slider was held, which ended without a
+        // message, such as when its step was written.
+        if self.active_image().is_some_and(|image| image.thumbs_owed && !image.doc().held()) {
+            out.extend(self.emit());
+        }
         if self.project.is_some() {
             self.write_due(Instant::now());
         }
@@ -531,6 +692,7 @@ impl Session {
             write_failed: None,
             saving: None,
             send_camera: true,
+            thumbs_owed: false,
         });
         self.active = self.images.len() - 1;
         if self.tools.tool == ToolKind::Crop {
@@ -574,7 +736,9 @@ impl Session {
     fn film_of<T>(&mut self, index: usize, change: impl FnOnce(&mut Gallery) -> T) -> Option<T> {
         let in_project = self.project.is_some();
         let image = self.images.get_mut(index)?;
-        // A held slider on the picture shown becomes its step first.
+        // A held slider on the picture shown becomes its step first, and a
+        // text being typed in its own.
+        image.doc_mut().end_typing();
         image.doc_mut().finish_edit();
         let (edits, shown) = (image.gallery.edits, image.frame().uid);
         let result = change(&mut image.gallery);
@@ -728,9 +892,61 @@ impl Session {
                     self.choose_tool(tool);
                 }
             }
+            "panel_page" => {
+                self.page = match number("value").or_else(|| number("page")).map(|page| page as i64) {
+                    Some(1) => Page::Properties,
+                    Some(2) => Page::Adjustments,
+                    _ => Page::Layers,
+                };
+            }
+            "toggle_aligned" => {
+                self.tools.aligned = !self.tools.aligned;
+                self.tools.kept = None;
+            }
+            "text_style" => self.text_style(&arg),
+            "add_mask" => {
+                let target = node.or_else(|| self.active_image().and_then(|image| image.doc().active));
+                if let Some(target) = target
+                    && let Some(Err(reason)) = self.change(|doc| doc.add_mask(target, None))
+                {
+                    out.push(notice("The mask could not be added", &reason));
+                }
+            }
+            "mask_invert" => {
+                if let Some(target) = node.or_else(|| self.active_image().and_then(|image| image.doc().active)) {
+                    self.change(|doc| doc.invert_mask(target, None));
+                }
+            }
+            "delete_mask" => {
+                if let Some(node) = node {
+                    self.change(|doc| doc.delete_mask(node, None));
+                }
+            }
+            "add_adjustment" => {
+                let kind = match arg.get("kind").and_then(Value::as_str) {
+                    Some("curves") => Kind::Curves(Curves::default()),
+                    _ => Kind::Grade(Grade::default()),
+                };
+                if let Some(Ok(_)) = self.change(|doc| doc.add_adjustment(kind, None, None)) {
+                    self.page = Page::Properties;
+                    self.curve_channel = 0;
+                    self.curve_point = None;
+                }
+            }
+            "reset_adjustment" => {
+                if let Some(active) = self.active_image().and_then(|image| image.doc().active) {
+                    self.change(|doc| doc.reset_adjustment(active));
+                    self.curve_point = None;
+                }
+            }
             "set_brush" => {
-                let eraser = arg.get("tool").and_then(Value::as_str) == Some("eraser");
-                let settings = if eraser { &mut self.tools.eraser } else { &mut self.tools.brush };
+                let tool = arg.get("tool").and_then(Value::as_str);
+                let settings = match tool {
+                    Some("eraser") => &mut self.tools.eraser,
+                    Some("stamp") => &mut self.tools.stamp,
+                    Some("heal") => &mut self.tools.heal,
+                    _ => &mut self.tools.brush,
+                };
                 if let (Some(setting), Some(value)) = (arg.get("setting").and_then(Value::as_str), number("value")) {
                     let value = value.round().max(0.0) as u32;
                     match setting {
@@ -755,7 +971,12 @@ impl Session {
                 settings.pressure = !settings.pressure;
             }
             "size_down" | "size_up" => {
-                let settings = if self.tools.tool == ToolKind::Eraser { &mut self.tools.eraser } else { &mut self.tools.brush };
+                let settings = match self.tools.tool {
+                    ToolKind::Eraser => &mut self.tools.eraser,
+                    ToolKind::Stamp => &mut self.tools.stamp,
+                    ToolKind::Heal => &mut self.tools.heal,
+                    _ => &mut self.tools.brush,
+                };
                 let step = (settings.size / 10).max(1);
                 settings.size = if id == "size_up" { (settings.size + step).min(1000) } else { settings.size.saturating_sub(step).max(1) };
             }
@@ -796,22 +1017,40 @@ impl Session {
                 // picture's again, ready to drag.
                 self.start_crop();
             }
+            // A mask's row carries `mask`: its click chooses the mask, its
+            // eye shows or hides it, and its name is its own.
             "layer_click" => {
                 if let Some(node) = node {
-                    self.change(|doc| doc.activate(node));
+                    if arg.get("mask").and_then(Value::as_bool) == Some(true) {
+                        self.change(|doc| doc.choose_mask(node));
+                    } else {
+                        self.change(|doc| doc.activate(node));
+                    }
+                    self.curve_point = None;
                 }
             }
             "layer_rename" => {
                 if let (Some(node), Some(name)) = (node, arg.get("value").and_then(Value::as_str)) {
                     let name = name.to_string();
-                    self.change(|doc| doc.rename(node, &name, None));
+                    if arg.get("mask").and_then(Value::as_bool) == Some(true) {
+                        self.change(|doc| doc.rename_mask(node, &name));
+                    } else {
+                        self.change(|doc| doc.rename(node, &name, None));
+                    }
                 }
             }
             "layer_visible" => {
                 if let Some(node) = node {
+                    let mask = arg.get("mask").and_then(Value::as_bool) == Some(true);
                     self.change(|doc| {
-                        let visible = doc.picture.find(node).is_some_and(|found| found.visible);
-                        doc.set_visible(node, !visible, None)
+                        let found = doc.picture.find(node);
+                        if mask {
+                            let visible = found.and_then(|found| found.mask.as_ref()).is_some_and(|mask| mask.visible);
+                            doc.set_mask_visible(node, !visible)
+                        } else {
+                            let visible = found.is_some_and(|found| found.visible);
+                            doc.set_visible(node, !visible, None)
+                        }
                     });
                 }
             }
@@ -868,6 +1107,9 @@ impl Session {
     pub fn choose_tool(&mut self, tool: ToolKind) {
         if self.tools.tool == tool {
             return;
+        }
+        if let Some(image) = self.images.get_mut(self.active) {
+            image.doc_mut().end_typing();
         }
         self.tools.tool = tool;
         if tool == ToolKind::Crop {
@@ -951,27 +1193,175 @@ impl Session {
         })
     }
 
-    /// The picture with the stroke being drawn, once the points waiting
-    /// have all been painted: only the picture, as nothing else changed.
+    /// The clone stamp or the healing brush chosen, as the toolbar sets it,
+    /// with the offset of the stroke being drawn. `first`, the first point
+    /// of a stroke beginning, sets that offset: kept from the last stroke
+    /// when aligned, and otherwise from the source to the first point.
+    /// None without a source.
+    fn sampler(&mut self, first: Option<[f64; 2]>) -> Option<Sampler> {
+        let tools = &mut self.tools;
+        let heal = match tools.tool {
+            ToolKind::Heal => true,
+            ToolKind::Stamp => false,
+            _ => return None,
+        };
+        let source = tools.source?;
+        if let Some(first) = first {
+            let aligned = heal || tools.aligned;
+            tools.stroke = Some(match tools.kept {
+                Some(kept) if aligned => kept,
+                _ => [source[0] - first[0], source[1] - first[1]],
+            });
+        }
+        let offset = tools.stroke?;
+        let settings = if heal { tools.heal } else { tools.stamp };
+        Some(Sampler {
+            brush: Brush {
+                rgb: [0, 0, 0],
+                size: f64::from(settings.size),
+                hardness: f64::from(settings.hardness) / 100.0,
+                opacity: f64::from(settings.opacity) / 100.0,
+                pressure: false,
+                erase: false,
+            },
+            offset: [offset[0].round() as i32, offset[1].round() as i32],
+            heal,
+        })
+    }
+
+    /// The T tool's settings row changed: the style a new text takes, and
+    /// the edited text's.
+    fn text_style(&mut self, arg: &Value) {
+        let value = arg.get("value");
+        let number = value.and_then(Value::as_f64);
+        let style = &mut self.tools.text;
+        match arg.get("key").and_then(Value::as_str) {
+            Some("face") => style.face = if number == Some(1.0) { Face::Mono } else { Face::Inter },
+            Some("size") => style.size = number.map_or(style.size, |size| size as f32),
+            Some("bold") => style.bold = !style.bold,
+            Some("italic") => style.italic = !style.italic,
+            Some("underline") => style.underline = !style.underline,
+            Some("caps") => style.all_caps = !style.all_caps,
+            Some("align") => {
+                let index = arg.get("align").and_then(Value::as_u64).unwrap_or(0) as usize;
+                style.align = Align::ALL[index.min(3)];
+            }
+            Some("line_height") => style.line_height = number.map_or(style.line_height, |value| value as f32),
+            Some("letter_spacing") => style.letter_spacing = number.map_or(style.letter_spacing, |value| value as f32),
+            Some("color") => {
+                if let Some(rgb) = value.and_then(rgb_of) {
+                    style.color = rgb;
+                }
+            }
+            _ => return,
+        }
+        *style = style.clamped();
+        let style = *style;
+        self.change(|doc| {
+            if doc.typing().is_some() {
+                doc.set_typing_style(style);
+            }
+        });
+    }
+
+    /// What waited for the lines waiting to be read: a held slider's
+    /// picture and panel, or the picture with the stroke being drawn, once
+    /// its points have all been painted, only the picture, as nothing else
+    /// changed.
     pub fn take_live(&mut self) -> Vec<AppMessage> {
+        if self.emit_due {
+            return self.emit();
+        }
         if !std::mem::take(&mut self.live_due) {
             return Vec::new();
         }
-        self.raster_view(self.active, true).map(AppMessage::Raster).into_iter().collect()
+        let view = self.raster_view(self.active, true);
+        if self.leave_memory_if_full() {
+            return self.emit();
+        }
+        view.map(AppMessage::Raster).into_iter().collect()
+    }
+
+    /// When a picture for the host could not be written in memory, as when
+    /// the memory folder is full, the pictures move to the project's cache
+    /// or a scratch folder on disk, to be written there whole. Returns
+    /// whether they moved.
+    fn leave_memory_if_full(&mut self) -> bool {
+        if !std::mem::take(&mut self.display_failed) || !self.in_memory {
+            return false;
+        }
+        let _ = std::fs::remove_dir_all(&self.cache);
+        self.in_memory = false;
+        self.cache = match &self.project {
+            Some(folder) => folder.join(".inpainter").join("cache").join("image-editor"),
+            None => scratch_folder(),
+        };
+        for image in &mut self.images {
+            for frame in &mut image.gallery.frames {
+                frame.written = None;
+                frame.behind = false;
+                frame.last_patch = None;
+                frame.patches.clear();
+                frame.thumbs.clear();
+                frame.film = None;
+            }
+        }
+        true
     }
 
     fn gesture(&mut self, gesture: RasterGesture) {
         let tools = self.tools.clone();
         match gesture {
             RasterGesture::Stroke { points } => {
-                let Some(brush) = self.brush() else {
+                if let Some(brush) = self.brush() {
+                    // A stroke on a locked or hidden layer changes nothing.
+                    self.change(|doc| doc.stroke(&points, &brush));
+                    return;
+                }
+                let first = if self.tools.stroke.is_none() { points.first().map(|point| [point[0], point[1]]) } else { None };
+                let Some(sampler) = self.sampler(first) else {
                     return;
                 };
-                // A stroke on a locked or hidden layer changes nothing.
-                self.change(|doc| doc.stroke(&points, &brush));
+                self.change(|doc| doc.sample_stroke(&points, &sampler));
+                // Aligned, the offset holds for the next stroke too; not
+                // aligned, each stroke starts again from the source.
+                let aligned = sampler.heal || self.tools.aligned;
+                self.tools.kept = if aligned { self.tools.stroke } else { None };
+                self.tools.stroke = None;
             }
             // Taken off already, as every message but a stroke's does.
-            RasterGesture::StrokeCancel | RasterGesture::StrokePart { .. } => {}
+            RasterGesture::StrokeCancel => self.tools.stroke = None,
+            RasterGesture::StrokePart { .. } | RasterGesture::DragPart { .. } => {}
+            RasterGesture::Source { at } => {
+                if at[0].is_finite() && at[1].is_finite() {
+                    self.tools.source = Some(at);
+                    self.tools.kept = None;
+                    self.tools.stroke = None;
+                }
+            }
+            RasterGesture::Click { at } => {
+                if self.tools.tool == ToolKind::Text
+                    && let Some(Some(style)) = self.change(|doc| doc.text_click(at, tools.text))
+                {
+                    self.tools.text = style;
+                }
+            }
+            RasterGesture::TextBox { rect } => {
+                self.change(|doc| doc.text_box(rect));
+            }
+            // With the T tool, a drag makes the box a new text wraps in.
+            RasterGesture::Rect { from, to } if tools.tool == ToolKind::Text => {
+                let width = (to[0] - from[0]).abs();
+                let corner = [from[0].min(to[0]), from[1].min(to[1])];
+                self.change(|doc| {
+                    doc.end_typing();
+                    if width >= 8.0 {
+                        doc.start_text(corner, Some(width as f32), tools.text);
+                    } else {
+                        doc.text_click(from, tools.text);
+                    }
+                });
+            }
             RasterGesture::Rect { from, to } => {
                 self.change(|doc| {
                     let shape = Mask::rect(doc.picture.width, doc.picture.height, from, to);
@@ -985,6 +1375,14 @@ impl Session {
                 });
             }
             RasterGesture::Drag { from, to } => {
+                // With a selection, the selected pixels are set down; a
+                // layer they cannot move on is refused, as its settings row
+                // says.
+                if self.active_image().is_some_and(|image| image.doc().selection.is_some()) {
+                    self.change(|doc| doc.drop_pixels(from, to));
+                    return;
+                }
+                self.change(Doc::end_live);
                 let dx = (to[0] - from[0]).round();
                 let dy = (to[1] - from[1]).round();
                 if dx.is_finite() && dy.is_finite() {
@@ -1000,12 +1398,88 @@ impl Session {
         }
     }
 
-    /// A Layers page edit: blend mode, opacity, fill, or a lock.
+    /// A Layers or Properties page edit: blend mode, opacity, fill, a lock,
+    /// a curve and its channel, a grade, or a mask's feather.
     fn property(&mut self, prop: &Value, value: &Value, preview: bool) {
         let Some(name) = prop.as_str() else {
             return;
         };
         let value = serde_json::from_value::<PropValue>(value.clone()).ok();
+        let Some(active) = self.active_image().and_then(|image| image.doc().active) else {
+            return;
+        };
+        match (name, &value) {
+            ("curve_channel", Some(PropValue::Index(index))) => {
+                self.curve_channel = usize::from(*index).min(3);
+                self.curve_point = None;
+                return;
+            }
+            ("curve", Some(PropValue::Curve(points))) => {
+                let points: Vec<[f64; 2]> = points.iter().map(|(x, y)| [*x, *y]).collect();
+                let channel = self.curve_channel;
+                // The point moved is the one that differs from the curve
+                // as it was, for the input and output under it.
+                let before = self.active_image().and_then(|image| match &image.doc().picture.find(active)?.kind {
+                    Kind::Curves(curves) => Some(curves.channel(channel).clone()),
+                    _ => None,
+                });
+                if let Some(moved) = points.iter().find(|point| !before.as_ref().is_some_and(|before| before.contains(point))) {
+                    self.curve_point = Some(*moved);
+                }
+                self.change(|doc| doc.set_curve(active, channel, &points, preview, None));
+                return;
+            }
+            // A text's settings, from its Properties.
+            (prop, Some(value)) if prop.starts_with("text_") => {
+                let Some(mut style) = self.active_image().and_then(|image| match &image.doc().picture.find(active)?.kind {
+                    Kind::Text(text) => Some(text.style),
+                    _ => None,
+                }) else {
+                    return;
+                };
+                match (prop, value) {
+                    ("text_face", PropValue::Index(index)) => style.face = if *index == 1 { Face::Mono } else { Face::Inter },
+                    ("text_size", PropValue::Number(number)) => style.size = *number as f32,
+                    ("text_color", PropValue::Rgb(rgb)) => style.color = *rgb,
+                    ("text_toggles", PropValue::Index(index)) => match index {
+                        0 => style.bold = !style.bold,
+                        1 => style.italic = !style.italic,
+                        2 => style.underline = !style.underline,
+                        _ => style.all_caps = !style.all_caps,
+                    },
+                    ("text_align", PropValue::Index(index)) => style.align = Align::ALL[usize::from(*index).min(3)],
+                    ("text_line_height", PropValue::Number(number)) => style.line_height = *number as f32,
+                    ("text_spacing", PropValue::Number(number)) => style.letter_spacing = *number as f32,
+                    _ => return,
+                }
+                self.change(|doc| doc.set_text_style(active, style, preview));
+                return;
+            }
+            ("feather", Some(PropValue::Number(number))) => {
+                let number = *number;
+                self.change(|doc| doc.set_feather(active, number, preview, None));
+                return;
+            }
+            (grade, Some(PropValue::Number(number))) if grade.starts_with("grade_") => {
+                let number = *number as f32;
+                let Some(mut settings) = self.active_image().and_then(|image| match &image.doc().picture.find(active)?.kind {
+                    Kind::Grade(grade) => Some(*grade),
+                    _ => None,
+                }) else {
+                    return;
+                };
+                match grade {
+                    "grade_exposure" => settings.exposure = number,
+                    "grade_contrast" => settings.contrast = number,
+                    "grade_saturation" => settings.saturation = number,
+                    "grade_temperature" => settings.temperature = number,
+                    _ => return,
+                }
+                self.change(|doc| doc.set_grade(active, settings, preview, None));
+                return;
+            }
+            _ => {}
+        }
         let setting = match (name, value) {
             ("blend", Some(PropValue::Index(index))) => Blend::ALL.get(usize::from(index)).copied().map(Setting::Blend),
             ("opacity", Some(PropValue::Number(number))) => Some(Setting::Opacity(number)),
@@ -1202,8 +1676,10 @@ impl Session {
         let Some(folder) = self.project.clone() else {
             return;
         };
-        // Nothing is copied for a write while a stroke is drawn anywhere.
-        if self.images.iter().any(|image| image.gallery.frames.iter().any(|frame| frame.doc.drawing())) {
+        // Nothing is copied for a write while a stroke is drawn or a slider
+        // held anywhere: taking the picture would finish the held step and
+        // split one drag into two undo steps.
+        if self.images.iter().any(|image| image.gallery.frames.iter().any(|frame| frame.doc.drawing() || frame.doc.held())) {
             return;
         }
         let taken: Vec<PathBuf> = self
@@ -1469,21 +1945,41 @@ impl Session {
     /// The active image's picture and every declaration.
     pub fn emit(&mut self) -> Vec<AppMessage> {
         self.live_due = false;
+        self.emit_due = false;
         let mut out = self.raster_only();
+        if self.leave_memory_if_full() {
+            out = self.raster_only();
+        }
         out.extend(self.declared());
         out
     }
 
     /// The active image's picture, written for the host when it changed.
+    /// While a slider is held only the picture is written; its thumbnails
+    /// and the filmstrip's wait until it is let go.
     fn raster_only(&mut self) -> Vec<AppMessage> {
         let index = self.active;
-        if index >= self.images.len() {
+        let Some(image) = self.images.get_mut(index) else {
             return Vec::new();
+        };
+        let held = image.doc().held();
+        image.thumbs_owed = held;
+        if !held {
+            self.write_film(index);
         }
-        self.write_film(index);
         let view = self.raster_view(index, false);
-        self.write_thumbnails(index);
+        if !held {
+            self.write_thumbnails(index);
+        }
         view.map(AppMessage::Raster).into_iter().collect()
+    }
+
+    /// What tells whether a held slider's value changed anything shown:
+    /// the tab and its picture's edits, which of strip or picture has the
+    /// keyboard, and the curve shown and its point.
+    fn looks(&self) -> (usize, Option<(u64, u64, bool)>, usize, Option<[f64; 2]>) {
+        let image = self.active_image().map(|image| (image.frame().uid, image.doc().edits, image.strip_focus));
+        (self.active, image, self.curve_channel, self.curve_point)
     }
 
     /// The view of the picture shown. While a stroke is drawn (`live`), only
@@ -1552,7 +2048,9 @@ impl Session {
                         }
                     }
                     None => {
-                        let _ = files::write_atomic(&picture, frame.doc.composite());
+                        if files::write_atomic(&picture, frame.doc.composite()).is_err() {
+                            self.display_failed = true;
+                        }
                         caught_up(frame);
                         if let (Some((_, since)), Some(rect)) = (earlier, rect) {
                             patch = Some(protocol::RasterPatch { since, rect, file: None });
@@ -1591,6 +2089,7 @@ impl Session {
         } else {
             None
         };
+        let text = frame.doc.editing().map(|editing| TextEditing { rect: editing.rect, caret: editing.caret, selection: editing.selection });
         Some(RasterView {
             tab: image_id,
             width,
@@ -1604,6 +2103,7 @@ impl Session {
             bounds: bounds.map(|rect| [f64::from(rect.x), f64::from(rect.y), f64::from(rect.w), f64::from(rect.h)]),
             camera,
             film: Some(film),
+            text,
         })
     }
 
@@ -1628,6 +2128,11 @@ impl Session {
                 opacity: f64::from(tools.eraser.opacity) / 100.0,
                 pressure: tools.eraser.pressure,
             },
+            ToolKind::Heal | ToolKind::Stamp => {
+                let settings = if tools.tool == ToolKind::Heal { tools.heal } else { tools.stamp };
+                RasterTool::Sampler { size: f64::from(settings.size), pressure: false, source: tools.source, offset: tools.stroke.or(tools.kept) }
+            }
+            ToolKind::Text => RasterTool::Text,
             ToolKind::Hand => RasterTool::Hand,
             ToolKind::Zoom => RasterTool::Zoom,
         }
@@ -1643,15 +2148,41 @@ impl Session {
         };
         let tab = image.id.clone();
         let frame = image.frame_mut();
+        let (width, height) = thumb_size(frame.doc.picture.width, frame.doc.picture.height);
+        // A Color Grade layer shows the picture.
+        let graded = frame.doc.picture.every_node().iter().any(|node| matches!(node.kind, Kind::Grade(_)) && !node.is_group());
+        let shown = if graded {
+            let (w, h) = (frame.doc.picture.width, frame.doc.picture.height);
+            Some(files::resample(w, h, frame.doc.composite(), width, height))
+        } else {
+            None
+        };
         let picture = &frame.doc.picture;
-        let (width, height) = thumb_size(picture.width, picture.height);
-        let layers = picture.all_layers();
-        frame.thumbs.retain(|id, _| layers.contains(id));
-        for id in layers {
-            let (Some(node), Some(pixels)) = (picture.find(id), picture.pixels.get(&id)) else {
+        // Each layer's pixels, each mask's grey, and each Curves layer's
+        // curve; a text shows its icon instead.
+        let mut wanted: Vec<(u64, Vec<u8>)> = Vec::new();
+        for node in picture.every_node() {
+            if let Some(mask) = &node.mask
+                && let Some(pixels) = picture.pixels.get(&mask.id)
+            {
+                wanted.push((mask.id, thumbnail(picture.width, picture.height, node.offset, pixels, width, height)));
+            }
+            if node.is_group() {
                 continue;
-            };
-            let bytes = thumbnail(picture.width, picture.height, node.offset, pixels, width, height);
+            }
+            match &node.kind {
+                Kind::Pixels => {
+                    if let Some(pixels) = picture.pixels.get(&node.id) {
+                        wanted.push((node.id, thumbnail(picture.width, picture.height, node.offset, pixels, width, height)));
+                    }
+                }
+                Kind::Curves(curves) => wanted.push((node.id, curve_thumbnail(curves, width, height))),
+                Kind::Grade(_) => wanted.extend(shown.clone().map(|bytes| (node.id, bytes))),
+                Kind::Text(_) => {}
+            }
+        }
+        frame.thumbs.retain(|id, _| wanted.iter().any(|(kept, _)| kept == id));
+        for (id, bytes) in wanted {
             if frame.thumbs.get(&id).is_some_and(|(kept, _)| *kept == bytes) {
                 continue;
             }
@@ -1751,12 +2282,39 @@ impl Session {
 }
 
 impl Drop for Session {
-    /// The scratch pictures go with the session; a project's cache stays.
+    /// The scratch pictures, and the folder in memory, go with the session;
+    /// a project's cache stays.
     fn drop(&mut self) {
-        if self.project.is_none() {
+        if self.project.is_none() || self.in_memory {
             let _ = std::fs::remove_dir_all(&self.cache);
         }
     }
+}
+
+/// A folder of this session's own in memory for the host's pictures,
+/// `$XDG_RUNTIME_DIR/inpainter/image-editor/<process>-<number>`, when the
+/// system has one: the pictures, rows, and thumbnails are written many
+/// times a second while a slider is held, read by the host, and never
+/// kept. Folders left by programs no longer running are removed first.
+fn memory_folder() -> Option<PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
+    if !runtime.is_absolute() || !runtime.is_dir() {
+        return None;
+    }
+    let parent = runtime.join("inpainter").join("image-editor");
+    let processes = Path::new("/proc/self").exists();
+    for entry in std::fs::read_dir(&parent).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let process = name.to_str().and_then(|name| name.split('-').next()).and_then(|id| id.parse::<u32>().ok());
+        if processes && let Some(process) = process && !Path::new("/proc").join(process.to_string()).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let folder = parent.join(format!("{}-{number}", std::process::id()));
+    std::fs::create_dir_all(&folder).ok()?;
+    Some(folder)
 }
 
 /// A scratch folder of this session's own for the host's pictures while
@@ -1842,7 +2400,7 @@ fn snapshot(gallery: &mut Gallery) -> (Vec<files::Snapshot>, usize) {
         .iter_mut()
         .map(|frame| {
             frame.doc.finish_edit();
-            files::Snapshot::take(frame.uid, &frame.name, &frame.doc.picture, frame.doc.active, frame.doc.edits, &frame.pngs)
+            files::Snapshot::take(frame.uid, &frame.name, &frame.doc.picture, frame.doc.active, frame.doc.generation, &frame.pngs)
         })
         .collect();
     (pictures, gallery.shown)
@@ -1919,6 +2477,25 @@ fn keeps_focus(id: &str) -> bool {
             "undo" | "redo" | "select_tab" | "close_tab" | "new_image" | "open" | "save" | "save_as" | "export_png"
                 | "export_jpeg" | "toggle_panel"
         )
+}
+
+/// A Curves layer's picture: its curve for all three channels, dark on
+/// clear, across the frame.
+fn curve_thumbnail(curves: &Curves, to_w: u32, to_h: u32) -> Vec<u8> {
+    let mut out = vec![0u8; to_w as usize * to_h as usize * 4];
+    let points: Vec<crate::picture::CurvePoint> = curves.rgb.iter().map(|point| crate::picture::CurvePoint { x: point[0], y: point[1] }).collect();
+    let row = |x: u32| {
+        let value = crate::picture::curve_y(&points, f64::from(x) / f64::from(to_w.max(2) - 1));
+        ((1.0 - value) * f64::from(to_h - 1)).round() as i32
+    };
+    for x in 0..to_w {
+        let (here, next) = (row(x), row((x + 1).min(to_w - 1)));
+        for y in here.min(next)..=here.max(next) {
+            let at = ((y.clamp(0, to_h as i32 - 1) as u32 * to_w + x) * 4) as usize;
+            out[at..at + 4].copy_from_slice(&[30, 30, 34, 255]);
+        }
+    }
+    out
 }
 
 /// One layer drawn small in the picture's frame, clear where it does not
@@ -2504,6 +3081,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(folder);
     }
 
+    /// Catches a Properties page that only shows a text: its size and bold,
+    /// changed there, change the chosen text layer, each one undo step, and
+    /// the page shows the new values.
+    #[test]
+    fn a_texts_properties_edit_its_style() {
+        let mut session = Session::launch();
+        let _ = session.greeting();
+        let text = session.images[0].doc_mut().add_text("Hi", [100, 100], None, crate::text::Style::default(), None).unwrap();
+        session.images[0].doc_mut().activate(text);
+        command(&mut session, "panel_page", json!({ "page": 1 }));
+        let style = |session: &Session| match &session.images[0].doc().picture.find(text).unwrap().kind {
+            Kind::Text(text) => text.style,
+            _ => panic!("not a text"),
+        };
+        let set = |session: &mut Session, prop: &str, value: PropValue| {
+            session.handle(HostMessage::Property { prop: json!(prop), value: serde_json::to_value(value).unwrap(), preview: false })
+        };
+        set(&mut session, "text_size", PropValue::Number(40.0));
+        let messages = set(&mut session, "text_toggles", PropValue::Index(0));
+        assert_eq!((style(&session).size, style(&session).bold), (40.0, true));
+        let shown = messages.iter().find_map(|message| match message {
+            AppMessage::Properties(properties) => Some(properties.clone()),
+            _ => None,
+        });
+        let properties = shown.expect("the panel was not sent again");
+        let rows: Vec<&protocol::Row> = properties.sections.iter().flat_map(|section| section.rows.iter()).collect();
+        assert!(rows.iter().any(|row| row.prop == json!("text_size") && row.value == PropValue::Number(40.0)), "the page does not show the new size");
+        command(&mut session, "undo", json!({}));
+        assert!(!style(&session).bold, "bold was not its own step");
+        assert_eq!(style(&session).size, 40.0);
+        command(&mut session, "undo", json!({}));
+        assert_eq!(style(&session).size, crate::text::Style::default().size, "the size was not its own step");
+    }
+
     /// Catches a stroke taken off the picture while it is still drawn: the
     /// host's ping each second, a camera move, and a new viewport between
     /// its parts leave every part on the picture.
@@ -2736,5 +3347,383 @@ mod tests {
             lengths.push(session.images[0].gallery.frames.len());
         }
         assert_eq!(lengths, [3, 3, 3, 2, 1], "the five calls are not five steps");
+    }
+
+    fn sampler_offset(view: &RasterView) -> Option<[f64; 2]> {
+        match view.tool {
+            RasterTool::Sampler { offset, .. } => offset,
+            _ => panic!("the tool is not a sampler"),
+        }
+    }
+
+    /// Catches Aligned ignored: with it on, the offset from the first stroke
+    /// holds for the next, which copies from beside where it paints; with
+    /// it off, each stroke starts again from the source. The declared
+    /// offset follows it, and the crosshair's source stays.
+    #[test]
+    fn the_stamp_keeps_its_offset_when_aligned_and_starts_again_when_not() {
+        let mut session = Session::launch();
+        let _ = session.greeting();
+        {
+            let doc = session.images[0].doc_mut();
+            let id = doc.active.unwrap();
+            let pixels = doc.picture.pixels.get_mut(&id).unwrap();
+            for y in 0..1080usize {
+                for x in 0..400usize {
+                    let colour = if x < 200 { [255, 0, 0, 255] } else if x >= 250 && x < 350 { [0, 0, 255, 255] } else { continue };
+                    pixels.data[(y * 1920 + x) * 4..(y * 1920 + x) * 4 + 4].copy_from_slice(&colour);
+                }
+            }
+            doc.add_layer("Retouch", None, None).unwrap();
+        }
+        command(&mut session, "tool", json!({ "tool": "stamp" }));
+        let view = last_raster(&gesture(&mut session, RasterGesture::Source { at: [100.0, 100.0] }));
+        assert!(matches!(view.tool, RasterTool::Sampler { source: Some([100.0, 100.0]), offset: None, .. }));
+        let view = last_raster(&stroke(&mut session, [400.0, 100.0], [402.0, 100.0]));
+        assert_eq!(at(&mut session, 401, 100), [255, 0, 0, 255], "the first stroke did not copy the source");
+        assert_eq!(sampler_offset(&view), Some([-300.0, 0.0]), "aligned, the offset was not kept");
+        stroke(&mut session, [600.0, 300.0], [602.0, 300.0]);
+        assert_eq!(at(&mut session, 601, 300), [0, 0, 255, 255], "aligned, the second stroke did not keep the offset");
+
+        command(&mut session, "toggle_aligned", json!({}));
+        gesture(&mut session, RasterGesture::Source { at: [100.0, 100.0] });
+        let view = last_raster(&stroke(&mut session, [400.0, 500.0], [402.0, 500.0]));
+        assert_eq!(sampler_offset(&view), None, "not aligned, the offset stayed");
+        stroke(&mut session, [700.0, 700.0], [702.0, 700.0]);
+        assert_eq!(at(&mut session, 701, 700), [255, 0, 0, 255], "not aligned, the stroke did not start again from the source");
+    }
+
+    /// The audit's picture: an opaque patterned layer and translucent ones
+    /// above it, then `grades` Color Grades and `curves` Curves, with the
+    /// Properties page shown.
+    fn patterned(width: u32, height: u32, layers: usize, grades: usize, curves: usize) -> Session {
+        let mut picture = Picture::blank(width, height);
+        for layer in 0..layers {
+            let id = if layer == 0 {
+                picture.nodes[0].id
+            } else {
+                let id = picture.take_id();
+                picture.nodes.push(crate::picture::Node::layer(id, &format!("Layer {layer}")));
+                id
+            };
+            let mut pixels = Pixels::clear(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    let at = ((y * width + x) * 4) as usize;
+                    let r = ((x * 173 / width + y * 51 / height + layer as u32 * 13) % 256) as u8;
+                    let g = ((y * 219 / height + x * 17 / width) % 256) as u8;
+                    let b = ((x + y) % 251) as u8;
+                    pixels.data[at..at + 4].copy_from_slice(&[r, g, b, if layer == 0 { 255 } else { 96 }]);
+                }
+            }
+            picture.pixels.insert(id, pixels);
+        }
+        let mut doc = Doc::new(picture);
+        for index in 0..grades {
+            doc.add_adjustment(Kind::Grade(Grade { exposure: 0.1 * index as f32, saturation: 5.0, ..Grade::default() }), None, None).unwrap();
+        }
+        for _ in 0..curves {
+            doc.add_adjustment(Kind::Curves(Curves::default()), None, None).unwrap();
+        }
+        let mut session = Session::launch();
+        *session.images[0].doc_mut() = doc;
+        session.page = Page::Properties;
+        session.emit();
+        session
+    }
+
+    fn preview(session: &mut Session, prop: &str, value: PropValue) -> Vec<AppMessage> {
+        session.handle(HostMessage::Property { prop: json!(prop), value: serde_json::to_value(value).unwrap(), preview: true })
+    }
+
+    fn rasters(messages: &[AppMessage]) -> usize {
+        messages.iter().filter(|message| matches!(message, AppMessage::Raster(_))).count()
+    }
+
+    /// The exposure the last Properties page sent shows.
+    fn shown_exposure(messages: &[AppMessage]) -> Option<f64> {
+        messages.iter().rev().find_map(|message| match message {
+            AppMessage::Properties(properties) => properties.sections.iter().flat_map(|section| section.rows.iter()).find(|row| row.prop == json!("grade_exposure")).and_then(|row| match row.value {
+                PropValue::Number(number) => Some(number),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+
+    fn exposure(session: &Session) -> f32 {
+        let doc = session.images[0].doc();
+        match &doc.picture.find(doc.active.unwrap()).unwrap().kind {
+            Kind::Grade(grade) => grade.exposure,
+            _ => panic!("not a Color Grade"),
+        }
+    }
+
+    /// The Color Grade layer's thumbnail bytes, and the filmstrip's.
+    fn thumbnails(session: &Session) -> (Vec<u8>, Vec<u8>) {
+        let frame = session.images[0].frame();
+        let grade = frame.doc.active.unwrap();
+        (frame.thumbs[&grade].0.clone(), frame.film.as_ref().unwrap().1.clone())
+    }
+
+    /// Catches a held slider that sends the picture and panel again for
+    /// every value: the values waiting are applied in order and sent once,
+    /// showing the last; the thumbnails wait until the slider is let go;
+    /// and the gesture is one step.
+    #[test]
+    fn a_held_slider_is_sent_once_for_the_values_waiting() {
+        let mut session = patterned(64, 48, 2, 1, 0);
+        let before = thumbnails(&session);
+        let mut waiting = Vec::new();
+        for step in 1..=8 {
+            waiting.extend(preview(&mut session, "grade_exposure", PropValue::Number(f64::from(step) * 0.25)));
+        }
+        assert_eq!(rasters(&waiting), 0, "a value was sent by itself");
+        assert_eq!(exposure(&session), 2.0, "the values were not applied in order");
+        let sent = session.take_live();
+        assert_eq!(rasters(&sent), 1);
+        assert_eq!(shown_exposure(&sent), Some(2.0));
+        assert!(session.take_live().is_empty(), "the values were sent twice");
+        assert_eq!(thumbnails(&session), before, "a thumbnail was written while the slider was held");
+
+        let finished = command(&mut session, "finish_edit", json!({}));
+        assert_eq!(shown_exposure(&finished), Some(2.0));
+        let after = thumbnails(&session);
+        assert_ne!(after.0, before.0, "the layer's thumbnail was not written when the slider was let go");
+        assert_ne!(after.1, before.1, "the filmstrip's thumbnail was not written when the slider was let go");
+        command(&mut session, "undo", json!({}));
+        assert_eq!(exposure(&session), 0.0, "the held slider was more than one step");
+        command(&mut session, "undo", json!({}));
+        assert!(session.images[0].doc().picture.find(session.images[0].doc().active.unwrap()).is_none_or(|node| !matches!(node.kind, Kind::Grade(_))), "undo took back less than the gesture");
+    }
+
+    /// Catches a value the layer already has that is counted, composited,
+    /// or sent again: twenty of them change nothing and send nothing, a
+    /// value let go that changes nothing is no step, and the Layers page's
+    /// settings and a curve do the same.
+    #[test]
+    fn the_same_value_again_changes_nothing() {
+        let mut session = patterned(64, 48, 2, 1, 0);
+        preview(&mut session, "grade_exposure", PropValue::Number(0.5));
+        assert_eq!(rasters(&session.take_live()), 1);
+        command(&mut session, "finish_edit", json!({}));
+        let edits = session.images[0].doc().edits;
+        let mut sent = Vec::new();
+        for _ in 0..20 {
+            sent.extend(preview(&mut session, "grade_exposure", PropValue::Number(0.5)));
+            assert!(!session.images[0].doc().out_of_date(), "the same value made the picture out of date");
+        }
+        sent.extend(session.take_live());
+        assert_eq!(rasters(&sent), 0, "the same value was sent again");
+        assert_eq!(session.images[0].doc().edits, edits, "the same value was counted as an edit");
+
+        let doc = session.images[0].doc_mut();
+        let grade = doc.active.unwrap();
+        let Kind::Grade(settings) = doc.picture.find(grade).unwrap().kind.clone() else { panic!("not a Color Grade") };
+        let edits = doc.edits;
+        doc.set_grade(grade, settings, false, None).unwrap();
+        doc.set_setting(Setting::Opacity(1.0), false).unwrap();
+        doc.set_setting(Setting::Blend(Blend::Normal), true).unwrap();
+        doc.finish_edit();
+        assert_eq!(doc.edits, edits, "a value the layer has was counted as an edit");
+        doc.undo();
+        assert_eq!(exposure(&session), 0.0, "a value the layer has made a step");
+
+        let doc = session.images[0].doc_mut();
+        let curves = doc.add_adjustment(Kind::Curves(Curves::default()), None, None).unwrap();
+        doc.refresh();
+        let edits = doc.edits;
+        doc.set_curve(curves, 0, &[[0.0, 0.0], [1.0, 1.0]], true, None).unwrap();
+        assert_eq!(doc.edits, edits, "the curve it has was counted as an edit");
+        assert!(!doc.out_of_date(), "the curve it has made the picture out of date");
+        assert!(!doc.held(), "the curve it has began a held slider");
+    }
+
+    /// Catches the value let go lost behind the held ones, or answers sent
+    /// before the picture they follow: a ping after held values is answered
+    /// after their picture, and a value let go is always sent, even when it
+    /// changes nothing.
+    #[test]
+    fn the_value_let_go_always_lands() {
+        let mut session = patterned(64, 48, 2, 1, 0);
+        preview(&mut session, "grade_exposure", PropValue::Number(0.75));
+        preview(&mut session, "grade_exposure", PropValue::Number(1.0));
+        let answered = session.handle(HostMessage::Ping);
+        let pong = answered.iter().position(|message| *message == AppMessage::Pong).expect("no pong");
+        let raster = answered.iter().position(|message| matches!(message, AppMessage::Raster(_))).expect("the held values were not sent before the ping's answer");
+        assert!(raster < pong);
+        assert_eq!(shown_exposure(&answered), Some(1.0));
+
+        preview(&mut session, "grade_exposure", PropValue::Number(1.5));
+        let set = |session: &mut Session, value: f64| {
+            session.handle(HostMessage::Property { prop: json!("grade_exposure"), value: serde_json::to_value(PropValue::Number(value)).unwrap(), preview: false })
+        };
+        let landed = set(&mut session, 1.25);
+        assert_eq!(rasters(&landed), 1, "the value let go was not sent");
+        assert_eq!(shown_exposure(&landed), Some(1.25));
+        assert_eq!(exposure(&session), 1.25);
+        assert!(!session.images[0].doc().held(), "letting go left the slider held");
+        let again = set(&mut session, 1.25);
+        assert_eq!(shown_exposure(&again), Some(1.25), "the value let go that changes nothing was not sent");
+        assert!(session.take_live().is_empty());
+        command(&mut session, "undo", json!({}));
+        assert_eq!(exposure(&session), 0.0, "the held values and the value let go were not one step");
+    }
+
+    /// Catches a picture that silently stops changing when its memory
+    /// folder is full: a picture that cannot be written there is written to
+    /// a folder on disk instead, and sent from there.
+    #[test]
+    fn a_full_memory_folder_moves_the_pictures_to_disk() {
+        let mut session = Session::launch();
+        let _ = session.greeting();
+        // A file where the folder should be: nothing can be written in it.
+        let blocked = scratch_folder();
+        let _ = std::fs::remove_dir_all(&blocked);
+        std::fs::write(&blocked, b"full").unwrap();
+        session.cache = blocked.clone();
+        session.in_memory = true;
+        session.images[0].frame_mut().written = None;
+        let view = last_raster(&command(&mut session, "add_layer", json!({})));
+        assert!(!session.in_memory, "the pictures stayed in the full folder");
+        assert!(!view.picture.starts_with(blocked.display().to_string().as_str()));
+        assert!(Path::new(&view.picture).is_file(), "the picture was not written on disk");
+        let _ = std::fs::remove_file(blocked);
+    }
+
+    /// Catches autosave splitting a held slider into two undo steps: inside
+    /// a project, a write falling due while the slider is held waits, and
+    /// one Undo after letting go takes back the whole drag.
+    #[test]
+    fn autosave_waits_for_a_held_slider() {
+        let folder = scratch_folder();
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = folder.canonicalize().unwrap();
+        let mut session = patterned(64, 48, 2, 1, 0);
+        session.handle(HostMessage::Project { folder: folder.display().to_string() });
+        preview(&mut session, "grade_exposure", PropValue::Number(0.75));
+        session.take_live();
+        session.images[0].unwritten_since = Some(Instant::now() - WRITE_AFTER * 2);
+        session.tick();
+        assert!(session.images[0].saving.is_none(), "a write started while the slider was held");
+        preview(&mut session, "grade_exposure", PropValue::Number(1.5));
+        session.handle(HostMessage::Property { prop: json!("grade_exposure"), value: serde_json::to_value(PropValue::Number(1.5)).unwrap(), preview: false });
+        assert_eq!(exposure(&session), 1.5);
+        command(&mut session, "undo", json!({}));
+        assert_eq!(exposure(&session), 0.0, "the held drag became more than one step");
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    /// Catches the histogram made again while a curve is dragged: what lies
+    /// beneath the curve does not change, so it is made once; painting
+    /// beneath it makes it again.
+    #[test]
+    fn dragging_a_curve_keeps_its_histogram() {
+        let mut session = patterned(64, 48, 2, 0, 1);
+        let first = session.images[0].doc().histograms_made.get();
+        assert!(first >= 1, "the Curves page showed no histogram");
+        for step in 0..10 {
+            let points = vec![(0.0, 0.0), (0.5, 0.5 + f64::from(step) * 0.03), (1.0, 1.0)];
+            preview(&mut session, "curve", PropValue::Curve(points));
+            assert_eq!(rasters(&session.take_live()), 1);
+        }
+        command(&mut session, "finish_edit", json!({}));
+        assert_eq!(session.images[0].doc().histograms_made.get(), first, "dragging the curve made its histogram again");
+
+        let background = session.images[0].doc().picture.nodes[0].id;
+        command(&mut session, "layer_click", json!({ "node": background }));
+        command(&mut session, "tool", json!({ "tool": "brush" }));
+        stroke(&mut session, [2.0, 2.0], [60.0, 40.0]);
+        let curves = session.images[0].doc().picture.nodes.last().unwrap().id;
+        command(&mut session, "layer_click", json!({ "node": curves }));
+        assert!(session.images[0].doc().histograms_made.get() > first, "painting beneath the curve kept the old histogram");
+    }
+
+    /// Catches a save that copies every layer's pixels after only an
+    /// adjustment changed: once written, a Color Grade's new value copies
+    /// none, and a stroke copies its layer again.
+    #[test]
+    fn a_save_after_a_settings_change_copies_no_pixels() {
+        let mut session = patterned(64, 48, 2, 1, 0);
+        let path = std::env::temp_dir().join(format!("image-editor-copies-{}.ipx", std::process::id()));
+        let write = |session: &mut Session| {
+            let gallery = &mut session.images[0].gallery;
+            let (pictures, shown) = snapshot(gallery);
+            let copied = pictures[0].copied();
+            keep(gallery, files::write_ipx(&path, pictures, shown, None).unwrap());
+            copied
+        };
+        assert_eq!(write(&mut session), 2, "the first write did not copy both layers");
+        preview(&mut session, "grade_exposure", PropValue::Number(0.5));
+        command(&mut session, "finish_edit", json!({}));
+        assert_eq!(write(&mut session), 0, "a change to the grade copied pixels");
+        let background = session.images[0].doc().picture.nodes[0].id;
+        command(&mut session, "layer_click", json!({ "node": background }));
+        command(&mut session, "tool", json!({ "tool": "brush" }));
+        stroke(&mut session, [2.0, 2.0], [60.0, 40.0]);
+        assert_eq!(write(&mut session), 2, "a stroke did not copy the layers again");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Times a held slider's value from its line to the picture and panel
+    /// sent, as the host sees it, at the owner's 1370 × 1148 with four
+    /// layers: under 16 ms for a Color Grade and 25 ms for Curves.
+    #[test]
+    #[ignore]
+    fn a_held_slider_keeps_up() {
+        for (grades, curves) in [(1, 0), (3, 0), (0, 1), (1, 1)] {
+            let mut session = patterned(1370, 1148, 4, grades, curves);
+            let mut times = Vec::new();
+            for step in 0..9 {
+                let started = Instant::now();
+                let value = if curves > 0 { json!({ "curve": [[0.0, 0.0], [0.5, 0.55 + f64::from(step) * 0.02], [1.0, 1.0]] }) } else { json!({ "number": 0.3 + f64::from(step) * 0.1 }) };
+                let prop = if curves > 0 { "curve" } else { "grade_exposure" };
+                let mut out = session.handle(HostMessage::Property { prop: json!(prop), value, preview: true });
+                out.extend(session.take_live());
+                let lines: usize = out.iter().map(|message| protocol::encode_app_message(message).len()).sum();
+                assert!(lines > 0, "nothing was sent");
+                times.push(started.elapsed());
+            }
+            times.sort();
+            let median = times[times.len() / 2];
+            eprintln!("{grades} grades, {curves} curves: fastest {:?}, median {median:?}, slowest {:?}", times[0], times[times.len() - 1]);
+            if !cfg!(debug_assertions) {
+                let most = if curves > 0 { 25 } else { 16 };
+                assert!(median < Duration::from_millis(most), "{median:?}");
+            }
+        }
+    }
+
+    /// Catches typing that does not reach the text, a Copy with no answer,
+    /// and Escape or another tool that leaves editing open: through
+    /// `raster_text`, words are typed, a word selected with the keyboard is
+    /// answered with `clipboard`, pasted back as typing, and the text ends
+    /// when Escape is pressed, one step kept in the layers.
+    #[test]
+    fn typing_goes_through_raster_text() {
+        let mut session = Session::launch();
+        let _ = session.greeting();
+        command(&mut session, "tool", json!({ "tool": "text" }));
+        let view = last_raster(&gesture(&mut session, RasterGesture::Click { at: [100.0, 100.0] }));
+        assert!(matches!(view.tool, RasterTool::Text));
+        assert!(view.text.is_some(), "a click made no text to type in");
+        let tab = session.images[0].id.clone();
+        let text = |session: &mut Session, input: protocol::TextInput| session.handle(HostMessage::RasterText { tab: tab.clone(), input });
+        let key = |key: protocol::TextKey, shift: bool, word: bool| protocol::TextInput::Key { key, shift, word };
+        text(&mut session, protocol::TextInput::Insert { text: "Golden hour".into() });
+        text(&mut session, key(protocol::TextKey::Left, true, true));
+        let copied = text(&mut session, key(protocol::TextKey::Copy, false, false));
+        assert!(copied.contains(&AppMessage::Clipboard { text: "hour".into() }), "Copy was not answered");
+        text(&mut session, key(protocol::TextKey::End, false, false));
+        text(&mut session, protocol::TextInput::Insert { text: " ".into() });
+        let view = last_raster(&text(&mut session, protocol::TextInput::Insert { text: "hour".into() }));
+        let editing = view.text.expect("editing ended while typing");
+        assert!(editing.caret[0] > editing.rect[0] + 100.0);
+        let view = last_raster(&text(&mut session, key(protocol::TextKey::Escape, false, false)));
+        assert!(view.text.is_none(), "Escape did not end editing");
+        let doc = session.images[0].doc();
+        let words: Vec<String> = doc.picture.every_node().iter().filter_map(|node| node.text().map(|text| text.words.clone())).collect();
+        assert_eq!(words, ["Golden hour hour"]);
+        assert!(doc.can_undo());
     }
 }

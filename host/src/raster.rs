@@ -5,18 +5,21 @@
 //! finished gesture in picture pixels. It knows no editor: what a gesture
 //! does is the sub-application's, and the next `raster` view shows it. A
 //! view with a filmstrip gives the strip the bottom of the area, and the
-//! picture the rest.
+//! picture the rest. While the view has a text being typed in, the host
+//! draws its box and caret, and the keyboard and the pointer in the box go
+//! to the text.
 
 use crate::process::RasterDisplay;
 use crate::tablet::Tablet;
 use crate::widgets;
 use draw::document::Camera;
 use eframe::egui::{
-    self, Color32, CursorIcon, Event, Key, MouseWheelUnit, PointerButton, Pos2, Rect,
+    self, Color32, CursorIcon, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect,
     Sense, pos2, vec2,
 };
-use protocol::{RasterGesture, RasterPatch, RasterTool, RasterView};
+use protocol::{RasterGesture, RasterPatch, RasterTool, RasterView, TextEditing, TextInput, TextKey};
 use std::collections::HashMap;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// The gray around the picture, as 0.10's approved views show it.
@@ -52,6 +55,17 @@ const PRESSURE_STEP: f64 = 0.02;
 /// The marching edge's dash, in points, and how often it moves.
 const DASH: f32 = 4.0;
 const MARCH: Duration = Duration::from_millis(120);
+/// Where a tool copies from: a cross of this half-width, dark over white.
+const CROSS: f32 = 7.0;
+const CROSS_DARK: Color32 = Color32::from_black_alpha(200);
+/// A text's selected spans, in the box's blue.
+const TEXT_SELECTED: Color32 = Color32::from_rgba_unmultiplied_const(37, 99, 235, 70);
+/// The caret shows for half of each second, from the last key or press.
+const BLINK: f64 = 1.0;
+/// A text box's side is taken this far outside it, never inside, so a
+/// press at a line's very start or end places the caret there.
+const SIDE_OUT: f32 = 8.0;
+const SIDE_IN: f32 = 0.0;
 
 /// What the pointer finished this frame. A paint drag is its own case: the
 /// window names it as the protocol does. The filmstrip sends declared
@@ -61,8 +75,10 @@ pub(crate) enum Out {
     Painted(Vec<[f64; 3]>),
     /// The newest points of a paint drag still open, after `from` sent.
     PaintPart { from: usize, points: Vec<[f64; 3]> },
-    /// A paint drag let go with Escape.
+    /// A paint drag, or a move whose parts were sent, let go with Escape.
     PaintLetGo,
+    /// The keyboard or the pointer, for the text being typed in.
+    Text(TextInput),
     Action(protocol::Action),
 }
 
@@ -78,6 +94,13 @@ enum Live {
     Lasso { points: Vec<[f64; 2]> },
     Move { from: [f64; 2], to: [f64; 2] },
     Crop { rect: [f64; 4] },
+    /// The text tool's drag, the box a new text wraps in.
+    TextNew { from: [f64; 2], to: [f64; 2] },
+    /// A press inside the box of the text typed in, and its drag.
+    TextPlace,
+    /// A side of the box of the text typed in, dragged: the box as it is
+    /// now, and whether the left side was taken.
+    TextSide { rect: [f64; 4], left: bool },
 }
 
 /// Which part of the crop box a drag took.
@@ -98,6 +121,9 @@ struct Drag {
     /// The crop box when the press took it.
     crop: Option<(Grab, [f64; 4])>,
     moved: bool,
+    /// The last point sent while the drag is open: a move's part, or a
+    /// text's selection.
+    told: [f64; 2],
 }
 
 struct Held {
@@ -118,6 +144,9 @@ pub(crate) struct Pointer {
     /// filmstrip, when it has one.
     pub(crate) shown: Rect,
     film: crate::film::Strip,
+    /// When the text typed in last had a key or a press, in input time,
+    /// so the caret shows at once and then blinks.
+    typed_at: f64,
 }
 
 impl Default for Pointer {
@@ -129,6 +158,7 @@ impl Default for Pointer {
             held: Vec::new(),
             shown: Rect::NOTHING,
             film: crate::film::Strip::default(),
+            typed_at: 0.0,
         }
     }
 }
@@ -185,11 +215,20 @@ impl Pointer {
         }
         let press_inside = over && !dismissing;
         let tool = display.view.tool.clone();
+        // Space types into a text rather than pans.
+        let typing = display.view.text.is_some();
+        let space = space && !typing;
+        if typing && !locked && !ui.ctx().text_edit_focused() {
+            self.keyboard(ui, out);
+        }
 
         if self.drag.is_some() && ui.input(|input| input.key_pressed(Key::Escape)) {
-            if let Some(Drag { live: Live::Paint { sent, .. }, .. }) = &self.drag
-                && *sent > 0
-            {
+            let parted = match &self.drag {
+                Some(Drag { live: Live::Paint { sent, .. }, .. }) => *sent > 0,
+                Some(Drag { live: Live::Move { .. }, press, told, .. }) => told != press,
+                _ => false,
+            };
+            if parted {
                 out.push(Out::PaintLetGo);
             }
             self.drag = None;
@@ -225,11 +264,21 @@ impl Pointer {
                 self.pan = None;
             }
         } else if self.drag.is_some() {
-            self.update(ui, display, rect, tablet);
+            self.update(ui, display, rect, tablet, out);
             self.send_part(out);
             if released(PointerButton::Primary) || !down(PointerButton::Primary) {
                 self.finish(display, out);
             }
+        }
+        // A double-click in the box of the text typed in takes its word.
+        if let (Some(text), Some(camera), Some(pos)) = (&display.view.text, display.camera, pos)
+            && press_inside
+            && !locked
+            && self.pan.is_none()
+            && ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary))
+            && box_on_screen(&camera, rect, text.rect).contains(pos)
+        {
+            out.push(Out::Text(TextInput::Word { at: picture_at(&camera, rect, pos) }));
         }
 
         moved |= wheel(ui, display, rect, over || self.drag.is_some() || self.pan.is_some());
@@ -259,8 +308,41 @@ impl Pointer {
             return;
         };
         let at = picture_at(&camera, rect, pos);
+        let (shift, alt) = ui.input(|input| (input.modifiers.shift, input.modifiers.alt));
+        // While a text is typed in, a press in its box goes to the text, a
+        // side drags the box, and a press elsewhere is the text tool's.
+        if let Some(text) = &display.view.text {
+            self.typed_at = ui.input(|input| input.time);
+            let frame = box_on_screen(&camera, rect, text.rect);
+            if let Some(left) = text_side(frame, pos) {
+                self.drag = Some(Drag {
+                    live: Live::TextSide { rect: text.rect, left },
+                    press: at,
+                    crop: None,
+                    moved: false,
+                    told: at,
+                });
+                return;
+            }
+            let live = if frame.contains(pos) {
+                out.push(Out::Text(TextInput::Place { at, extend: shift }));
+                Live::TextPlace
+            } else {
+                Live::TextNew { from: at, to: at }
+            };
+            self.drag = Some(Drag { live, press: at, crop: None, moved: false, told: at });
+            return;
+        }
         let live = match &display.view.tool {
-            RasterTool::Brush { .. } | RasterTool::Erase { .. } => Live::Paint { points: Vec::new(), sent: 0 },
+            // Alt-click sets where the tool copies from.
+            RasterTool::Sampler { .. } if alt => {
+                out.push(Out::Gesture(RasterGesture::Source { at }));
+                return;
+            }
+            RasterTool::Brush { .. } | RasterTool::Erase { .. } | RasterTool::Sampler { .. } => {
+                Live::Paint { points: Vec::new(), sent: 0 }
+            }
+            RasterTool::Text => Live::TextNew { from: at, to: at },
             RasterTool::Marquee => Live::Rect { from: at, to: at },
             RasterTool::Lasso => Live::Lasso { points: vec![at] },
             RasterTool::Move => Live::Move { from: at, to: at },
@@ -274,6 +356,7 @@ impl Pointer {
                     press: at,
                     crop: Some((grab, start)),
                     moved: false,
+                    told: at,
                 };
                 if grab == Grab::New {
                     drag.live = Live::Crop { rect: [at[0], at[1], 0.0, 0.0] };
@@ -288,15 +371,16 @@ impl Pointer {
             RasterTool::Hand | RasterTool::Zoom => return,
         };
         let paints = matches!(live, Live::Paint { .. });
-        self.drag = Some(Drag { live, press: at, crop: None, moved: false });
+        self.drag = Some(Drag { live, press: at, crop: None, moved: false, told: at });
         if paints {
             self.pen = tablet.input().down();
             self.sample(ui, &camera, rect, tablet, spacing(&display.view.tool));
         }
     }
 
-    /// The open drag follows the pointer.
-    fn update(&mut self, ui: &egui::Ui, display: &RasterDisplay, rect: Rect, tablet: &Tablet) {
+    /// The open drag follows the pointer. A move sends its part, and a drag
+    /// in a text's box its selection, each time the pointer moves.
+    fn update(&mut self, ui: &egui::Ui, display: &RasterDisplay, rect: Rect, tablet: &Tablet, out: &mut Vec<Out>) {
         let Some(camera) = display.camera else {
             return;
         };
@@ -317,7 +401,26 @@ impl Pointer {
             drag.moved = true;
         }
         match &mut drag.live {
-            Live::Rect { to, .. } | Live::Move { to, .. } => *to = at,
+            Live::Rect { to, .. } | Live::TextNew { to, .. } => *to = at,
+            Live::Move { from, to } => {
+                *to = at;
+                if drag.told != at {
+                    drag.told = at;
+                    out.push(Out::Gesture(RasterGesture::DragPart { from: *from, to: at }));
+                }
+            }
+            Live::TextPlace => {
+                if drag.told != at {
+                    drag.told = at;
+                    self.typed_at = ui.input(|input| input.time);
+                    out.push(Out::Text(TextInput::Select { at }));
+                }
+            }
+            Live::TextSide { rect: box_, left } => {
+                if let Some(text) = &display.view.text {
+                    *box_ = dragged_side(text.rect, *left, at[0]);
+                }
+            }
             Live::Lasso { points } => {
                 if points.last() != Some(&at) {
                     points.push(at);
@@ -405,6 +508,13 @@ impl Pointer {
                 Out::Gesture(RasterGesture::Lasso { points: points.clone() })
             }
             Live::Move { from, to } if drag.moved => Out::Gesture(RasterGesture::Drag { from: *from, to: *to }),
+            // A click, or a drag that makes a box to wrap in.
+            Live::TextNew { from, to } if drag.moved => Out::Gesture(RasterGesture::Rect { from: *from, to: *to }),
+            Live::TextNew { from, .. } => {
+                out.push(Out::Gesture(RasterGesture::Click { at: *from }));
+                return;
+            }
+            Live::TextSide { rect, .. } if drag.moved => Out::Gesture(RasterGesture::TextBox { rect: *rect }),
             Live::Crop { rect } if drag.moved => {
                 let rect = whole_pixels(*rect, [display.view.width, display.view.height]);
                 if rect[2] < 1.0 || rect[3] < 1.0 {
@@ -443,10 +553,22 @@ impl Pointer {
         if locked {
             return CursorIcon::Default;
         }
+        if let (Some(text), Some(camera), Some(pos)) = (&display.view.text, display.camera, ui.input(|input| input.pointer.hover_pos())) {
+            let frame = box_on_screen(&camera, rect, text.rect);
+            let side = matches!(&self.drag, Some(Drag { live: Live::TextSide { .. }, .. }));
+            return if side || (self.drag.is_none() && text_side(frame, pos).is_some()) {
+                CursorIcon::ResizeHorizontal
+            } else {
+                CursorIcon::Text
+            };
+        }
         match tool {
             RasterTool::Move => CursorIcon::Move,
+            // Alt with a tool that copies from a source aims at it.
+            RasterTool::Sampler { .. } if alt => CursorIcon::Crosshair,
             // The brush's own ring stands for the pointer, however small.
-            RasterTool::Brush { .. } | RasterTool::Erase { .. } => CursorIcon::None,
+            RasterTool::Brush { .. } | RasterTool::Erase { .. } | RasterTool::Sampler { .. } => CursorIcon::None,
+            RasterTool::Text => CursorIcon::Text,
             RasterTool::Crop => {
                 let grab = match (&self.drag, display.camera, display.view.crop, ui.input(|input| input.pointer.hover_pos())) {
                     (Some(drag), _, _, _) => drag.crop.map(|(grab, _)| grab),
@@ -495,9 +617,19 @@ impl Pointer {
         let mut crop = view.crop;
         let mut offset = [0.0, 0.0];
         let mut marching = false;
+        let mut text_box = view.text.as_ref().map(|text| text.rect);
         for live in lives {
             match live {
-                Live::Paint { .. } => {}
+                Live::Paint { .. } | Live::TextPlace => {}
+                Live::TextNew { from, to } => {
+                    let frame = Rect::from_two_pos(screen_at(&camera, rect, *from), screen_at(&camera, rect, *to));
+                    hairline_box(&painter, frame);
+                }
+                Live::TextSide { rect: box_, .. } => {
+                    if text_box.is_some() {
+                        text_box = Some(*box_);
+                    }
+                }
                 Live::Rect { from, to } => {
                     let corners = [*from, [to[0], from[1]], *to, [from[0], to[1]]];
                     let points: Vec<Pos2> = corners.iter().map(|point| screen_at(&camera, rect, *point)).collect();
@@ -530,16 +662,158 @@ impl Pointer {
             let moved = [bounds[0] + offset[0], bounds[1] + offset[1], bounds[2], bounds[3]];
             paint_bounds(&painter, box_on_screen(&camera, rect, moved));
         }
-        if let RasterTool::Brush { size, .. } | RasterTool::Erase { size, .. } = view.tool
-            && self.pan.is_none()
-            && let Some(pos) = ui.input(|input| input.pointer.hover_pos())
-            && rect.contains(pos)
+        if let (Some(text), Some(box_)) = (&view.text, text_box) {
+            self.paint_text(ui, &painter, &camera, rect, text, box_);
+        }
+        let hover = ui.input(|input| input.pointer.hover_pos()).filter(|pos| rect.contains(*pos) && self.pan.is_none());
+        if let RasterTool::Brush { size, .. } | RasterTool::Erase { size, .. } | RasterTool::Sampler { size, .. } = view.tool
+            && let Some(pos) = hover
         {
             // A small brush still shows a ring the eye can find.
             let radius = ((size * camera.zoom / 2.0) as f32).max(3.0);
             widgets::ring(&painter, pos, radius, 1.0, Color32::from_black_alpha(160));
             widgets::ring(&painter, pos, radius + 1.0, 1.0, Color32::from_white_alpha(200));
         }
+        // Where the tool copies from: the pointer plus the offset while one
+        // holds, or else the source.
+        if let RasterTool::Sampler { source, offset, .. } = view.tool {
+            let from = match (offset, hover) {
+                (Some(offset), Some(pos)) => {
+                    let at = picture_at(&camera, rect, pos);
+                    Some([at[0] + offset[0], at[1] + offset[1]])
+                }
+                (Some(_), None) => None,
+                (None, _) => source,
+            };
+            if let Some(from) = from {
+                cross(&painter, screen_at(&camera, rect, from));
+            }
+        }
+    }
+
+    /// The text typed in, as text.png shows it: its selected spans, its box
+    /// as a blue hairline with handles, and its caret, blinking. Only the
+    /// handles that work are drawn: the corners and the middles of the left
+    /// and right sides, which change the box's width.
+    fn paint_text(&self, ui: &egui::Ui, painter: &egui::Painter, camera: &Camera, rect: Rect, text: &TextEditing, box_: [f64; 4]) {
+        for span in &text.selection {
+            painter.rect_filled(box_on_screen(camera, rect, *span), 0.0, TEXT_SELECTED);
+        }
+        let frame = box_on_screen(camera, rect, box_);
+        hairline_box(painter, frame);
+        for handle in [
+            frame.left_top(),
+            frame.left_center(),
+            frame.left_bottom(),
+            frame.right_top(),
+            frame.right_center(),
+            frame.right_bottom(),
+        ] {
+            widgets::outlined(painter, Rect::from_center_size(handle, vec2(7.0, 7.0)), 1.0, Color32::WHITE, BOUNDS);
+        }
+        let now = ui.input(|input| input.time);
+        let since = (now - self.typed_at).max(0.0);
+        let phase = since % BLINK;
+        if phase < BLINK / 2.0 {
+            let caret = box_on_screen(camera, rect, text.caret);
+            let caret = Rect::from_center_size(caret.center(), vec2(caret.width().max(1.5), caret.height()));
+            widgets::outlined(painter, caret.expand(0.5), 0.0, Color32::WHITE, Color32::from_black_alpha(90));
+        }
+        let next = if phase < BLINK / 2.0 { BLINK / 2.0 - phase } else { BLINK - phase };
+        ui.ctx().request_repaint_after(Duration::from_secs_f64(next.max(0.01)));
+    }
+
+    /// While a text is typed in, the keyboard is the text's: typed and
+    /// pasted words, its keys, and Copy and Cut. Undo and redo stay the
+    /// window's shortcuts.
+    fn keyboard(&mut self, ui: &egui::Ui, out: &mut Vec<Out>) {
+        let (events, now) = ui.input(|input| (input.events.clone(), input.time));
+        // The window's Copy and Cut come as events of their own, and their
+        // key-down may come too: the event is the one taken.
+        let clipboard = events.iter().any(|event| matches!(event, Event::Copy | Event::Cut));
+        for event in events {
+            let input = match event {
+                Event::Text(text) | Event::Paste(text) if !text.is_empty() => TextInput::Insert { text },
+                Event::Copy => TextInput::Key { key: TextKey::Copy, shift: false, word: false },
+                Event::Cut => TextInput::Key { key: TextKey::Cut, shift: false, word: false },
+                Event::Key { key, pressed: true, modifiers, .. } => match text_key(key, modifiers, clipboard) {
+                    Some(key) => TextInput::Key { key, shift: modifiers.shift, word: word_held(modifiers) },
+                    None => continue,
+                },
+                _ => continue,
+            };
+            self.typed_at = now;
+            out.push(Out::Text(input));
+        }
+    }
+}
+
+/// The text key a pressed key is, if any. Ctrl+Z, Ctrl+Y, and other
+/// shortcuts are none.
+fn text_key(key: Key, modifiers: Modifiers, clipboard: bool) -> Option<TextKey> {
+    Some(match key {
+        Key::Backspace => TextKey::Backspace,
+        Key::Delete => TextKey::Delete,
+        Key::ArrowLeft => TextKey::Left,
+        Key::ArrowRight => TextKey::Right,
+        Key::ArrowUp => TextKey::Up,
+        Key::ArrowDown => TextKey::Down,
+        Key::Home => TextKey::Home,
+        Key::End => TextKey::End,
+        Key::Enter => TextKey::Enter,
+        Key::Escape => TextKey::Escape,
+        Key::A if modifiers.command => TextKey::SelectAll,
+        Key::C if modifiers.command && !clipboard => TextKey::Copy,
+        Key::X if modifiers.command && !clipboard => TextKey::Cut,
+        _ => return None,
+    })
+}
+
+/// Moving by words: Ctrl held, or Alt on a Mac.
+fn word_held(modifiers: Modifiers) -> bool {
+    if cfg!(target_os = "macos") { modifiers.alt } else { modifiers.ctrl }
+}
+
+/// Which side of a text's box a press at `pos` takes, as true for the left:
+/// the side's edge, a little inside it and more outside, along its height.
+fn text_side(frame: Rect, pos: Pos2) -> Option<bool> {
+    if pos.y < frame.top() - SIDE_OUT || pos.y > frame.bottom() + SIDE_OUT {
+        return None;
+    }
+    if pos.x >= frame.left() - SIDE_OUT && pos.x <= frame.left() + SIDE_IN {
+        Some(true)
+    } else if pos.x >= frame.right() - SIDE_IN && pos.x <= frame.right() + SIDE_OUT {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// A text's box with one side dragged to `x`, at least a pixel wide.
+fn dragged_side(box_: [f64; 4], left: bool, x: f64) -> [f64; 4] {
+    let right = box_[0] + box_[2];
+    if left {
+        let x = x.min(right - 1.0);
+        [x, box_[1], right - x, box_[3]]
+    } else {
+        [box_[0], box_[1], (x - box_[0]).max(1.0), box_[3]]
+    }
+}
+
+/// A thin blue edge, as a text's box is drawn.
+fn hairline_box(painter: &egui::Painter, frame: Rect) {
+    let line = (1.0, BOUNDS);
+    painter.line_segment([frame.left_top(), frame.right_top()], line);
+    painter.line_segment([frame.right_top(), frame.right_bottom()], line);
+    painter.line_segment([frame.right_bottom(), frame.left_bottom()], line);
+    painter.line_segment([frame.left_bottom(), frame.left_top()], line);
+}
+
+/// A thin cross, dark over white so it shows on any picture.
+fn cross(painter: &egui::Painter, at: Pos2) {
+    for (width, color) in [(3.0, Color32::from_white_alpha(200)), (1.0, CROSS_DARK)] {
+        painter.line_segment([at - vec2(CROSS, 0.0), at + vec2(CROSS, 0.0)], (width, color));
+        painter.line_segment([at - vec2(0.0, CROSS), at + vec2(0.0, CROSS)], (width, color));
     }
 }
 
@@ -547,7 +821,9 @@ impl Pointer {
 /// twenty-fifth of the brush, from half a pixel to eight.
 fn spacing(tool: &RasterTool) -> f64 {
     match tool {
-        RasterTool::Brush { size, .. } | RasterTool::Erase { size, .. } => (size / 25.0).clamp(0.5, 8.0),
+        RasterTool::Brush { size, .. } | RasterTool::Erase { size, .. } | RasterTool::Sampler { size, .. } => {
+            (size / 25.0).clamp(0.5, 8.0)
+        }
         _ => 0.5,
     }
 }
@@ -859,31 +1135,90 @@ fn marching_edge(ui: &egui::Ui, painter: &egui::Painter, points: &[Pos2], closed
 /// A paint drag as it is drawn, in the tool's colour, size, and opacity,
 /// or as a light trail for the eraser.
 // Pictures read from raw RGBA files.
+//
+// Files are read, and their pixels made into images, on threads of their
+// own. The window only uploads finished images, and shows what it last
+// uploaded until the next is ready.
 
+/// A picture as its texture shows it.
 #[derive(Clone)]
 struct Loaded {
     revision: u64,
     size: [u32; 2],
     texture: egui::TextureHandle,
     opaque: bool,
+}
+
+/// A picture's place among those read: what its texture shows, and the
+/// reading under way for it, at most one at a time.
+#[derive(Clone, Default)]
+struct Entry {
+    shown: Option<Loaded>,
+    reading: Option<Arc<Reading>>,
+    /// The revision whose changes could not be read: the picture is read
+    /// whole instead.
+    failed: Option<u64>,
+    /// A file that was not whole is tried again after this.
+    retry: Option<Instant>,
     /// The last pass that drew it, so pictures no longer drawn are let go.
     used: u64,
+}
+
+/// A reading on a thread of its own, and what it brought once done.
+#[derive(Default)]
+struct Reading {
+    done: Mutex<Option<Read>>,
+    ready: Condvar,
+}
+
+/// What a reading brought.
+enum Read {
+    /// The whole picture, as `revision`, at `size`.
+    Whole { revision: u64, size: [u32; 2], image: egui::ColorImage, opaque: bool },
+    /// The parts that take a texture holding revision `from` to `to`, each
+    /// with where it goes and whether it is opaque.
+    Parts { from: u64, to: u64, parts: Vec<([usize; 2], egui::ColorImage, bool)> },
+    /// Nothing could be read: a file was missing or not whole yet.
+    Nothing { from: Option<u64> },
+}
+
+/// What a reading reads.
+enum Job {
+    Whole { revision: u64 },
+    /// From revision `from`, each step with the revision it reaches.
+    Parts { from: u64, steps: Vec<(u64, Step)> },
+}
+
+/// One read of the changes a texture catches up with.
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// Rows written to a file of their own, while a change is being made.
+    Rows { file: String, rect: [u32; 4] },
+    /// Rows of the picture file.
+    Picture { rect: [u32; 4] },
 }
 
 /// Pictures not drawn for this many passes are let go, and read again if
 /// they are shown again.
 const FORGET_AFTER: u64 = 600;
+/// How long a picture with nothing of its size shown yet is waited for, so
+/// a picture opened shows at once rather than after a frame of squares.
+const FIRST_WAIT: Duration = Duration::from_millis(250);
+/// How long a file that was not whole is left before it is tried again.
+const RETRY: Duration = Duration::from_millis(100);
 
 /// A file of raw RGBA, `width × height × 4` bytes with straight alpha, as a
 /// texture, read again when `revision` changes. `patches` are the changes
 /// the views brought, oldest first, each with its picture and revision: the
-/// texture takes each that follows what it holds, reading only its rows.
-/// While the view's own change is still being made (`making`), its rows in
-/// a file of their own, the picture file is older than the view: a texture
-/// that cannot follow keeps what it shows rather than read it whole. A
-/// picture file of the wrong length is not whole yet: the last texture is
-/// kept and the file is tried again on a later frame. Returns the texture
-/// and whether every pixel is opaque.
+/// texture takes those that follow what it holds, reading only their rows,
+/// and changes read from the picture file one after another are read as
+/// one, or as the whole picture when they cover most of it. While the
+/// view's own change is still being made (`making`), its rows in a file of
+/// their own, the picture file is older than the view: a texture that
+/// cannot follow keeps what it shows rather than read it whole. A picture
+/// file of the wrong length is not whole yet: the last texture is kept and
+/// the file is tried again later. A texture never goes back to an older
+/// revision. Returns the texture and whether every pixel is opaque.
 pub(crate) fn raw_picture(
     ctx: &egui::Context,
     path: &str,
@@ -895,67 +1230,240 @@ pub(crate) fn raw_picture(
 ) -> Option<(egui::TextureId, bool)> {
     let id = egui::Id::new("raster-pictures");
     let pass = ctx.cumulative_pass_nr();
-    let known: Option<Loaded> = ctx
-        .data(|data| data.get_temp::<HashMap<String, Loaded>>(id).and_then(|cache| cache.get(path).cloned()))
-        .filter(|known| known.size == [width, height]);
-    let mut loaded = known.clone();
-    if let Some(known) = loaded.as_mut()
-        && known.revision != revision
+    let size = [width, height];
+    let mut entry: Entry = ctx
+        .data_mut(|data| data.get_temp_mut_or_default::<HashMap<String, Entry>>(id).get(path).cloned())
+        .unwrap_or_default();
+    take(ctx, path, &mut entry, size, revision);
+    let waits = entry.retry.is_some_and(|retry| Instant::now() < retry);
+    if entry.reading.is_none()
+        && !waits
+        && let Some(job) = plan(&entry, path, size, revision, patches, making, ctx.input(|input| input.max_texture_side))
     {
-        for (picture, at, patch) in patches {
-            if picture != path || *at <= known.revision {
-                continue;
-            }
-            if patch.since != known.revision {
-                break;
-            }
-            let rows = match &patch.file {
-                Some(file) => read_rows(ctx, file, width, height, patch.rect),
-                None => read_patch(ctx, picture, width, height, patch.rect),
-            };
-            let Some((corner, image, opaque)) = rows else {
-                break;
-            };
-            known.texture.set_partial(corner, image, picture_options());
-            known.revision = *at;
-            known.opaque &= opaque;
-        }
+        entry.retry = None;
+        entry.reading = Some(start(ctx, path, size, ctx.input(|input| input.max_texture_side), job));
     }
-    let waiting = making;
-    let behind = loaded.as_ref().is_none_or(|loaded| loaded.revision != revision);
-    if behind && !(waiting && loaded.is_some()) {
-        match read_raw(ctx, path, width, height) {
-            // The picture file read while a change is still being made is
-            // older than the view: it is kept as no revision, so the view
-            // without a file reads it again.
-            Some((image, opaque)) => {
-                loaded = Some(Loaded {
-                    revision: if waiting { 0 } else { revision },
-                    size: [width, height],
-                    texture: ctx.load_texture(format!("raster:{path}"), image, picture_options()),
-                    opaque,
-                    used: pass,
-                });
-            }
-            None => ctx.request_repaint_after(Duration::from_millis(100)),
-        }
+    let current = |entry: &Entry| entry.shown.as_ref().filter(|shown| shown.size == size).map(|shown| (shown.texture.id(), shown.opaque));
+    if current(&entry).is_none()
+        && let Some(reading) = &entry.reading
+    {
+        let done = reading.done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        drop(reading.ready.wait_timeout_while(done, FIRST_WAIT, |done| done.is_none()));
+        take(ctx, path, &mut entry, size, revision);
     }
-    let loaded = loaded?;
-    let answer = (loaded.texture.id(), loaded.opaque);
+    let answer = current(&entry);
     ctx.data_mut(|data| {
-        let cache = data.get_temp_mut_or_default::<HashMap<String, Loaded>>(id);
-        cache.insert(path.to_string(), Loaded { used: pass, ..loaded });
+        let cache = data.get_temp_mut_or_default::<HashMap<String, Entry>>(id);
+        cache.insert(path.to_string(), Entry { used: pass, ..entry });
         cache.retain(|_, picture| pass.saturating_sub(picture.used) < FORGET_AFTER);
     });
-    Some(answer)
+    answer
+}
+
+/// Uploads what a finished reading brought, unless the texture has moved
+/// past it.
+fn take(ctx: &egui::Context, path: &str, entry: &mut Entry, size: [u32; 2], revision: u64) {
+    let Some(reading) = &entry.reading else {
+        return;
+    };
+    let Some(read) = reading.done.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() else {
+        return;
+    };
+    entry.reading = None;
+    match read {
+        Read::Whole { revision: read, size: read_size, image, opaque } => {
+            if read_size != size {
+                return;
+            }
+            match &mut entry.shown {
+                // A texture newer than the reading keeps what it shows,
+                // unless the view has gone back past it.
+                Some(shown) if shown.size == size && read <= shown.revision && shown.revision <= revision => {}
+                Some(shown) if shown.size == size => {
+                    shown.texture.set(image, picture_options());
+                    shown.revision = read;
+                    shown.opaque = opaque;
+                }
+                _ => {
+                    entry.shown = Some(Loaded {
+                        revision: read,
+                        size,
+                        texture: ctx.load_texture(format!("raster:{path}"), image, picture_options()),
+                        opaque,
+                    });
+                }
+            }
+        }
+        Read::Parts { from, to, parts } => {
+            if let Some(shown) = entry.shown.as_mut().filter(|shown| shown.size == size && shown.revision == from) {
+                for (corner, image, opaque) in parts {
+                    shown.texture.set_partial(corner, image, picture_options());
+                    shown.opaque &= opaque;
+                }
+                shown.revision = to;
+            }
+        }
+        Read::Nothing { from } => {
+            match from {
+                Some(from) => entry.failed = Some(from),
+                None => entry.retry = Some(Instant::now() + RETRY),
+            }
+            ctx.request_repaint_after(RETRY);
+        }
+    }
+}
+
+/// What to read to bring the texture to `revision`, if anything.
+fn plan(
+    entry: &Entry,
+    path: &str,
+    size: [u32; 2],
+    revision: u64,
+    patches: &[(String, u64, RasterPatch)],
+    making: bool,
+    largest: usize,
+) -> Option<Job> {
+    // The picture file read while a change is still being made is older
+    // than the view: it is kept as no revision, so the view without a file
+    // reads it again.
+    let Some(shown) = entry.shown.as_ref().filter(|shown| shown.size == size) else {
+        return Some(Job::Whole { revision: if making { 0 } else { revision } });
+    };
+    if shown.revision == revision {
+        return None;
+    }
+    // A texture shrunk to fit the graphics card is only read whole.
+    if size[0].max(size[1]) as usize <= largest && entry.failed != Some(shown.revision) {
+        let (steps, reached) = steps(path, size, shown.revision, patches);
+        if !steps.is_empty() && (reached == revision || making) {
+            return Some(Job::Parts { from: shown.revision, steps });
+        }
+    }
+    (!making).then_some(Job::Whole { revision })
+}
+
+/// The reads that take a texture holding revision `from` along the changes
+/// that follow it, and the revision they reach. Changes read from the
+/// picture file one after another are read as one, over the rows they
+/// cover, as the file holds the latest of them anyway. One that covers
+/// most of the picture reads it whole, and nothing before it is read.
+fn steps(path: &str, size: [u32; 2], from: u64, patches: &[(String, u64, RasterPatch)]) -> (Vec<(u64, Step)>, u64) {
+    let [width, height] = size;
+    let whole = [0, 0, width, height];
+    let mut at = from;
+    let mut steps: Vec<(u64, Step)> = Vec::new();
+    for (picture, revision, patch) in patches {
+        if picture != path || *revision <= at {
+            continue;
+        }
+        if patch.since != at {
+            break;
+        }
+        match &patch.file {
+            Some(file) => steps.push((*revision, Step::Rows { file: file.clone(), rect: patch.rect })),
+            None => {
+                let [x, y, w, h] = patch.rect;
+                let (x, y) = (x.min(width), y.min(height));
+                let rect = [x, y, w.min(width - x), h.min(height - y)];
+                match steps.last_mut() {
+                    Some((reached, Step::Picture { rect: last })) => {
+                        *last = union(*last, rect);
+                        *reached = *revision;
+                    }
+                    _ => steps.push((*revision, Step::Picture { rect })),
+                }
+            }
+        }
+        at = *revision;
+    }
+    for (_, step) in &mut steps {
+        if let Step::Picture { rect } = step
+            && 2 * u64::from(rect[2]) * u64::from(rect[3]) >= u64::from(width) * u64::from(height)
+        {
+            *rect = whole;
+        }
+    }
+    if let Some(last) = steps.iter().rposition(|(_, step)| *step == Step::Picture { rect: whole }) {
+        steps.drain(..last);
+    }
+    (steps, at)
+}
+
+/// The smallest rect holding both, as `[x, y, width, height]`.
+fn union(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    if a[2] == 0 || a[3] == 0 {
+        return b;
+    }
+    if b[2] == 0 || b[3] == 0 {
+        return a;
+    }
+    let (left, top) = (a[0].min(b[0]), a[1].min(b[1]));
+    let right = (a[0] + a[2]).max(b[0] + b[2]);
+    let bottom = (a[1] + a[3]).max(b[1] + b[3]);
+    [left, top, right - left, bottom - top]
+}
+
+/// Starts a reading on a thread of its own, which asks for a frame when done.
+fn start(ctx: &egui::Context, path: &str, size: [u32; 2], largest: usize, job: Job) -> Arc<Reading> {
+    let reading = Arc::new(Reading::default());
+    let (ctx, path, done) = (ctx.clone(), path.to_string(), reading.clone());
+    let work = move || {
+        let read = run(&path, size, largest, job);
+        *done.done.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(read);
+        done.ready.notify_all();
+        ctx.request_repaint();
+    };
+    // Should no thread start, the reading is done here instead.
+    let work = Arc::new(Mutex::new(Some(work)));
+    let spare = work.clone();
+    let started = std::thread::Builder::new().name(String::from("picture-reader")).spawn(move || {
+        if let Some(work) = spare.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+            work();
+        }
+    });
+    if started.is_err()
+        && let Some(work) = work.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+    {
+        work();
+    }
+    reading
+}
+
+/// Reads what a job asks for. A step that cannot be read ends the parts
+/// there, at the last revision read.
+fn run(path: &str, size: [u32; 2], largest: usize, job: Job) -> Read {
+    let [width, height] = size;
+    match job {
+        Job::Whole { revision } => match read_raw(path, width, height, largest) {
+            Some((image, opaque)) => Read::Whole { revision, size, image, opaque },
+            None => Read::Nothing { from: None },
+        },
+        Job::Parts { from, steps } => {
+            let mut to = from;
+            let mut parts = Vec::new();
+            for (reached, step) in steps {
+                let rows = match step {
+                    Step::Rows { file, rect } => read_rows(&file, width, height, rect),
+                    Step::Picture { rect } => read_patch(path, width, height, rect),
+                };
+                let Some(rows) = rows else {
+                    break;
+                };
+                parts.push(rows);
+                to = reached;
+            }
+            if parts.is_empty() {
+                Read::Nothing { from: Some(from) }
+            } else {
+                Read::Parts { from, to, parts }
+            }
+        }
+    }
 }
 
 /// Reads a file holding only the rows of `rect`, `width × height × 4` bytes
 /// for the rect, with where they go in the texture.
-fn read_rows(ctx: &egui::Context, file: &str, width: u32, height: u32, rect: [u32; 4]) -> Option<([usize; 2], egui::ColorImage, bool)> {
-    if width.max(height) as usize > ctx.input(|input| input.max_texture_side) {
-        return None;
-    }
+fn read_rows(file: &str, width: u32, height: u32, rect: [u32; 4]) -> Option<([usize; 2], egui::ColorImage, bool)> {
     let [x, y, w, h] = rect.map(|value| value as usize);
     if w == 0 || h == 0 || x + w > width as usize || y + h > height as usize {
         return None;
@@ -979,14 +1487,11 @@ fn picture_options() -> egui::TextureOptions {
 }
 
 /// Reads the rows of `rect` from a whole raw RGBA file, with where they go
-/// in the texture and whether they are opaque. None when the file is not
-/// whole, or the texture was shrunk to fit the graphics card.
-fn read_patch(ctx: &egui::Context, path: &str, width: u32, height: u32, rect: [u32; 4]) -> Option<([usize; 2], egui::ColorImage, bool)> {
+/// in the texture and whether they are opaque. Rows as wide as most of the
+/// picture are read in one piece. None when the file is not whole.
+fn read_patch(path: &str, width: u32, height: u32, rect: [u32; 4]) -> Option<([usize; 2], egui::ColorImage, bool)> {
     use std::io::{Read, Seek, SeekFrom};
     let (width, height) = (width as usize, height as usize);
-    if width.max(height) > ctx.input(|input| input.max_texture_side) {
-        return None;
-    }
     let x = (rect[0] as usize).min(width);
     let y = (rect[1] as usize).min(height);
     let w = (rect[2] as usize).min(width - x);
@@ -999,17 +1504,27 @@ fn read_patch(ctx: &egui::Context, path: &str, width: u32, height: u32, rect: [u
         return None;
     }
     let mut bytes = vec![0u8; w * h * 4];
-    for (row, line) in bytes.chunks_exact_mut(w * 4).enumerate() {
-        file.seek(SeekFrom::Start((((y + row) * width + x) * 4) as u64)).ok()?;
-        file.read_exact(line).ok()?;
+    if 2 * w >= width {
+        let first = (y * width + x) * 4;
+        let mut block = vec![0u8; ((h - 1) * width + w) * 4];
+        file.seek(SeekFrom::Start(first as u64)).ok()?;
+        file.read_exact(&mut block).ok()?;
+        for (row, line) in bytes.chunks_exact_mut(w * 4).enumerate() {
+            line.copy_from_slice(&block[row * width * 4..(row * width + w) * 4]);
+        }
+    } else {
+        for (row, line) in bytes.chunks_exact_mut(w * 4).enumerate() {
+            file.seek(SeekFrom::Start((((y + row) * width + x) * 4) as u64)).ok()?;
+            file.read_exact(line).ok()?;
+        }
     }
     let opaque = bytes.chunks_exact(4).all(|pixel| pixel[3] == 255);
     Some(([x, y], egui::ColorImage::from_rgba_unmultiplied([w, h], &bytes), opaque))
 }
 
 /// Reads a whole raw RGBA file, shrunk by whole steps when it is larger than
-/// the graphics card's largest texture.
-fn read_raw(ctx: &egui::Context, path: &str, width: u32, height: u32) -> Option<(egui::ColorImage, bool)> {
+/// `largest`, the graphics card's largest texture.
+fn read_raw(path: &str, width: u32, height: u32, largest: usize) -> Option<(egui::ColorImage, bool)> {
     let (width, height) = (width as usize, height as usize);
     let expected = width.checked_mul(height)?.checked_mul(4)?;
     if expected == 0 {
@@ -1020,8 +1535,7 @@ fn read_raw(ctx: &egui::Context, path: &str, width: u32, height: u32) -> Option<
         return None;
     }
     let opaque = bytes.chunks_exact(4).all(|pixel| pixel[3] == 255);
-    let largest = ctx.input(|input| input.max_texture_side).max(1);
-    let step = width.max(height).div_ceil(largest);
+    let step = width.max(height).div_ceil(largest.max(1));
     if step <= 1 {
         return Some((egui::ColorImage::from_rgba_unmultiplied([width, height], &bytes), opaque));
     }
@@ -1062,6 +1576,22 @@ pub(crate) fn checker(ctx: &egui::Context, painter: &egui::Painter, area: Rect) 
 mod tests {
     use super::*;
 
+    /// Draws the picture until no reading is under way for it, as frames
+    /// do while the reader works.
+    fn caught_up(ctx: &egui::Context, path: &str, revision: u64, patches: &[(String, u64, RasterPatch)], making: bool) -> bool {
+        for _ in 0..400 {
+            let shown = raw_picture(ctx, path, 8, 6, revision, patches, making).is_some();
+            let reading = ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<HashMap<String, Entry>>(egui::Id::new("raster-pictures")).get(path).is_some_and(|entry| entry.reading.is_some())
+            });
+            if !reading {
+                return shown;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the picture was never read");
+    }
+
     /// Catches a change lost when two views come between frames, a picture
     /// read whole for every change, and an older picture file shown as a
     /// newer revision: two changes queued at once both reach the texture,
@@ -1081,7 +1611,7 @@ mod tests {
             delta.clear();
             set
         };
-        assert!(raw_picture(&ctx, &picture, 8, 6, 1, &[], false).is_some());
+        assert!(raw_picture(&ctx, &picture, 8, 6, 1, &[], false).is_some(), "a picture opened was not waited for");
         assert!(deltas(&ctx).iter().any(|delta| delta.pos.is_none()), "the picture was not read");
 
         let mut patches = Vec::new();
@@ -1091,7 +1621,7 @@ mod tests {
             let patch = RasterPatch { since: revision - 1, rect: [corner[0], corner[1], 2, 2], file: Some(file.display().to_string()) };
             patches.push((picture.clone(), revision, patch));
         }
-        assert!(raw_picture(&ctx, &picture, 8, 6, 3, &patches, true).is_some());
+        assert!(caught_up(&ctx, &picture, 3, &patches, true));
         let set = deltas(&ctx);
         let corners: Vec<Option<[usize; 2]>> = set.iter().map(|delta| delta.pos).collect();
         assert_eq!(corners, vec![Some([0, 0]), Some([4, 4])], "the changes did not reach the texture in order, as parts");
@@ -1099,7 +1629,7 @@ mod tests {
         assert_eq!(first.pixels[0], Color32::from_rgb(255, 0, 0));
 
         // The change made: the same revision, nothing more to read.
-        assert!(raw_picture(&ctx, &picture, 8, 6, 3, &patches, false).is_some());
+        assert!(caught_up(&ctx, &picture, 3, &patches, false));
         assert!(deltas(&ctx).is_empty(), "a picture already shown was read again");
 
         // A change that does not follow what the texture holds, while it is
@@ -1107,9 +1637,33 @@ mod tests {
         let file = dir.join("1-1-9.patch");
         std::fs::write(&file, [0u8; 16]).unwrap();
         let stray = vec![(picture.clone(), 9, RasterPatch { since: 8, rect: [0, 0, 2, 2], file: Some(file.display().to_string()) })];
-        assert!(raw_picture(&ctx, &picture, 8, 6, 9, &stray, true).is_some(), "the picture shown was dropped");
+        assert!(caught_up(&ctx, &picture, 9, &stray, true), "the picture shown was dropped");
         assert!(deltas(&ctx).is_empty(), "an older picture file was read for a change still being made");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Catches changes read from the picture file one by one: a run of them
+    /// is one read over the rows they cover, one that covers most of the
+    /// picture reads it whole with nothing before it, and rows written
+    /// while a change is being made keep their place in the order.
+    #[test]
+    fn changes_from_the_picture_file_are_read_as_one() {
+        let picture = |since: u64, rect: [u32; 4]| (String::from("p"), since + 1, RasterPatch { since, rect, file: None });
+        let rows = |since: u64, rect: [u32; 4]| (String::from("p"), since + 1, RasterPatch { since, rect, file: Some(format!("r{since}")) });
+        let full: Vec<_> = (1..=16).map(|since| picture(since, [0, 0, 100, 50])).collect();
+        assert_eq!(steps("p", [100, 50], 1, &full), (vec![(17, Step::Picture { rect: [0, 0, 100, 50] })], 17));
+
+        let small = [picture(1, [0, 0, 10, 10]), picture(2, [20, 5, 10, 10]), rows(3, [0, 0, 4, 4]), picture(4, [90, 40, 20, 20])];
+        let expected = vec![
+            (3, Step::Picture { rect: [0, 0, 30, 15] }),
+            (4, Step::Rows { file: String::from("r3"), rect: [0, 0, 4, 4] }),
+            (5, Step::Picture { rect: [90, 40, 10, 10] }),
+        ];
+        assert_eq!(steps("p", [100, 50], 1, &small), (expected, 5));
+
+        let most = [rows(1, [0, 0, 4, 4]), picture(2, [0, 0, 100, 30]), rows(3, [0, 0, 4, 4])];
+        let expected = vec![(3, Step::Picture { rect: [0, 0, 100, 50] }), (4, Step::Rows { file: String::from("r3"), rect: [0, 0, 4, 4] })];
+        assert_eq!(steps("p", [100, 50], 1, &most), (expected, 4));
     }
 
     /// A crop drag keeps the box on the picture, whichever way it goes, and

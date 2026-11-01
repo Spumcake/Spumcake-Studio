@@ -468,6 +468,7 @@ impl Session {
                     .into_iter()
                     .filter_map(|prop| self.declare_row(prop))
                     .collect(),
+                icon: None,
             })
             .collect();
         Properties {
@@ -497,6 +498,7 @@ impl Session {
                 max,
                 percent,
                 places,
+                centered: false,
             },
             PropKind::Text => RowKind::Text,
             PropKind::Choice {
@@ -529,7 +531,7 @@ impl Session {
             PropKind::Rgb => RowKind::Rgb {
                 quick: self.quick_colors(),
             },
-            PropKind::Curve => RowKind::Curve,
+            PropKind::Curve => RowKind::Curve { histogram: Vec::new(), square: false, free: false },
             PropKind::Palette => {
                 let owner = self.palette_node()?;
                 RowKind::Palette {
@@ -611,6 +613,7 @@ impl Session {
                             .collect()
                     },
                     thumbnail: None,
+                    mark: None,
                 }
             })
             .collect();

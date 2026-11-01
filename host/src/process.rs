@@ -103,6 +103,8 @@ pub struct Declared {
     pub stop_cells: VecDeque<(String, String)>,
     /// Answers to `claim`.
     pub claimed: VecDeque<(String, bool)>,
+    /// Words to put on the system clipboard, as Copy and Cut answered.
+    pub clipboard: VecDeque<String>,
     /// Every tab report, each as its tabs' ids and files, while the host
     /// follows a quit. None when it is not following one.
     pub tab_log: Option<Vec<Vec<(String, Option<String>, String)>>>,
@@ -149,7 +151,7 @@ impl Running {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        let mut child = match command.spawn() {
+        let mut child = match spawn(&mut command) {
             Ok(child) => child,
             Err(_) => return Self::not_started(),
         };
@@ -548,6 +550,7 @@ impl Running {
                 declared.skills_version += 1;
             }
             AppMessage::Edits { media_types } => declared.edits = media_types,
+            AppMessage::Clipboard { text } => declared.clipboard.push_back(text),
             AppMessage::ToolResult(result) => declared.results.push_back(result),
             AppMessage::Kept { tab, path, error } => declared.kept.push_back((tab, path, error)),
             AppMessage::Cells { tab, cells, selected } => {
@@ -575,6 +578,25 @@ impl Running {
 
 /// `INPAINTER_TRACE` set: every message to and from sub-applications is
 /// written to standard error, so the two processes' parts can be read apart.
+/// Starts the program. A program file another process still holds open for
+/// writing, as a just-written one can be while a fork elsewhere has not yet
+/// run its own program, cannot run for a moment ("text file busy"): it is
+/// tried again a few times.
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    /// Linux's ETXTBSY.
+    const BUSY: i32 = 26;
+    let mut tries = 0;
+    loop {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(BUSY) && tries < 20 => {
+                tries += 1;
+                thread::sleep(Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
+}
+
 fn trace() -> bool {
     std::env::var_os("INPAINTER_TRACE").is_some()
 }

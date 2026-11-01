@@ -11,6 +11,7 @@ mod gallery;
 mod paint;
 mod picture;
 mod session;
+mod text;
 
 use session::{Session, respond};
 use std::io::{BufRead, Write};
@@ -43,7 +44,8 @@ fn main() {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         // Every line already waiting is read before the picture of a stroke
-        // being drawn is sent, so painting never falls behind the pen.
+        // being drawn, or of a held slider, is sent, so painting never falls
+        // behind the pen and a slider never falls behind the pointer.
         let mut waiting = vec![line];
         while let Ok(line) = incoming.try_recv() {
             waiting.push(line);

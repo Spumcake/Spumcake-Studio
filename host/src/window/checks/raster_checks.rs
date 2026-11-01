@@ -7,16 +7,17 @@ use super::{StandIn, Window, scratch, start};
 use crate::window::Started;
 use eframe::egui::{self, Color32, Pos2, Rect, pos2};
 use protocol::{
-    Action, AppMessage, ChoicePreview, DocumentCamera, Film, FilmItem, FlagIcons, HeadingAction, IconToggle,
-    LayerRow, Layers, MenuEntry, PanelPage, PropValue, Properties, RasterTool, RasterView, Row, RowKind, Section,
-    TabEntry, Tabs, Thumbnail, ToolItem, Toolbar,
+    Action, AppMessage, Binding, Chord, ChoicePreview, DocumentCamera, Film, FilmItem, FlagIcons, HeadingAction,
+    IconToggle, Keys, LayerRow, Layers, MenuEntry, PanelPage, PropValue, Properties, RasterTool, RasterView, Row,
+    RowKind, Section, TabEntry, Tabs, TextEditing, Thumbnail, ToolItem, Toolbar,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// The stand-in: it prints its greeting, then logs each line it is sent.
 /// A command `tool.<name>` is answered with the lines in `<name>.jsonl`, the
-/// view and toolbar of that tool.
+/// view and toolbar of that tool. A text's Copy is answered with the lines
+/// in `copied.jsonl`.
 const EASEL: &str = r#"#!/bin/sh
 dir="__DIR__"
 cat "$dir/greeting.jsonl"
@@ -26,6 +27,7 @@ while IFS= read -r line; do
     *'"type":"ping"'*) echo '{"type":"pong"}' ;;
     *'"type":"shutdown"'*) exit 0 ;;
     *'"type":"quit"'*) echo '{"type":"quit_ready"}' ;;
+    *'"type":"raster_text"'*'"key":"copy"'*) cat "$dir/copied.jsonl" ;;
     *'"id":"tool.'*)
       tool=$(printf '%s' "$line" | sed 's/.*"id":"tool\.\([a-z]*\)".*/\1/')
       cat "$dir/$tool.jsonl" ;;
@@ -60,11 +62,45 @@ fn view(dir: &Path, tool: RasterTool) -> RasterView {
         bounds: Some([0.0, 0.0, 40.0, 20.0]),
         camera: Some(DocumentCamera { origin: ORIGIN, zoom: ZOOM }),
         film: None,
+        text: None,
     }
 }
 
 fn brush() -> RasterTool {
     RasterTool::Brush { rgb: BRUSH, size: 1.0, hardness: 1.0, opacity: 1.0, pressure: true }
+}
+
+/// Where the stamp copies from until a stroke sets an offset, and the
+/// offset an aligned stamp holds.
+const SOURCE: [f64; 2] = [30.0, 15.0];
+const OFFSET: [f64; 2] = [10.0, 5.0];
+
+fn sampler(offset: Option<[f64; 2]>) -> RasterTool {
+    RasterTool::Sampler { size: 4.0, pressure: false, source: Some(SOURCE), offset }
+}
+
+/// The text typed in: its box, its caret after its fifth pixel, and a
+/// selected span.
+fn typed() -> TextEditing {
+    TextEditing { rect: [10.0, 5.0, 20.0, 6.0], caret: [15.0, 5.0, 0.2, 6.0], selection: vec![[11.0, 5.0, 3.0, 6.0]] }
+}
+
+/// The stand-in's shortcuts: undo and redo, as the views name them, and a
+/// tool's single letter.
+fn keys() -> Keys {
+    let chord = |key: &str, command: bool, shift: Option<bool>| Chord { key: key.to_string(), command, shift, alt: false };
+    let bind = |chord: Chord, id: &str| Binding { chord, then: Vec::new(), action: Action::new(id) };
+    Keys {
+        bindings: vec![
+            bind(chord("Z", true, Some(false)), "undo"),
+            bind(chord("Z", true, Some(true)), "redo"),
+            bind(chord("Y", true, Some(false)), "redo"),
+            bind(chord("B", false, Some(false)), "tool.brush"),
+        ],
+        copy: None,
+        cut: None,
+        paste: None,
+    }
 }
 
 /// The settings row of each kind of tool, as the views show them.
@@ -85,6 +121,7 @@ fn toolbar(kind: &str) -> Toolbar {
                     max: 100.0,
                     suffix: String::from("px"),
                     set: Action::new("set_feather"),
+                    icon: None,
                 },
             ],
             vec![ToolItem::Push { label: String::from("Deselect"), dark: false, enabled: true, action: Action::new("deselect") }],
@@ -148,6 +185,7 @@ fn layer_row(dir: &Path, id: u64, parent: Option<u64>, depth: u32, name: &str, g
         menu: Vec::new(),
         colors: Vec::new(),
         thumbnail: (!group).then(|| Thumbnail { path: dir.join("thumb.rgba").display().to_string(), width: W, height: H, revision: 1 }),
+        mark: None,
     }
 }
 
@@ -195,6 +233,7 @@ fn properties(rows: Vec<LayerRow>) -> Properties {
                     },
                     value: PropValue::Index(0),
                 }],
+                icon: None,
             },
             Section {
                 title: String::new(),
@@ -204,6 +243,7 @@ fn properties(rows: Vec<LayerRow>) -> Properties {
                     kind: RowKind::Icons { icons: vec![lock("square-dashed"), lock("edit-pencil"), lock("drag"), lock("lock")] },
                     value: PropValue::Idle,
                 }],
+                icon: None,
             },
         ],
         pages: vec![
@@ -212,6 +252,62 @@ fn properties(rows: Vec<LayerRow>) -> Properties {
             PanelPage { label: String::from("Adjustments"), active: false, enabled: true, action: Some(Action::new("page_adjustments")) },
         ],
     }
+}
+
+/// The Properties page with these sections and no Layers list, as a chosen
+/// adjustment shows it.
+fn adjusting(sections: Vec<Section>) -> Properties {
+    Properties {
+        layers: None,
+        sections,
+        pages: vec![
+            PanelPage { label: String::from("Layers"), active: false, enabled: true, action: Some(Action::new("page_layers")) },
+            PanelPage { label: String::from("Properties"), active: true, enabled: true, action: None },
+        ],
+        ..properties(Vec::new())
+    }
+}
+
+/// A row with no value of its own.
+fn idle_row(label: &str, kind: RowKind) -> Row {
+    Row { prop: json!(label), label: label.to_string(), kind, value: PropValue::Idle }
+}
+
+/// As properties-grade.png and adjustments.png show: a section with its
+/// icon, a centred number, a button, a note, and an item.
+fn grade_sections() -> Vec<Section> {
+    vec![Section {
+        title: String::from("Color Grade"),
+        icon: Some(String::from("filter-list")),
+        rows: vec![
+            Row {
+                prop: json!("contrast"),
+                label: String::from("Contrast"),
+                kind: RowKind::Number { min: -100.0, max: 100.0, percent: false, places: 0, centered: true },
+                value: PropValue::Number(30.0),
+            },
+            idle_row("Reset", RowKind::Button { action: Action::new("reset_grade") }),
+            idle_row(NOTE, RowKind::Note),
+            idle_row("Curves", RowKind::Item { icon: String::from("filter-list"), detail: String::from("Tone and colour by curve"), action: Action::new("add_curves") }),
+        ],
+    }]
+}
+
+const NOTE: &str = "White shows the layer beneath, black hides it. Paint it with the brush and the eraser.";
+
+/// As properties-curves.png shows: a square, free curve over a histogram.
+fn curve_sections() -> Vec<Section> {
+    let histogram: Vec<f32> = (0..32).map(|bin| if bin % 4 == 0 { 0.0 } else { bin as f32 / 32.0 }).collect();
+    vec![Section {
+        title: String::from("Curves"),
+        icon: None,
+        rows: vec![Row {
+            prop: json!("curve"),
+            label: String::new(),
+            kind: RowKind::Curve { histogram, square: true, free: true },
+            value: PropValue::Curve(vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)]),
+        }],
+    }]
 }
 
 /// The picture: opaque red, but for one clear pixel in its corner, so it
@@ -293,6 +389,11 @@ fn easel_of(name: &str, rows: impl FnOnce(&Path) -> Vec<LayerRow>, filmed: bool)
         }
         view
     };
+    let typing = |dir: &Path| {
+        let mut view = declared(dir, RasterTool::Text);
+        view.text = Some(typed());
+        view
+    };
     let greeting = [
         String::from("{\"type\":\"hello\",\"protocol\":1}\n"),
         String::from("{\"type\":\"tab\",\"id\":\"r1\",\"label\":\"Picture\"}\n"),
@@ -309,6 +410,7 @@ fn easel_of(name: &str, rows: impl FnOnce(&Path) -> Vec<LayerRow>, filmed: bool)
         line(AppMessage::Properties(properties(rows(&dir)))),
         line(AppMessage::Raster(declared(&dir, brush()))),
         line(AppMessage::Toolbar(toolbar("brush"))),
+        line(AppMessage::Keys(keys())),
     ];
     std::fs::write(dir.join("greeting.jsonl"), greeting.concat()).unwrap();
     for (name, tool, bar) in [
@@ -321,10 +423,17 @@ fn easel_of(name: &str, rows: impl FnOnce(&Path) -> Vec<LayerRow>, filmed: bool)
         ("eyedropper", RasterTool::Eyedropper, "brush"),
         ("hand", RasterTool::Hand, "brush"),
         ("zoom", RasterTool::Zoom, "brush"),
+        ("stamp", sampler(None), "brush"),
+        ("aligned", sampler(Some(OFFSET)), "brush"),
+        ("text", RasterTool::Text, "brush"),
     ] {
         let lines = [line(AppMessage::Raster(declared(&dir, tool))), line(AppMessage::Toolbar(toolbar(bar)))];
         std::fs::write(dir.join(format!("{name}.jsonl")), lines.concat()).unwrap();
     }
+    std::fs::write(dir.join("typing.jsonl"), [line(AppMessage::Raster(typing(&dir))), line(AppMessage::Toolbar(toolbar("brush")))].concat()).unwrap();
+    std::fs::write(dir.join("copied.jsonl"), line(AppMessage::Clipboard { text: String::from("Hi") })).unwrap();
+    std::fs::write(dir.join("grade.jsonl"), line(AppMessage::Properties(adjusting(grade_sections())))).unwrap();
+    std::fs::write(dir.join("curves.jsonl"), line(AppMessage::Properties(adjusting(curve_sections())))).unwrap();
     let program = dir.join("easel");
     std::fs::write(&program, EASEL.replace("__DIR__", &dir.display().to_string())).unwrap();
     #[cfg(unix)]
@@ -363,10 +472,10 @@ fn of_type(dir: &Path, kind: &str) -> Vec<Value> {
     sent(dir).into_iter().filter(|line| line["type"] == kind).collect()
 }
 
-/// Every finished gesture: the parts of a stroke sent while it is drawn
-/// are left out.
+/// Every finished gesture: the parts of a stroke or a move sent while it is
+/// drawn are left out.
 fn gestures(dir: &Path) -> Vec<Value> {
-    all_gestures(dir).into_iter().filter(|gesture| gesture["kind"] != "stroke_part").collect()
+    all_gestures(dir).into_iter().filter(|gesture| gesture["kind"] != "stroke_part" && gesture["kind"] != "drag_part").collect()
 }
 
 fn all_gestures(dir: &Path) -> Vec<Value> {
@@ -1048,5 +1157,636 @@ fn the_filmstrip_sends_focus_select_its_menus_and_reorder() {
     assert_eq!(commands(&dir, "order_items").len(), 2, "a drag that ended where it began was sent");
     assert_eq!(commands(&dir, "show_item").len(), 1, "a drag selected a picture");
     assert!(gestures(&dir).is_empty(), "the strip's pointer reached the picture");
+    close(window, dir);
+}
+
+// Retouching, text, and adjustments.
+
+/// The dark of the cross that shows where a tool copies from.
+const CROSS_DARK: Color32 = Color32::from_black_alpha(200);
+
+fn hold(window: &mut Window, modifiers: egui::Modifiers) {
+    window.events.push(egui::Event::ModifiersChanged(modifiers));
+}
+
+/// A key pressed and let go, with these modifiers held.
+fn key(window: &mut Window, key: egui::Key, modifiers: egui::Modifiers) {
+    hold(window, modifiers);
+    window.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+    window.step();
+    window.events.push(egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+    hold(window, egui::Modifiers::NONE);
+    window.step();
+}
+
+/// Every input the host sent the text typed in, in order.
+fn text_inputs(dir: &Path) -> Vec<Value> {
+    of_type(dir, "raster_text").into_iter().map(|line| line["input"].clone()).collect()
+}
+
+/// The stand-in's text tool, with a text typed in.
+fn start_typing(window: &mut Window) {
+    window.app.run_action(&Action::new("tool.typing"));
+    window.until(|app| app.apps[0].running.declared.rasters["r1"].view.text.is_some());
+    window.step();
+}
+
+/// The glyph an Iconoir icon is drawn with.
+fn glyph(name: &str) -> String {
+    let icon = iconflow::try_icon(iconflow::Pack::Iconoir, name, iconflow::Style::Regular, iconflow::Size::Regular).unwrap();
+    char::from_u32(icon.codepoint).unwrap().to_string()
+}
+
+/// A drag through these screen points, held between each.
+fn drag_path(window: &mut Window, points: &[Pos2]) {
+    window.events.push(egui::Event::PointerMoved(points[0]));
+    window.step();
+    press(window, points[0], true);
+    window.step();
+    for at in &points[1..] {
+        window.events.push(egui::Event::PointerMoved(*at));
+        window.step();
+    }
+    press(window, *points.last().unwrap(), false);
+    window.step();
+}
+
+/// Runs frames, as `until` does, until the window puts words on the system
+/// clipboard, and returns them.
+fn copied(window: &mut Window) -> Option<String> {
+    use eframe::App as _;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(20) {
+        for started in &mut window.app.apps {
+            started.running.poll();
+        }
+        let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
+        input.events.append(&mut window.events);
+        let Window { ctx, app, frame, .. } = &mut *window;
+        let output = ctx.run_ui(input, |ui| app.ui(ui, frame));
+        for command in output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                return Some(text);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    None
+}
+
+/// Catches a stamp or healing brush that does not show where it copies
+/// from, or that paints on Alt-click: the cross is drawn at the source
+/// until an offset holds, and then at the pointer plus the offset; the
+/// brush's ring is at the pointer; Alt-click sends `source` where it was
+/// pressed and paints nothing; and a drag paints as the brush does.
+#[test]
+fn a_sampler_shows_its_source_and_alt_click_sets_it() {
+    let (mut window, dir, _stand_in) = easel("sampler");
+    use_tool(&mut window, "stamp", |tool| matches!(tool, RasterTool::Sampler { offset: None, .. }));
+    let crossed = |window: &Window, at: Pos2| {
+        let arms = segments(window, CROSS_DARK);
+        arms.len() == 2 && arms.iter().all(|[a, b]| (*a + (*b - *a) / 2.0 - at).length() < 0.01)
+    };
+    let pointer = screen(&window, [5.0, 5.0]);
+    window.events.push(egui::Event::PointerMoved(pointer));
+    window.step();
+    assert!(crossed(&window, screen(&window, SOURCE)), "the cross is not at the source: {:?}", segments(&window, CROSS_DARK));
+    let ring = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Circle(ring) if (ring.center - pointer).length() < 0.01 && (ring.radius - 20.0).abs() < 0.01));
+    assert!(ring, "the brush's ring is not at the pointer");
+
+    let at = screen(&window, [8.0, 8.0]);
+    hold(&mut window, egui::Modifiers::ALT);
+    click(&mut window, at);
+    hold(&mut window, egui::Modifiers::NONE);
+    window.until(|_| !gestures(&dir).is_empty());
+    let sent = all_gestures(&dir);
+    assert_eq!(sent.len(), 1, "Alt-click sent more than its source: {sent:?}");
+    assert_eq!((sent[0]["kind"].clone(), point(&sent[0]["at"])), (json!("source"), [8.0, 8.0]));
+
+    use_tool(&mut window, "aligned", |tool| matches!(tool, RasterTool::Sampler { offset: Some(_), .. }));
+    window.events.push(egui::Event::PointerMoved(pointer));
+    window.step();
+    assert!(crossed(&window, screen(&window, [5.0 + OFFSET[0], 5.0 + OFFSET[1]])), "the cross is not at the pointer plus the offset");
+    drag(&mut window, &[[5.0, 5.0], [10.0, 6.0], [15.0, 8.0]], |_| {});
+    window.until(|_| gestures(&dir).len() >= 2);
+    assert_eq!(gestures(&dir)[1]["kind"], "stroke", "a drag did not paint");
+    assert!(all_gestures(&dir).iter().any(|gesture| gesture["kind"] == "stroke_part"), "the drag was not painted as it was drawn");
+    close(window, dir);
+}
+
+/// Catches a text tool that sends nothing or the wrong thing: a click
+/// sends `click` where it was, and a drag sends `rect` from the press to
+/// the release, its box drawn in blue while it is dragged.
+#[test]
+fn the_text_tool_sends_a_click_or_a_box() {
+    let (mut window, dir, _stand_in) = easel("text-tool");
+    use_tool(&mut window, "text", |tool| *tool == RasterTool::Text);
+    let at = screen(&window, [5.0, 15.0]);
+    click(&mut window, at);
+    window.until(|_| !gestures(&dir).is_empty());
+    let sent = gestures(&dir);
+    assert_eq!((sent[0]["kind"].clone(), point(&sent[0]["at"])), (json!("click"), [5.0, 15.0]));
+    let mut boxed = false;
+    drag(&mut window, &[[2.0, 2.0], [5.0, 3.0], [8.0, 4.0]], |window| {
+        let frame = Rect::from_two_pos(screen(window, [2.0, 2.0]), screen(window, [8.0, 4.0]));
+        boxed = segments(window, BLUE).iter().any(|[a, b]| *a == frame.left_top() && *b == frame.right_top());
+    });
+    assert!(boxed, "the box being dragged was not drawn");
+    window.until(|_| gestures(&dir).len() >= 2);
+    let rect = &gestures(&dir)[1];
+    assert_eq!((rect["kind"].clone(), point(&rect["from"]), point(&rect["to"])), (json!("rect"), [2.0, 2.0], [8.0, 4.0]));
+    assert!(text_inputs(&dir).is_empty(), "the text tool sent text with no text typed in");
+    close(window, dir);
+}
+
+/// Catches typing that disappoints: while a text is typed in, its box is
+/// drawn in blue with six handles, its selection and its blinking caret;
+/// a press, a drag, and a double-click in the box send `place`, `select`,
+/// and `word`; a press outside sends `click`; a side's drag sends the new
+/// box; typed words, Space, keys, Select All, and Copy go to the text, and
+/// Copy's answer reaches the system clipboard; a tool's letter types
+/// rather than chooses the tool, Space types rather than pans, and Ctrl+Z
+/// and Ctrl+Shift+Z still undo and redo.
+#[test]
+fn a_text_typed_in_takes_the_keyboard_and_the_pointer_in_its_box() {
+    let (mut window, dir, _stand_in) = easel("typing");
+    start_typing(&mut window);
+    let edit = typed();
+    let frame = Rect::from_two_pos(screen(&window, [10.0, 5.0]), screen(&window, [30.0, 11.0]));
+    let edges = segments(&window, BLUE);
+    assert!(edges.iter().any(|[a, b]| *a == frame.left_top() && *b == frame.right_top()), "the text's box was not drawn");
+    let handles: Vec<Pos2> = edged(&window, BLUE).into_iter().filter(|handle| handle.width() < 10.0).map(|handle| handle.center()).collect();
+    // Only working handles: the corners and the middles of the sides that
+    // change the width.
+    let corners = [frame.left_top(), frame.left_center(), frame.left_bottom(), frame.right_top(), frame.right_center(), frame.right_bottom()];
+    assert_eq!(handles.len(), 6, "the box does not have its six handles: {handles:?}");
+    assert!(corners.iter().all(|corner| handles.iter().any(|handle| (*handle - *corner).length() < 0.01)), "a handle is off the box");
+    let span = Rect::from_two_pos(screen(&window, [11.0, 5.0]), screen(&window, [14.0, 11.0]));
+    let selected = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Rect(shown) if shown.rect == span && shown.fill.a() > 0 && shown.fill.a() < 255));
+    assert!(selected, "the selection was not drawn");
+
+    // A press in the box places the caret there, and the caret shows at
+    // once, then blinks.
+    let inside = screen(&window, [20.0, 8.0]);
+    click(&mut window, inside);
+    window.until(|_| !text_inputs(&dir).is_empty());
+    assert_eq!(text_inputs(&dir)[0], json!({"kind": "place", "at": [20.0, 8.0], "extend": false}));
+    let caret = screen(&window, [edit.caret[0] + edit.caret[2] / 2.0, edit.caret[1] + edit.caret[3] / 2.0]);
+    let caret_shown = |window: &Window| edged(window, Color32::from_black_alpha(90)).iter().any(|shown| (shown.center() - caret).length() < 0.5);
+    assert!(caret_shown(&window), "the caret was not drawn after a press");
+    for _ in 0..40 {
+        window.step();
+    }
+    assert!(!caret_shown(&window), "the caret does not blink");
+
+    // A drag in the box selects; a double-click takes a word.
+    drag(&mut window, &[[12.0, 7.0], [14.0, 7.0], [16.0, 7.0]], |_| {});
+    window.until(|_| text_inputs(&dir).len() >= 4);
+    assert_eq!(text_inputs(&dir)[1..4], [
+        json!({"kind": "place", "at": [12.0, 7.0], "extend": false}),
+        json!({"kind": "select", "at": [14.0, 7.0]}),
+        json!({"kind": "select", "at": [16.0, 7.0]}),
+    ]);
+    click(&mut window, inside);
+    click(&mut window, inside);
+    window.until(|_| text_inputs(&dir).iter().any(|input| input["kind"] == "word"));
+    assert!(text_inputs(&dir).contains(&json!({"kind": "word", "at": [20.0, 8.0]})));
+    assert!(gestures(&dir).is_empty(), "a press in the box made a new box: {:?}", gestures(&dir));
+
+    // A press outside the box is the text tool's click; a side's drag is
+    // the box's new width.
+    let outside = screen(&window, [35.0, 15.0]);
+    click(&mut window, outside);
+    window.until(|_| !gestures(&dir).is_empty());
+    assert_eq!((gestures(&dir)[0]["kind"].clone(), point(&gestures(&dir)[0]["at"])), (json!("click"), [35.0, 15.0]));
+    drag(&mut window, &[[30.0, 8.0], [32.0, 8.0], [34.0, 8.0]], |_| {});
+    window.until(|_| gestures(&dir).len() >= 2);
+    assert_eq!(gestures(&dir)[1], json!({"kind": "text_box", "rect": [10.0, 5.0, 24.0, 6.0]}));
+
+    // The keyboard.
+    let typed_before = text_inputs(&dir).len();
+    window.events.push(egui::Event::Text(String::from("Hi")));
+    window.step();
+    window.events.push(egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    window.events.push(egui::Event::Text(String::from(" ")));
+    window.step();
+    // With Space held, a press in the box is still the text's.
+    let camera = raster(&window).camera.unwrap();
+    press(&mut window, inside, true);
+    window.step();
+    press(&mut window, inside, false);
+    window.events.push(egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+    window.step();
+    let after = raster(&window).camera.unwrap();
+    assert!(after.origin == camera.origin && after.zoom == camera.zoom, "Space panned while typing");
+    key(&mut window, egui::Key::Backspace, egui::Modifiers::NONE);
+    key(&mut window, egui::Key::ArrowLeft, egui::Modifiers::SHIFT);
+    key(&mut window, egui::Key::A, egui::Modifiers::COMMAND);
+    window.events.push(egui::Event::Key { key: egui::Key::B, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    window.events.push(egui::Event::Text(String::from("b")));
+    window.step();
+    window.events.push(egui::Event::Key { key: egui::Key::B, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+    window.step();
+    window.until(|_| text_inputs(&dir).len() >= typed_before + 7);
+    assert_eq!(text_inputs(&dir)[typed_before..typed_before + 7], [
+        json!({"kind": "insert", "text": "Hi"}),
+        json!({"kind": "insert", "text": " "}),
+        json!({"kind": "place", "at": [20.0, 8.0], "extend": false}),
+        json!({"kind": "key", "key": "backspace", "shift": false, "word": false}),
+        json!({"kind": "key", "key": "left", "shift": true, "word": false}),
+        json!({"kind": "key", "key": "select_all", "shift": false, "word": false}),
+        json!({"kind": "insert", "text": "b"}),
+    ]);
+    assert!(commands(&dir, "tool.brush").is_empty(), "a tool's letter chose the tool while typing");
+
+    // Undo and redo still run, and are not typed.
+    let typed_now = text_inputs(&dir).len();
+    key(&mut window, egui::Key::Z, egui::Modifiers::COMMAND);
+    key(&mut window, egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    window.until(|_| !commands(&dir, "undo").is_empty() && !commands(&dir, "redo").is_empty());
+    assert_eq!(text_inputs(&dir).len(), typed_now, "undo or redo was typed");
+
+    // Copy goes to the text, and its answer to the system clipboard.
+    window.events.push(egui::Event::Copy);
+    assert_eq!(copied(&mut window).as_deref(), Some("Hi"), "Copy's answer did not reach the clipboard");
+    assert!(text_inputs(&dir).contains(&json!({"kind": "key", "key": "copy", "shift": false, "word": false})));
+    close(window, dir);
+}
+
+/// Catches a move of selected pixels that the picture cannot follow: the
+/// move sends `drag_part` from the press to the pointer each time it moves,
+/// in order, and then the finished `drag`.
+#[test]
+fn a_move_sends_its_parts_while_it_is_dragged() {
+    let (mut window, dir, _stand_in) = easel("move-parts");
+    use_tool(&mut window, "move", |tool| *tool == RasterTool::Move);
+    drag(&mut window, &[[20.0, 10.0], [22.0, 11.0], [24.0, 12.0]], |_| {});
+    window.until(|_| !gestures(&dir).is_empty());
+    assert_eq!(all_gestures(&dir), vec![
+        json!({"kind": "drag_part", "from": [20.0, 10.0], "to": [22.0, 11.0]}),
+        json!({"kind": "drag_part", "from": [20.0, 10.0], "to": [24.0, 12.0]}),
+        json!({"kind": "drag", "from": [20.0, 10.0], "to": [24.0, 12.0]}),
+    ]);
+    close(window, dir);
+}
+
+/// Catches panel rows that are not drawn or do nothing, as the Properties
+/// and Adjustments views show them: a section's icon before its title; a
+/// centred number's slider filled from its middle; a bordered button that
+/// sends its action; a note wrapped to the panel; and an item's tile,
+/// label, and muted detail, which sends its action as a command.
+#[test]
+fn the_panel_draws_items_buttons_notes_and_centred_numbers() {
+    let (mut window, dir, _stand_in) = easel("panel-rows");
+    window.app.run_action(&Action::new("tool.grade"));
+    window.until(|app| app.apps[0].running.declared.properties.as_ref().is_some_and(|properties| properties.layers.is_none()));
+    settle(&mut window);
+    let s = crate::widgets::Scale::PANEL;
+
+    let title = text_at(&window, "Color Grade");
+    let icon = glyph("filter-list");
+    let before = window.texts.iter().any(|(text, at)| *text == icon && at.right() < title.left() && (at.center().y - title.center().y).abs() < 3.0);
+    assert!(before, "the section's icon is not before its title");
+
+    let label = text_at(&window, "Contrast");
+    let knob = window
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Circle(dot) if dot.fill == crate::widgets::INK && (dot.center.y - label.center().y).abs() < 3.0 => Some(dot.center),
+            _ => None,
+        })
+        .expect("the centred number has no knob");
+    let fill = window
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(shown) if shown.fill == crate::widgets::INK && (shown.rect.center().y - knob.y).abs() < 2.0 && (shown.rect.right() - knob.x).abs() < 0.5 => Some(shown.rect),
+            _ => None,
+        })
+        .expect("the centred number's slider is not filled to its knob");
+    let track = label.left() + s.of(92.0) + s.of(7.0);
+    assert!(fill.left() - track > 20.0, "the centred slider fills from its left end, not its middle: {fill:?} on a track from {track}");
+
+    let reset = text_at(&window, "Reset");
+    assert!(edged(&window, crate::widgets::BORDER).iter().any(|button| button.contains_rect(reset) && button.height() < 40.0), "Reset has no border");
+    click(&mut window, reset.center());
+    window.until(|_| !commands(&dir, "reset_grade").is_empty());
+
+    let note = text_at(&window, NOTE);
+    let panel = Rect::from_min_max(pos2(window.app.raster.shown.right(), 0.0), pos2(1280.0, 800.0));
+    assert!(note.height() > 30.0 && panel.contains_rect(note), "the note is not wrapped to the panel: {note:?}");
+
+    let name = text_at(&window, "Curves");
+    let detail = text_at(&window, "Tone and colour by curve");
+    assert!(detail.top() > name.bottom() - 1.0 && (detail.left() - name.left()).abs() < 1.0, "the item's detail is not under its label");
+    assert!(edged(&window, crate::widgets::BORDER).iter().any(|tile| tile.right() < name.left() && (tile.center().y - (name.top() + detail.bottom()) / 2.0).abs() < 4.0 && (tile.width() - tile.height()).abs() < 0.5), "the item has no icon tile");
+    assert!(window.texts.iter().any(|(text, at)| *text == glyph("plus") && at.left() > detail.right() && panel.contains_rect(*at)), "the item has no plus");
+    click(&mut window, name.center());
+    window.until(|_| !commands(&dir, "add_curves").is_empty());
+    close(window, dir);
+}
+
+/// Catches a Curves plot that is drawn as the pressure curve's or keeps its
+/// limits: the square plot is as tall as it is wide, with its histogram's
+/// bars behind and a faint diagonal; its end point drags down below the
+/// point before it, so the curve can fall, and its first end point drags
+/// inward and to the top.
+#[test]
+fn a_free_curve_falls_as_well_as_rises() {
+    let (mut window, dir, _stand_in) = easel("free-curve");
+    window.app.run_action(&Action::new("tool.curves"));
+    window.until(|app| app.apps[0].running.declared.properties.as_ref().is_some_and(|properties| properties.sections.first().is_some_and(|section| section.title == "Curves")));
+    settle(&mut window);
+    let panel = Rect::from_min_max(pos2(window.app.raster.shown.right(), 0.0), pos2(1280.0, 800.0));
+    let plot = window
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(shown) if shown.fill == Color32::WHITE && shown.stroke.color == crate::widgets::BORDER && panel.contains_rect(shown.rect) && shown.rect.width() > 150.0 => Some(shown.rect),
+            _ => None,
+        })
+        .expect("no plot");
+    assert!((plot.width() - plot.height()).abs() < 0.5, "the plot is not square: {plot:?}");
+    let bars = window.shapes.iter().filter(|clipped| matches!(&clipped.shape, egui::Shape::Rect(shown) if shown.fill == Color32::from_rgb(226, 228, 232) && plot.contains_rect(shown.rect))).count();
+    assert_eq!(bars, 24, "the histogram's bars are not drawn");
+    let diagonal = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::LineSegment { points, .. } if points[0] == plot.left_bottom() && points[1] == plot.right_top()));
+    assert!(diagonal, "the plot has no diagonal");
+
+    let curve = |dir: &Path| -> Vec<(f64, f64)> {
+        let property = of_type(dir, "property").into_iter().filter(|line| line["prop"] == "curve").next_back().expect("the curve sent nothing");
+        property["value"]["curve"].as_array().unwrap().iter().map(|point| (point[0].as_f64().unwrap(), point[1].as_f64().unwrap())).collect()
+    };
+    let end = plot.right_top();
+    drag_path(&mut window, &[end, end + egui::vec2(0.0, 4.0), end + egui::vec2(0.0, 8.0), end + egui::vec2(0.0, 100.0), plot.right_bottom() + egui::vec2(0.0, 10.0)]);
+    window.until(|_| !commands(&dir, "finish_edit").is_empty());
+    let fell = curve(&dir);
+    assert_eq!((fell.len(), fell[1], fell[2]), (3, (0.5, 0.5), (1.0, 0.0)), "the end point did not fall below the point before it: {fell:?}");
+
+    let start = plot.left_bottom();
+    let inward = pos2(plot.left() + plot.width() * 0.2, plot.top() - 10.0);
+    drag_path(&mut window, &[start, start + egui::vec2(0.0, -4.0), start + egui::vec2(0.0, -8.0), start + (inward - start) / 2.0, inward]);
+    window.until(|_| commands(&dir, "finish_edit").len() >= 2);
+    let moved = curve(&dir);
+    assert!((moved[0].0 - 0.2).abs() < 0.01 && moved[0].1 == 1.0, "the first end point did not move inward and up: {moved:?}");
+
+    // A drag that starts on the plot away from every point adds one there.
+    let at = pos2(plot.left() + plot.width() * 0.3, plot.bottom() - plot.height() * 0.3);
+    drag_path(&mut window, &[at, at + egui::vec2(0.0, -4.0), at + egui::vec2(0.0, -8.0), at + egui::vec2(0.0, -30.0)]);
+    window.until(|_| commands(&dir, "finish_edit").len() >= 3);
+    let added = of_type(&dir, "property").into_iter().filter(|line| line["prop"] == "curve").any(|line| {
+        line["value"]["curve"].as_array().unwrap().iter().any(|point| (point[0].as_f64().unwrap() - 0.3).abs() < 0.02)
+    });
+    assert!(added, "a drag on the plot added no point where it started");
+    close(window, dir);
+}
+
+/// Catches layer rows that hide what kind they are: a mask's row draws its
+/// mark muted at the row's right, and a text's row, with no picture, draws
+/// its icon in the picture's frame.
+#[test]
+fn a_layer_row_draws_its_mark_and_its_icon_in_the_frame() {
+    let (window, dir, _stand_in) = easel_with("marks", |dir| {
+        let mut text = layer_row(dir, 3, None, 0, "Golden hour", false);
+        text.icon = String::from("text");
+        text.thumbnail = None;
+        text.selected = false;
+        let mut mask = layer_row(dir, 2, None, 0, "Subject Mask", false);
+        mask.mark = Some(String::from("link"));
+        mask.selected = false;
+        vec![text, mask, layer_row(dir, 1, None, 0, "Background", false)]
+    });
+    let panel = Rect::from_min_max(pos2(window.app.raster.shown.right(), 0.0), pos2(1280.0, 800.0));
+    let name = text_at(&window, "Subject Mask");
+    let mark = text_at(&window, &glyph("link"));
+    assert!((mark.center().y - name.center().y).abs() < 2.0 && mark.left() > name.right() && panel.right() - mark.right() < 30.0, "the mask's mark is not at its row's right: {mark:?}");
+    let text = text_at(&window, "Golden hour");
+    let icon = text_at(&window, &glyph("text"));
+    let frame = edged(&window, crate::widgets::BORDER).into_iter().find(|frame| frame.contains_rect(icon) && frame.right() < text.left()).expect("the text's icon is not in a picture's frame");
+    assert!((frame.center().y - text.center().y).abs() < 2.0, "the frame is not on the text's row");
+    close(window, dir);
+}
+
+/// What the Image Editor's settings row said in the owner's window, where
+/// the brush cannot paint, at full length.
+const REFUSAL: &str = "Color Grade is an adjustment, with no pixels to paint. Add a mask to paint where it applies, or choose a pixel layer to paint on.";
+
+/// Catches a settings row that widens the window's layout, pushing the
+/// contents and the panel past the window's right edge, as the owner saw
+/// with the conversation open: with a label longer than the row, the
+/// contents keep their width, the label stops with an ellipsis inside the
+/// window, and the panel keeps its own width with its pages and fields
+/// inside the window. A row of more controls than fit does the same.
+#[test]
+fn a_long_settings_row_label_leaves_the_panel_inside_the_window() {
+    let (mut window, dir, _stand_in) = easel("long-label");
+    let contents = window.app.raster.shown;
+    assert!((1280.0 - contents.right() - crate::panel::WIDTH).abs() < 0.5, "the panel is not at its own width before the label: {contents:?}");
+    let mut bar = toolbar("brush");
+    bar.options.push(ToolItem::Separator);
+    bar.options.push(ToolItem::Label { text: String::from(REFUSAL), strong: false });
+    std::fs::write(dir.join("refusal.jsonl"), line(AppMessage::Toolbar(bar))).unwrap();
+    window.app.run_action(&Action::new("tool.refusal"));
+    window.until(|app| app.apps[0].running.declared.toolbar.as_ref().is_some_and(|bar| bar.options.len() == 6));
+    settle(&mut window);
+
+    assert_eq!(window.app.raster.shown, contents, "the label widened the contents");
+    let label = window
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text() == REFUSAL => Some(text),
+            _ => None,
+        })
+        .expect("the label was not drawn");
+    let last = label.galley.rows.last().and_then(|row| row.glyphs.last()).map(|glyph| glyph.chr);
+    assert_eq!((label.galley.rows.len(), last), (1, Some('…')), "the label does not stop with an ellipsis on its one line");
+    assert!(label.visual_bounding_rect().right() <= 1280.0, "the label runs past the window: {:?}", label.visual_bounding_rect());
+    let inside = |window: &Window| {
+        for words in ["Layers", "Adjustments", "Normal", "Lock:"] {
+            let at = text_at(window, words);
+            assert!(at.left() >= contents.right() && at.right() <= 1280.0, "{words:?} is not inside the panel and the window: {at:?}");
+        }
+    };
+    inside(&window);
+
+    let mut crowded = toolbar("brush");
+    for index in 0..6 {
+        crowded.options.push(ToolItem::Slider {
+            caption: format!("Slider {index}"),
+            width: 190.0,
+            value: 24,
+            min: 1,
+            max: 200,
+            tint: None,
+            set: Action::new(format!("set_{index}")),
+            finish: None,
+            suffix: String::new(),
+        });
+    }
+    std::fs::write(dir.join("crowded.jsonl"), line(AppMessage::Toolbar(crowded))).unwrap();
+    window.app.run_action(&Action::new("tool.crowded"));
+    window.until(|app| app.apps[0].running.declared.toolbar.as_ref().is_some_and(|bar| bar.options.len() == 10));
+    settle(&mut window);
+    assert_eq!(window.app.raster.shown, contents, "a crowded row widened the contents");
+    inside(&window);
+    close(window, dir);
+}
+
+/// Presses at the first point, then holds the pointer still at each point
+/// for some frames, and lets go at the last: a person holding a control
+/// while the application's replies lag. The stand-in never answers a
+/// change, so the value shown stays the one it declared.
+fn hold_along(window: &mut Window, points: &[Pos2]) {
+    window.events.push(egui::Event::PointerMoved(points[0]));
+    window.step();
+    press(window, points[0], true);
+    for at in points {
+        window.events.push(egui::Event::PointerMoved(*at));
+        for _ in 0..6 {
+            window.step();
+        }
+    }
+    press(window, *points.last().unwrap(), false);
+    window.step();
+}
+
+/// Each value sent that repeats the one sent just before it.
+fn repeats(values: &[Value]) -> Vec<Value> {
+    values.windows(2).filter(|pair| pair[0] == pair[1]).map(|pair| pair[1].clone()).collect()
+}
+
+/// Catches a held slider that sends again what it sent, because it
+/// compares with the application's echo, which lags: the panel's slider
+/// and the settings row's, each held still at three places, send one value
+/// for each place at most, and never the same value twice in a row.
+#[test]
+fn a_held_slider_sends_no_repeated_values_while_replies_lag() {
+    let (mut window, dir, _stand_in) = easel("held-slider");
+    let size = text_at(&window, "Size");
+    let start = pos2(size.right() + 50.0, size.center().y);
+    hold_along(&mut window, &[start, start + egui::vec2(20.0, 0.0), start + egui::vec2(40.0, 0.0)]);
+    window.until(|_| !commands(&dir, "finish_size").is_empty());
+    let sizes: Vec<Value> = commands(&dir, "set_size").into_iter().map(|line| line["arg"]["value"].clone()).collect();
+    assert!((2..=3).contains(&sizes.len()) && repeats(&sizes).is_empty(), "the settings row's slider sent {sizes:?}");
+
+    window.app.run_action(&Action::new("tool.grade"));
+    window.until(|app| app.apps[0].running.declared.properties.as_ref().is_some_and(|properties| properties.layers.is_none()));
+    settle(&mut window);
+    let label = text_at(&window, "Contrast");
+    let knob = window
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Circle(dot) if dot.fill == crate::widgets::INK && (dot.center.y - label.center().y).abs() < 3.0 => Some(dot.center),
+            _ => None,
+        })
+        .expect("the slider has no knob");
+    hold_along(&mut window, &[knob, knob + egui::vec2(15.0, 0.0), knob + egui::vec2(30.0, 0.0)]);
+    window.until(|_| !commands(&dir, "finish_edit").is_empty());
+    let contrast: Vec<Value> = of_type(&dir, "property").into_iter().filter(|line| line["prop"] == "contrast").map(|line| line["value"].clone()).collect();
+    assert!((2..=3).contains(&contrast.len()) && repeats(&contrast).is_empty(), "the panel's slider sent {contrast:?}");
+    close(window, dir);
+}
+
+/// Catches a curve drag that moves the application's lagging echo rather
+/// than the curve the drag has made: a point added by a drag keeps moving
+/// with the pointer before the application sends it back, a held point
+/// sends each change once, and the plot shows the point where the pointer
+/// holds it.
+#[test]
+fn a_held_curve_point_moves_on_the_curve_the_drag_made() {
+    let (mut window, dir, _stand_in) = easel("held-curve");
+    window.app.run_action(&Action::new("tool.curves"));
+    window.until(|app| app.apps[0].running.declared.properties.as_ref().is_some_and(|properties| properties.sections.first().is_some_and(|section| section.title == "Curves")));
+    settle(&mut window);
+    let panel = Rect::from_min_max(pos2(window.app.raster.shown.right(), 0.0), pos2(1280.0, 800.0));
+    let plot = window
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(shown) if shown.fill == Color32::WHITE && shown.stroke.color == crate::widgets::BORDER && panel.contains_rect(shown.rect) && shown.rect.width() > 150.0 => Some(shown.rect),
+            _ => None,
+        })
+        .expect("no plot");
+    let curves = |dir: &Path| -> Vec<Value> { of_type(dir, "property").into_iter().filter(|line| line["prop"] == "curve").map(|line| line["value"].clone()).collect() };
+
+    // A point added away from the others, carried up while the echo lags.
+    let at = pos2(plot.left() + plot.width() * 0.3, plot.bottom() - plot.height() * 0.3);
+    let up = plot.height() * 0.2;
+    window.events.push(egui::Event::PointerMoved(at));
+    window.step();
+    press(&mut window, at, true);
+    for to in [at, at + egui::vec2(0.0, -8.0), at + egui::vec2(0.0, -up)] {
+        window.events.push(egui::Event::PointerMoved(to));
+        for _ in 0..6 {
+            window.step();
+        }
+    }
+    let held = plot.bottom() - plot.height() * 0.5;
+    let shown = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Circle(dot) if dot.fill == crate::widgets::INK && (dot.center.x - at.x).abs() < 1.0 && (dot.center.y - held).abs() < 1.0));
+    assert!(shown, "the plot does not show the held point where the pointer holds it");
+    press(&mut window, at + egui::vec2(0.0, -up), false);
+    window.step();
+    window.until(|_| !commands(&dir, "finish_edit").is_empty());
+    let sent = curves(&dir);
+    assert!(repeats(&sent).is_empty(), "the curve sent a value twice in a row: {sent:?}");
+    let last: Vec<(f64, f64)> = sent.last().expect("the curve sent nothing")["curve"].as_array().unwrap().iter().map(|point| (point[0].as_f64().unwrap(), point[1].as_f64().unwrap())).collect();
+    assert!(last.len() == 4 && (last[1].0 - 0.3).abs() < 0.02 && (last[1].1 - 0.5).abs() < 0.02, "the added point did not follow the pointer: {last:?}");
+    assert!(sent.len() <= 3, "the curve sent more than one value for each place it was held: {sent:?}");
+
+    // The middle point, held still and moved.
+    let middle = pos2(plot.center().x, plot.center().y);
+    hold_along(&mut window, &[middle, middle + egui::vec2(0.0, -10.0), middle + egui::vec2(0.0, -20.0)]);
+    window.until(|_| commands(&dir, "finish_edit").len() >= 2);
+    let moved = curves(&dir)[sent.len()..].to_vec();
+    assert!((1..=3).contains(&moved.len()) && repeats(&moved).is_empty(), "the held point sent {moved:?}");
+    close(window, dir);
+}
+
+/// Catches changes queued between two frames replayed one by one, each a
+/// read of the whole picture file and an upload of all of it, on the
+/// window's own thread: sixteen views, each changing the whole picture,
+/// reach the window before a frame draws them; that frame only starts a
+/// reading, and the texture then takes the latest picture in one upload.
+#[test]
+fn queued_whole_changes_reach_the_picture_in_one_upload() {
+    let (mut window, dir, _stand_in) = easel("queued");
+    let blue = [40u8, 60, 220, 255];
+    std::fs::write(dir.join("picture.rgba"), blue.repeat((W * H) as usize)).unwrap();
+    let views: Vec<String> = (2..=17u64)
+        .map(|revision| {
+            let mut changed = view(&dir, brush());
+            changed.revision = revision;
+            changed.patch = Some(protocol::RasterPatch { since: revision - 1, rect: [0, 0, W, H], file: None });
+            line(AppMessage::Raster(changed))
+        })
+        .collect();
+    std::fs::write(dir.join("queued.jsonl"), views.concat()).unwrap();
+    window.uploads.clear();
+    window.app.run_action(&Action::new("tool.queued"));
+    // Every view arrives before a frame is drawn.
+    let start = std::time::Instant::now();
+    while raster(&window).view.revision != 17 {
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "the views never arrived");
+        window.app.apps[0].running.poll();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let name = format!("raster:{}", dir.join("picture.rgba").display());
+    let texture = |window: &Window| window.ctx.tex_manager().read().allocated().find(|(_, meta)| meta.name == name).map(|(id, _)| *id).expect("the picture has no texture");
+    let picture = texture(&window);
+    let uploaded = |window: &Window| window.uploads.iter().filter(|upload| upload.0 == picture).cloned().collect::<Vec<_>>();
+    // The frame that sees them only starts the reading, and draws what it
+    // showed before.
+    window.step();
+    assert!(uploaded(&window).is_empty(), "the frame read the picture itself");
+    for _ in 0..50 {
+        window.step();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let uploads = uploaded(&window);
+    assert_eq!(uploads.len(), 1, "the queued changes were uploaded {} times", uploads.len());
+    let (_, _, size, first) = uploads[0];
+    assert_eq!((size, first), ([W as usize, H as usize], Color32::from_rgb(40, 60, 220)), "the upload is not the latest picture, whole");
     close(window, dir);
 }

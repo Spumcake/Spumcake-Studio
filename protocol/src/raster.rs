@@ -15,6 +15,9 @@ pub struct RasterView {
     /// The picture's size, in pixels.
     pub width: u32,
     pub height: u32,
+    /// A text being typed in, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<TextEditing>,
     /// The composited picture: a file of `width × height × 4` bytes, RGBA
     /// with straight (unpremultiplied) alpha, rows top to bottom. It is
     /// replaced whole, by a write to a scratch file and a rename, so the
@@ -128,6 +131,21 @@ pub enum RasterTool {
         opacity: f64,
         pressure: bool,
     },
+    /// A brush that copies from a source, such as a clone stamp or a
+    /// healing brush. Alt-click sends `source`; a drag paints as the brush
+    /// does. The host draws a crosshair where it copies from: at the
+    /// pointer plus `offset` when there is one, as during and after an
+    /// aligned stroke, or else at `source`. Sizes are in picture pixels.
+    Sampler {
+        size: f64,
+        pressure: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<[f64; 2]>,
+    },
+    /// A click sends `click`; a drag sends `rect`, a box to wrap in.
+    Text,
     /// A drag pans the camera. Nothing is sent.
     Hand,
     /// A click zooms in at the pointer, with Alt out. Nothing is sent.
@@ -156,8 +174,67 @@ pub enum RasterGesture {
     Drag { from: [f64; 2], to: [f64; 2] },
     /// A click, for the eyedropper.
     Pick { at: [f64; 2] },
+    /// Alt-click with a tool that copies from a source.
+    Source { at: [f64; 2] },
+    /// A click with the text tool.
+    Click { at: [f64; 2] },
+    /// The move tool's drag while it is open: where the press was, and
+    /// where the pointer is now. The finished `drag` follows on release.
+    DragPart { from: [f64; 2], to: [f64; 2] },
+    /// The edited text's box after a side handle was dragged:
+    /// `[x, y, width, height]`.
+    TextBox { rect: [f64; 4] },
     /// The crop box after a drag made or changed it: `[x, y, width, height]`.
     Crop { rect: [f64; 4] },
+}
+
+/// A text being typed in: its box, its caret, and its selected spans, as
+/// `[x, y, width, height]` in picture pixels. While it is set, the host
+/// draws the box with side handles and a blinking caret, and sends the
+/// keyboard as `raster_text`, except undo and redo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextEditing {
+    pub rect: [f64; 4],
+    pub caret: [f64; 4],
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selection: Vec<[f64; 4]>,
+}
+
+/// What the keyboard did to a text being typed in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TextInput {
+    /// Typed or pasted words.
+    Insert { text: String },
+    /// A press inside the box: the caret goes there, or, with `extend`,
+    /// the selection runs there.
+    Place { at: [f64; 2], extend: bool },
+    /// A drag inside the box, after its press: the selection runs to `at`.
+    Select { at: [f64; 2] },
+    /// A double-click inside the box: the word there is selected.
+    Word { at: [f64; 2] },
+    /// A key, with Shift held to select, and `word` with Ctrl (Alt on a
+    /// Mac) held to move by words.
+    Key { key: TextKey, shift: bool, word: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextKey {
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    Enter,
+    Escape,
+    SelectAll,
+    /// The selection is answered as `clipboard`; Cut also removes it.
+    Copy,
+    Cut,
 }
 
 /// A small picture of one layer, for its row: a file of `width × height × 4`
@@ -185,6 +262,7 @@ mod tests {
             height: 1080,
             picture: "/tmp/1.rgba".into(),
             revision: 3,
+            text: Some(TextEditing { rect: [1.0, 2.0, 30.0, 10.0], caret: [5.0, 2.0, 1.0, 10.0], selection: vec![[1.0, 2.0, 4.0, 10.0]] }),
             patch: Some(RasterPatch { since: 2, rect: [1, 2, 3, 4], file: Some("/tmp/1-2.patch".into()) }),
             tool: RasterTool::Brush { rgb: [20, 20, 22], size: 24.0, hardness: 0.8, opacity: 1.0, pressure: true },
             selection: vec![vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]],
@@ -208,6 +286,10 @@ mod tests {
         assert_eq!(crate::parse_app_message(&text).unwrap(), crate::AppMessage::Raster(view));
         for gesture in [
             RasterGesture::StrokePart { from: 3, points: vec![[1.0, 2.0, 0.5]] },
+            RasterGesture::Source { at: [3.0, 4.0] },
+            RasterGesture::Click { at: [3.0, 4.0] },
+            RasterGesture::DragPart { from: [0.0, 0.0], to: [2.0, 3.0] },
+            RasterGesture::TextBox { rect: [1.0, 2.0, 30.0, 10.0] },
             RasterGesture::StrokeCancel,
             RasterGesture::Stroke { points: vec![[1.0, 2.0, 0.5]] },
             RasterGesture::Rect { from: [0.0, 0.0], to: [5.0, 5.0] },

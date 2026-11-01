@@ -66,6 +66,43 @@ pub(crate) fn field(painter: &Painter, rect: Rect, hovered: bool, s: Scale) {
     );
 }
 
+/// A held control's value to send: `next`, the value it asks for this frame
+/// while it is held, when it differs from the last one it sent in this
+/// hold, or else from `echoed`, the value the application last sent back.
+/// While the application's replies lag, its echo is older than what was
+/// asked, and a held pointer would send the same value again every frame.
+/// None while it is not held, which ends the hold.
+pub(crate) fn unsent<T>(ui: &egui::Ui, id: egui::Id, next: Option<T>, echoed: &T) -> Option<T>
+where
+    T: PartialEq + Clone + Send + Sync + 'static,
+{
+    let key = id.with("sent");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let Some(next) = next else {
+        ui.data_mut(|data| data.remove::<(u64, T)>(key));
+        return None;
+    };
+    // A hold not seen on the last passes ended unseen, as when its row
+    // went away while it was held.
+    let last = ui
+        .data(|data| data.get_temp::<(u64, T)>(key))
+        .filter(|(seen, _)| pass.saturating_sub(*seen) <= 2)
+        .map_or_else(|| echoed.clone(), |(_, last)| last);
+    let fresh = next != last;
+    let kept = if fresh { next.clone() } else { last };
+    ui.data_mut(|data| data.insert_temp(key, (pass, kept)));
+    fresh.then_some(next)
+}
+
+/// What a held control last sent, while it is held: shown in place of the
+/// application's lagging echo.
+pub(crate) fn held<T>(ui: &egui::Ui, id: egui::Id) -> Option<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    ui.data(|data| data.get_temp::<(u64, T)>(id.with("sent"))).map(|(_, last)| last)
+}
+
 /// A rail with a dark fill and knob. `t` is the position in `0..=1`. While the
 /// pointer is down on it, the second value is the position the pointer asks
 /// for. The rail and knob are one size everywhere: the toolbar's Size slider
@@ -79,6 +116,18 @@ pub(crate) fn slider(
     slider_in(ui, rect, id, t, INK)
 }
 
+/// The slider filled from `from`, along its rail from 0 to 1, rather than
+/// from its left end: from 0.5 for a value that goes either way.
+pub(crate) fn slider_from(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    id: egui::Id,
+    t: f32,
+    from: f32,
+) -> (Response, Option<f32>) {
+    slider_filled(ui, rect, id, t, INK, from)
+}
+
 /// The slider with its fill and knob in `color`: the toolbar's Size slider
 /// takes a locked palette color's color.
 pub(crate) fn slider_in(
@@ -87,6 +136,17 @@ pub(crate) fn slider_in(
     id: egui::Id,
     t: f32,
     color: Color32,
+) -> (Response, Option<f32>) {
+    slider_filled(ui, rect, id, t, color, 0.0)
+}
+
+fn slider_filled(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    id: egui::Id,
+    t: f32,
+    color: Color32,
+    from: f32,
 ) -> (Response, Option<f32>) {
     let s = Scale::PANEL;
     let knob_radius = s.of(KNOB_RADIUS);
@@ -109,11 +169,14 @@ pub(crate) fn slider_in(
     let thickness = (2.0 * half * pixels).round().max(1.0) / pixels;
     let rail_top = ((rect.center().y - thickness / 2.0) * pixels).round() / pixels;
     let knob = pos2(left + shown * (right - left), rail_top + thickness / 2.0);
-    let rail =
-        |to: f32| Rect::from_min_max(pos2(left - half, rail_top), pos2(to, rail_top + thickness));
+    let rail = |from: f32, to: f32| {
+        Rect::from_min_max(pos2(from.min(to), rail_top), pos2(from.max(to), rail_top + thickness))
+    };
     let painter = ui.painter();
-    painter.rect_filled(rail(right + half), thickness / 2.0, RAIL);
-    painter.rect_filled(rail(knob.x), thickness / 2.0, color);
+    painter.rect_filled(rail(left - half, right + half), thickness / 2.0, RAIL);
+    // A fill from the left end starts under the knob's rounded end.
+    let start = if from <= 0.0 { left - half } else { left + from.clamp(0.0, 1.0) * (right - left) };
+    painter.rect_filled(rail(start, knob.x), thickness / 2.0, color);
     painter.circle_filled(knob, knob_radius, color);
     (response, asked)
 }
@@ -154,7 +217,8 @@ pub(crate) struct NumberEdit {
 
 /// A number in a field, left-aligned as in the renders. Dragging sideways
 /// scrubs the value; clicking types a replacement, which is clamped. A
-/// `blank` field reads "Mixed" until it is set.
+/// `blank` field reads "Mixed" until it is set. A `signed` number above
+/// nothing shows its plus, as a value that goes either way does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn number_field(
     ui: &mut egui::Ui,
@@ -165,6 +229,7 @@ pub(crate) fn number_field(
     suffix: &str,
     blank: bool,
     places: u8,
+    signed: bool,
     s: Scale,
 ) -> NumberEdit {
     let (min, max) = range;
@@ -236,7 +301,8 @@ pub(crate) fn number_field(
         if blank {
             "Mixed".to_string()
         } else {
-            format!("{}{suffix}", show_number(value, places))
+            let plus = if signed && value > 0 { "+" } else { "" };
+            format!("{plus}{}{suffix}", show_number(value, places))
         },
         body(s),
         if blank { MUTED } else { TEXT },
@@ -253,7 +319,9 @@ pub(crate) fn number_field(
     {
         let per_point = ((max - min) as f32 / 160.0).max(0.1);
         let next = start + ((pos.x - origin.x) * per_point).round() as i32;
-        edit.value = Some(next.clamp(min, max));
+        edit.value = unsent(ui, id, Some(next.clamp(min, max)), &value);
+    } else {
+        unsent::<i32>(ui, id, None, &value);
     }
     if response.drag_stopped() {
         ui.data_mut(|data| data.remove::<i32>(start_id));

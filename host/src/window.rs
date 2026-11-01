@@ -524,7 +524,9 @@ impl HostWindow {
 
     /// Shortcuts the selected sub-application declared, and the window's
     /// clipboard events. Escape ends what the drawing surface is doing.
-    fn handle_keys(&mut self, ctx: &egui::Context, editing_text: bool) -> Vec<Action> {
+    /// While a raster tab's text is typed in (`typing`), only undo and redo
+    /// run: the raster tab sends every other key to the text.
+    fn handle_keys(&mut self, ctx: &egui::Context, editing_text: bool, typing: bool) -> Vec<Action> {
         let Some(started) = self.apps.get(self.selected) else {
             return Vec::new();
         };
@@ -532,7 +534,7 @@ impl HostWindow {
         // A name, the size field, or text being typed owns these keys.
         // The press is still noted, so the key-up after editing ends does not
         // copy the objects.
-        let editing = ctx.text_edit_focused() || editing_text;
+        let editing = ctx.text_edit_focused() || editing_text || typing;
         let frame = ctx.input(clipboard_frame);
         let mut clipboard = Vec::new();
         take_clipboard(
@@ -560,7 +562,11 @@ impl HostWindow {
             !editing,
         );
         if editing {
-            return Vec::new();
+            if !typing || ctx.text_edit_focused() || self.locked() {
+                return Vec::new();
+            }
+            let undoing: Vec<protocol::Binding> = keys.bindings.iter().filter(|binding| undoes(&binding.chord) && binding.then.is_empty()).cloned().collect();
+            return self.pressed_bindings(ctx, &undoing);
         }
         let shift = ctx.input(|input| input.modifiers.shift);
         let mut actions = clipboard.clone();
@@ -595,6 +601,12 @@ impl HostWindow {
         }
         actions
     }
+}
+
+/// Undo and redo's chords, wherever they are declared: Ctrl+Z, with Shift
+/// or without, and Ctrl+Y.
+fn undoes(chord: &protocol::Chord) -> bool {
+    chord.command && !chord.alt && matches!(chord.key.as_str(), "Z" | "Y")
 }
 
 impl HostWindow {
@@ -669,6 +681,10 @@ impl eframe::App for HostWindow {
         for started in &mut self.apps {
             started.running.poll();
             pending |= started.running.pending();
+            // Copy and Cut's answers go to the system clipboard.
+            while let Some(text) = started.running.declared.clipboard.pop_front() {
+                ctx.copy_text(text);
+            }
         }
         if pending {
             ctx.request_repaint();
@@ -1983,6 +1999,7 @@ fn waits_while_locked(message: &HostMessage) -> bool {
         HostMessage::Command { id, .. } => id != "select_tab",
         HostMessage::Gesture { .. }
         | HostMessage::RasterGesture { .. }
+        | HostMessage::RasterText { .. }
         | HostMessage::Select { .. }
         | HostMessage::Property { .. } => true,
         _ => false,
@@ -2094,7 +2111,9 @@ impl HostWindow {
             chosen.extend(picked);
         }
 
-        let full = ui.available_rect_before_wrap();
+        // The contents and the panel stay inside the window, whatever the
+        // rows above them drew.
+        let full = ui.available_rect_before_wrap().intersect(ui.clip_rect());
         let Some(tab) = tab else {
             self.viewport = [f64::from(full.width()), f64::from(full.height())];
             ui.painter().rect_filled(full, 0.0, CANVAS);
@@ -2108,9 +2127,10 @@ impl HostWindow {
         // does nothing there.
         let has_panel = self.has_panel(app, &tab);
         let editing_text = self.editing_text(app, &tab);
+        let typing = self.typing_raster_text(app, &tab);
         // F4 can open the panel. Split after the keys so that frame
         // gives the panel its width and narrows the contents.
-        chosen.extend(self.handle_keys(ctx, editing_text));
+        chosen.extend(self.handle_keys(ctx, editing_text, typing));
         if properties.is_none() {
             if !has_panel {
                 self.panel_open = false;
@@ -2405,6 +2425,14 @@ impl HostWindow {
         strip
     }
 
+    /// A raster tab's text is being typed in: the keyboard is the text's.
+    fn typing_raster_text(&self, app: usize, tab: &str) -> bool {
+        self.apps
+            .get(app)
+            .and_then(|started| started.running.declared.rasters.get(tab))
+            .is_some_and(|display| display.view.text.is_some())
+    }
+
     fn editing_text(&self, app: usize, tab: &str) -> bool {
         self.apps
             .get(app)
@@ -2486,6 +2514,10 @@ impl HostWindow {
                 crate::raster::Out::Painted(points) => protocol::RasterGesture::Stroke { points },
                 crate::raster::Out::PaintPart { from, points } => protocol::RasterGesture::StrokePart { from, points },
                 crate::raster::Out::PaintLetGo => protocol::RasterGesture::StrokeCancel,
+                crate::raster::Out::Text(input) => {
+                    self.send(app, HostMessage::RasterText { tab: tab.to_string(), input });
+                    continue;
+                }
                 crate::raster::Out::Action(action) => {
                     let viewport = self.viewport;
                     self.send(
