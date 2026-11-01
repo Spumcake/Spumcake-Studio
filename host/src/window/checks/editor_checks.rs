@@ -37,7 +37,7 @@ fn screen(window: &Window, point: [f64; 2]) -> Pos2 {
 /// once: waits for a newer picture, then for the stroke to reach `x`, `y`.
 fn until_painted(window: &mut Window, before: u64, x: u32, y: u32) {
     window.until(move |app| app.apps[0].running.declared.rasters.values().next().is_some_and(|display| display.view.revision > before));
-    until_pixel(window, x, y, |pixel| pixel[0] < 128);
+    until_pixel(window, x, y, |pixel| pixel[3] > 128 && pixel[0] < 128);
 }
 
 /// Waits, ten seconds at most, for the pixel at `x`, `y` to be as `wanted`
@@ -63,7 +63,7 @@ fn editor(dir: &std::path::Path, stand_in: &StandIn) -> Window {
 }
 
 /// Catches an editor that only looks like one: the real Image Editor's new
-/// picture is white; a brush drag across it, through the host's camera,
+/// picture is empty; a brush drag across it, through the host's camera,
 /// darkens the pixels under it; Undo restores them exactly; Redo paints them
 /// again; and after a restart the project gives the painted picture back.
 #[test]
@@ -74,7 +74,7 @@ fn a_brush_drag_paints_undoes_and_comes_back_from_the_project() {
     let view = display(&window).unwrap().view.clone();
     assert_eq!((view.width, view.height), (1920, 1080));
     let (x, y) = (960, 540);
-    assert_eq!(pixel(&window, x, y), [255, 255, 255, 255], "a new picture is not white");
+    assert_eq!(pixel(&window, x, y), [0, 0, 0, 0], "a new picture is not empty");
 
     window.app.run_action(&Action::with_arg("tool", json!({ "tool": "brush" })));
     window.until(|app| matches!(app.apps[0].running.declared.rasters.values().next().map(|display| &display.view.tool), Some(RasterTool::Brush { .. })));
@@ -94,12 +94,12 @@ fn a_brush_drag_paints_undoes_and_comes_back_from_the_project() {
     window.step();
     until_painted(&mut window, before, x, y);
     let painted = pixel(&window, x, y);
-    assert!(painted[0] < 128 && painted[1] < 128 && painted[2] < 128, "the drag did not paint the picture: {painted:?}");
-    assert_eq!(pixel(&window, x, 100), [255, 255, 255, 255], "the drag painted far from where it went");
+    assert!(painted[3] > 128 && painted[0] < 128 && painted[1] < 128 && painted[2] < 128, "the drag did not paint the picture: {painted:?}");
+    assert_eq!(pixel(&window, x, 100), [0, 0, 0, 0], "the drag painted far from where it went");
 
     window.app.run_action(&Action::new("undo"));
-    until_pixel(&mut window, x, y, |pixel| pixel == [255, 255, 255, 255]);
-    assert_eq!(pixel(&window, x, y), [255, 255, 255, 255], "Undo did not restore the pixels");
+    until_pixel(&mut window, x, y, |pixel| pixel == [0, 0, 0, 0]);
+    assert_eq!(pixel(&window, x, y), [0, 0, 0, 0], "Undo did not restore the pixels");
     window.app.run_action(&Action::new("redo"));
     until_pixel(&mut window, x, y, |pixel| pixel == painted);
     assert_eq!(pixel(&window, x, y), painted, "Redo did not paint them again");
@@ -149,7 +149,7 @@ fn press(window: &mut Window, at: Pos2, button: egui::PointerButton) {
 
 /// Catches a gallery that only looks like one: with the real Image Editor,
 /// the + adds a picture that the strip and the canvas show; painting it
-/// leaves the first picture white; its thumbnail brings the first back;
+/// leaves the first picture empty; its thumbnail brings the first back;
 /// Rename from its menu renames it in place; and the gallery returns after a
 /// restart.
 #[test]
@@ -182,9 +182,9 @@ fn a_gallery_adds_shows_renames_and_comes_back() {
     window.events.push(egui::Event::PointerButton { pos: screens[2], button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     window.step();
     until_painted(&mut window, before, 960, 540);
-    assert!(pixel(&window, 960, 540)[0] < 128, "the new picture was not painted");
+    assert!(pixel(&window, 960, 540)[3] > 128, "the new picture was not painted");
 
-    // Its thumbnail brings the first picture back, still white.
+    // Its thumbnail brings the first picture back, still empty.
     for _ in 0..3 {
         window.step();
     }
@@ -196,7 +196,7 @@ fn a_gallery_adds_shows_renames_and_comes_back() {
         app.apps[0].running.declared.rasters.values().next().is_some_and(|display| {
             std::fs::read(&display.view.picture).is_ok_and(|bytes| {
                 let at = ((540 * display.view.width + 960) * 4) as usize;
-                bytes.len() == (display.view.width * display.view.height * 4) as usize && bytes[at] == 255
+                bytes.len() == (display.view.width * display.view.height * 4) as usize && bytes[at + 3] == 0
             })
         })
     });
@@ -258,7 +258,7 @@ fn dark_inside(window: &Window, rect: [f64; 4]) -> bool {
     let y0 = (rect[1].max(0.0) as usize).min(height);
     let x1 = ((rect[0] + rect[2]).ceil().max(0.0) as usize).min(width);
     let y1 = ((rect[1] + rect[3]).ceil().max(0.0) as usize).min(height);
-    (y0..y1).any(|y| (x0..x1).any(|x| bytes[(y * width + x) * 4] < 128))
+    (y0..y1).any(|y| (x0..x1).any(|x| bytes[(y * width + x) * 4 + 3] > 128 && bytes[(y * width + x) * 4] < 128))
 }
 
 fn choose_tool(window: &mut Window, tool: &str, is: fn(&RasterTool) -> bool) {
@@ -274,7 +274,7 @@ fn choose_tool(window: &mut Window, tool: &str, is: fn(&RasterTool) -> bool) {
 /// back: with the real Image Editor, the T tool's click on the picture
 /// starts a text, typed letters through the window's keyboard become dark
 /// pixels in its box, and Ctrl+Z takes back the typing, leaving the box
-/// white and the text gone.
+/// empty and the text gone.
 #[test]
 fn a_text_is_typed_on_the_picture_and_undone() {
     let dir = scratch("editor-text");
@@ -322,8 +322,8 @@ fn the_stamp_copies_what_alt_click_chose() {
     window.events.push(egui::Event::PointerMoved(dot));
     window.step();
     press(&mut window, dot, egui::PointerButton::Primary);
-    until_pixel(&mut window, 300, 300, |pixel| pixel[0] < 64);
-    assert!(pixel(&window, 300, 300)[0] < 64, "the brush's dot was not painted");
+    until_pixel(&mut window, 300, 300, |pixel| pixel[3] > 192 && pixel[0] < 64);
+    assert!(pixel(&window, 300, 300)[3] > 192, "the brush's dot was not painted");
 
     choose_tool(&mut window, "stamp", |tool| matches!(tool, RasterTool::Sampler { .. }));
     // The view may have moved with the new tool's settings row.
@@ -339,12 +339,12 @@ fn the_stamp_copies_what_alt_click_chose() {
     window.until(|app| {
         app.apps[0].running.declared.rasters.values().next().is_some_and(|display| matches!(display.view.tool, RasterTool::Sampler { source: Some(_), .. }))
     });
-    assert_eq!(pixel(&window, 900, 600), [255, 255, 255, 255]);
+    assert_eq!(pixel(&window, 900, 600), [0, 0, 0, 0]);
     let target = screen(&window, [900.0, 600.0]);
     window.events.push(egui::Event::PointerMoved(target));
     window.step();
     press(&mut window, target, egui::PointerButton::Primary);
-    until_pixel(&mut window, 900, 600, |pixel| pixel[0] < 64);
-    assert!(pixel(&window, 900, 600)[0] < 64, "the stamp did not copy the dot");
+    until_pixel(&mut window, 900, 600, |pixel| pixel[3] > 192 && pixel[0] < 64);
+    assert!(pixel(&window, 900, 600)[3] > 192, "the stamp did not copy the dot");
     let _ = std::fs::remove_dir_all(dir);
 }

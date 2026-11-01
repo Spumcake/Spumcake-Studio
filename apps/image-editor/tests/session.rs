@@ -130,7 +130,7 @@ fn a_stroke_reaches_the_picture_and_the_project() {
     let picture = PathBuf::from(&view.picture);
     assert!(picture.starts_with(display_folder(&folder)), "{}", picture.display());
     assert_eq!(std::fs::metadata(&picture).unwrap().len(), 1920 * 1080 * 4);
-    assert_eq!(pixel(&picture, 1920, 500, 300), [255, 255, 255, 255]);
+    assert_eq!(pixel(&picture, 1920, 500, 300), [0, 0, 0, 0]);
 
     program.command("tool", json!({ "tool": "brush" }));
     program.send(HostMessage::RasterGesture {
@@ -141,11 +141,11 @@ fn a_stroke_reaches_the_picture_and_the_project() {
     assert_eq!(painted.picture, view.picture);
     assert_eq!(std::fs::metadata(&picture).unwrap().len(), 1920 * 1080 * 4);
     assert_eq!(pixel(&picture, 1920, 500, 300), [0, 0, 0, 255], "the stroke did not reach the picture");
-    assert_eq!(pixel(&picture, 1920, 500, 400), [255, 255, 255, 255]);
+    assert_eq!(pixel(&picture, 1920, 500, 400), [0, 0, 0, 0]);
 
     program.command("undo", json!({}));
     let undone = program.raster(painted.revision);
-    assert_eq!(pixel(&PathBuf::from(&undone.picture), 1920, 500, 300), [255, 255, 255, 255]);
+    assert_eq!(pixel(&PathBuf::from(&undone.picture), 1920, 500, 300), [0, 0, 0, 0]);
     program.command("redo", json!({}));
     program.raster(undone.revision);
 
@@ -356,7 +356,7 @@ fn a_picture_added_from_the_strip_is_painted_alone() {
         _ => None,
     });
     assert_eq!((shown.picture.as_str(), shown.revision), (first.picture.as_str(), first.revision));
-    assert_eq!(pixel(Path::new(&shown.picture), 1920, 500, 300), [255, 255, 255, 255], "the first picture was painted");
+    assert_eq!(pixel(Path::new(&shown.picture), 1920, 500, 300), [0, 0, 0, 0], "the first picture was painted");
 
     // The + tile's second row opens a PNG through the host's file dialog
     // as a third picture, shown, and named after its file.
@@ -560,7 +560,7 @@ fn the_stamp_and_moving_pixels_work_through_the_protocol() {
     program.command("undo", json!({}));
     let undone = program.raster(moved.revision);
     assert_eq!(pixel(Path::new(&undone.picture), 1920, 500, 300), [255, 0, 0, 255], "one undo did not put the line back");
-    assert_eq!(pixel(Path::new(&undone.picture), 1920, 500, 400), [255, 255, 255, 255]);
+    assert_eq!(pixel(Path::new(&undone.picture), 1920, 500, 400), [0, 0, 0, 0]);
 }
 
 /// Catches the Adjustments and Properties pages doing nothing through the
@@ -568,7 +568,12 @@ fn the_stamp_and_moving_pixels_work_through_the_protocol() {
 /// Properties, and its curve, sent as a property, brightens the picture.
 #[test]
 fn an_adjustment_is_added_and_set_from_the_panel() {
-    let mut program = Program::start(false);
+    // A white picture, as a new one is empty.
+    let folder = scratch("adjustment");
+    let white = folder.join("white.png");
+    image::RgbaImage::from_pixel(40, 30, image::Rgba([255, 255, 255, 255])).save(&white).unwrap();
+    let mut program = Program::start(true);
+    program.send(HostMessage::Open { path: Some(white.display().to_string()) });
     let first = program.raster(0);
     program.command("panel_page", json!({ "page": 2 }));
     let item = program.wait(|message| match message {
@@ -591,6 +596,8 @@ fn an_adjustment_is_added_and_set_from_the_panel() {
         preview: false,
     });
     let graded = program.raster(first.revision);
-    let value = pixel(Path::new(&graded.picture), 1920, 10, 10);
+    let value = pixel(Path::new(&graded.picture), 40, 10, 10);
     assert!((126..=129).contains(&value[0]), "the curve made white {value:?}");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
 }

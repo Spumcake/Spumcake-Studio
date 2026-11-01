@@ -950,12 +950,12 @@ mod tests {
         let actions: Vec<&str> = layers.actions.iter().map(|action| action.icon.as_str()).collect();
         assert_eq!(actions, ["plus", "folder", "trash"]);
         assert_eq!(layers.rows.len(), 1);
-        assert_eq!(layers.rows[0].name, "Background");
+        assert_eq!(layers.rows[0].name, "Layer 1");
         let thumbnail = layers.rows[0].thumbnail.as_ref().expect("no thumbnail");
         assert_eq!((thumbnail.width, thumbnail.height), (56, 32));
         let bytes = std::fs::read(&thumbnail.path).unwrap();
         assert_eq!(bytes.len(), 56 * 32 * 4);
-        assert!(bytes.chunks(4).all(|pixel| pixel == [255, 255, 255, 255]));
+        assert!(bytes.chunks(4).all(|pixel| pixel == [0, 0, 0, 0]));
     }
 
     /// Catches rows that drift from layers.png and the Properties and
@@ -967,7 +967,9 @@ mod tests {
     /// and note; Adjustments lists Curves and Color Grade to add.
     #[test]
     fn the_layer_rows_and_pages_follow_the_views() {
+        // A white picture, so the curve's histogram has something to show.
         let mut session = Session::launch();
+        *session.images[0].doc_mut() = crate::doc::Doc::new(crate::picture::Picture::blank(1920, 1080));
         let doc = session.images[0].doc_mut();
         let background = doc.active.unwrap();
         doc.add_text("Golden hour", [10, 10], None, crate::text::Style::default(), None).unwrap();

@@ -2377,9 +2377,9 @@ fn fit_into(width: u32, height: u32, most: [u32; 2]) -> (u32, u32) {
     (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1))
 }
 
-/// A new picture: white, 1920 × 1080.
+/// A new picture: one empty layer, 1920 × 1080.
 pub fn new_doc() -> Doc {
-    Doc::new(Picture::blank(NEW_SIZE[0], NEW_SIZE[1]))
+    Doc::new(Picture::clear(NEW_SIZE[0], NEW_SIZE[1]))
 }
 
 /// A new tab's gallery: one new picture.
@@ -2700,7 +2700,7 @@ mod tests {
         command(&mut session, "tool", json!({ "tool": "brush" }));
         stroke(&mut session, [50.0, 200.0], [350.0, 200.0]);
         assert_eq!(at(&mut session, 200, 200), [200, 30, 40, 255]);
-        assert_eq!(at(&mut session, 60, 200), [255, 255, 255, 255], "painted outside the lasso");
+        assert_eq!(at(&mut session, 60, 200), [0, 0, 0, 0], "painted outside the lasso");
         command(&mut session, "deselect", json!({}));
         assert!(session.images[0].doc().selection.is_none());
 
@@ -2756,7 +2756,7 @@ mod tests {
         assert!(session.images[0].doc().picture.nodes[0].locks.pixels);
         command(&mut session, "tool", json!({ "tool": "brush" }));
         stroke(&mut session, [10.0, 10.0], [40.0, 10.0]);
-        assert_eq!(at(&mut session, 20, 10), [255, 255, 255, 255], "a pixel-locked layer took paint");
+        assert_eq!(at(&mut session, 20, 10), [0, 0, 0, 0], "a pixel-locked layer took paint");
 
         command(&mut session, "add_layer", json!({}));
         let added = session.images[0].doc().active.unwrap();
@@ -2777,7 +2777,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("Background".to_string(), 0, true),
+                ("Layer 1".to_string(), 0, true),
                 ("Group 1".to_string(), 0, true),
                 ("Ink".to_string(), 1, false),
             ]
@@ -2886,16 +2886,16 @@ mod tests {
         let background = session.images[0].doc().active.unwrap();
         let messages = command(&mut session, "layer_lock", json!({ "node": background }));
         let row = options(&messages);
-        assert_eq!(strong_labels(&row), ["Background is locked."]);
+        assert_eq!(strong_labels(&row), ["Layer 1 is locked."]);
         assert!(matches!(row.last(), Some(ToolItem::Label { strong: true, .. })), "the reason is not after the settings");
         stroke(&mut session, [10.0, 10.0], [40.0, 10.0]);
-        assert_eq!(at(&mut session, 20, 10), [255, 255, 255, 255], "a locked layer took paint");
+        assert_eq!(at(&mut session, 20, 10), [0, 0, 0, 0], "a locked layer took paint");
         let messages = command(&mut session, "tool", json!({ "tool": "move" }));
-        assert_eq!(strong_labels(&options(&messages)), ["Background is locked."]);
+        assert_eq!(strong_labels(&options(&messages)), ["Layer 1 is locked."]);
         command(&mut session, "add_group", json!({}));
         let group = session.images[0].doc().picture.nodes[0].id;
         let messages = command(&mut session, "layer_click", json!({ "node": group }));
-        assert_eq!(strong_labels(&options(&messages)), ["Background is locked."], "moving a group with a locked layer gave no reason");
+        assert_eq!(strong_labels(&options(&messages)), ["Layer 1 is locked."], "moving a group with a locked layer gave no reason");
         let messages = command(&mut session, "tool", json!({ "tool": "eraser" }));
         assert_eq!(strong_labels(&options(&messages)), ["Choose a layer to paint on; a group holds layers."]);
     }
@@ -3019,8 +3019,8 @@ mod tests {
         }
         let red = std::fs::read(&film.items[0].thumbnail.path).unwrap();
         assert_eq!(&red[..4], [220, 0, 0, 255], "the first thumbnail is not its picture");
-        let white = std::fs::read(&film.items[1].thumbnail.path).unwrap();
-        assert!(white.chunks(4).all(|pixel| pixel == [255, 255, 255, 255]));
+        let empty = std::fs::read(&film.items[1].thumbnail.path).unwrap();
+        assert!(empty.chunks(4).all(|pixel| pixel == [0, 0, 0, 0]));
     }
 
     /// Catches a stroke that writes the whole picture for every part, and
@@ -3204,17 +3204,17 @@ mod tests {
         click(&mut session, &film, 0);
         let messages = command(&mut session, "undo", json!({}));
         assert_eq!(session.images[0].gallery.frames.len(), 2, "Undo after a thumbnail click undid the strip");
-        assert_eq!(at(&mut session, 50, 10), [255, 255, 255, 255], "the first picture's stroke was not undone");
+        assert_eq!(at(&mut session, 50, 10), [0, 0, 0, 0], "the first picture's stroke was not undone");
         assert!(!undo_enabled(&messages));
         click(&mut session, &film, 1);
         command(&mut session, "undo", json!({}));
         assert_eq!(session.images[0].gallery.frames.len(), 2, "Undo after a thumbnail click undid the strip");
-        assert_eq!(at(&mut session, 50, 50), [255, 255, 255, 255], "the second picture's last stroke was not undone");
+        assert_eq!(at(&mut session, 50, 50), [0, 0, 0, 0], "the second picture's last stroke was not undone");
         click(&mut session, &film, 0);
         let second = &mut session.images[0].gallery.frames[1].doc;
-        let painted = |doc: &mut Doc, y: usize| doc.composite()[(y * 1920 + 50) * 4];
-        assert_eq!(painted(second, 10), 0, "an undo on the first picture reached the second");
-        assert_eq!(painted(second, 50), 255);
+        let painted = |doc: &mut Doc, y: usize| doc.composite()[(y * 1920 + 50) * 4 + 3];
+        assert_eq!(painted(second, 10), 255, "an undo on the first picture reached the second");
+        assert_eq!(painted(second, 50), 0);
         assert_eq!(session.images[0].gallery.frames.len(), 2, "an undo on the picture undid the strip");
     }
 
@@ -3273,7 +3273,7 @@ mod tests {
         stroke(&mut session, [10.0, 10.0], [100.0, 10.0]);
         command(&mut session, "undo", json!({}));
         assert_eq!(session.images[0].gallery.frames.len(), 2, "Undo after a stroke undid the strip");
-        assert_eq!(at(&mut session, 50, 10), [255, 255, 255, 255]);
+        assert_eq!(at(&mut session, 50, 10), [0, 0, 0, 0]);
         // So do a Layers page command and a panel edit.
         command(&mut session, "film_focus", json!({}));
         command(&mut session, "add_layer", json!({}));

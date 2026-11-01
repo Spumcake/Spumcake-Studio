@@ -69,7 +69,7 @@ pub fn skills() -> Vec<Skill> {
             },
             Tool {
                 name: "add_picture".into(),
-                description: "Add a new white 1920 × 1080 picture at the end of the filmstrip, and show it. Returns its position and name.".into(),
+                description: "Add a new, empty 1920 × 1080 picture, one transparent layer, at the end of the filmstrip, and show it. Returns its position and name.".into(),
                 input: object(
                     json!({"name": {"type": "string", "description": "The picture's name. Leave out for \"Untitled Asset\"; a name already used gets a number."}}),
                     &[],

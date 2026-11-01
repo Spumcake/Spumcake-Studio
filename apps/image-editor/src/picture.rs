@@ -462,7 +462,17 @@ impl Picture {
         }
     }
 
-    /// A new picture with one white "Background" layer.
+    /// A new picture with one empty layer, "Layer 1", as the owner set on
+    /// 2026-11-01.
+    pub fn clear(width: u32, height: u32) -> Self {
+        let mut picture = Self::empty(width, height);
+        let id = picture.take_id();
+        picture.nodes.push(Node::layer(id, "Layer 1"));
+        picture.pixels.insert(id, Pixels::clear(width, height));
+        picture
+    }
+
+    /// A picture with one white "Background" layer.
     pub fn blank(width: u32, height: u32) -> Self {
         let mut picture = Self::empty(width, height);
         let id = picture.take_id();
