@@ -1,6 +1,6 @@
-//! The whole loop with the real Image Editor: the window draws its picture,
+//! The whole loop with the real Image Generator: the window draws its image,
 //! a brush drag reaches its pixels, Undo and Redo reverse and repeat it, and
-//! the picture comes back from the project after a restart.
+//! the image comes back from the project after a restart.
 
 use super::{StandIn, Window, built, keep_ticking, project_window, scratch, spec};
 use eframe::egui::{self, Pos2, pos2};
@@ -11,10 +11,10 @@ fn display(window: &Window) -> Option<&crate::process::RasterDisplay> {
     window.app.apps.first()?.running.declared.rasters.values().next()
 }
 
-/// One pixel of the picture file the host reads.
+/// One pixel of the image file the host reads.
 fn pixel(window: &Window, x: u32, y: u32) -> [u8; 4] {
     let view = &display(window).expect("no raster tab").view;
-    let bytes = std::fs::read(&view.picture).expect("the picture file is missing");
+    let bytes = std::fs::read(&view.image).expect("the image file is missing");
     assert_eq!(bytes.len(), (view.width * view.height * 4) as usize);
     let at = ((y * view.width + x) * 4) as usize;
     [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
@@ -33,15 +33,15 @@ fn screen(window: &Window, point: [f64; 2]) -> Pos2 {
     )
 }
 
-/// The stroke is painted as it is drawn, so the picture changes more than
-/// once: waits for a newer picture, then for the stroke to reach `x`, `y`.
+/// The stroke is painted as it is drawn, so the image changes more than
+/// once: waits for a newer image, then for the stroke to reach `x`, `y`.
 fn until_painted(window: &mut Window, before: u64, x: u32, y: u32) {
     window.until(move |app| app.apps[0].running.declared.rasters.values().next().is_some_and(|display| display.view.revision > before));
     until_pixel(window, x, y, |pixel| pixel[3] > 128 && pixel[0] < 128);
 }
 
 /// Waits, ten seconds at most, for the pixel at `x`, `y` to be as `wanted`
-/// says: the pictures of a stroke still being painted may come first.
+/// says: the images of a stroke still being painted may come first.
 fn until_pixel(window: &mut Window, x: u32, y: u32, wanted: impl Fn([u8; 4]) -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !wanted(pixel(window, x, y)) && std::time::Instant::now() < deadline {
@@ -51,7 +51,7 @@ fn until_pixel(window: &mut Window, x: u32, y: u32, wanted: impl Fn([u8; 4]) -> 
 }
 
 fn editor(dir: &std::path::Path, stand_in: &StandIn) -> Window {
-    let mut window = project_window(vec![spec("image-editor", "Image Editor", &built("image-editor"))], stand_in, dir);
+    let mut window = project_window(vec![spec("image-generator", "Image Generator", &built("image-generator"))], stand_in, dir);
     if !window.app.workspace_shown() {
         window.app.toggle_workspace();
     }
@@ -62,10 +62,10 @@ fn editor(dir: &std::path::Path, stand_in: &StandIn) -> Window {
     window
 }
 
-/// Catches an editor that only looks like one: the real Image Editor's new
-/// picture is empty; a brush drag across it, through the host's camera,
+/// Catches an editor that only looks like one: the real Image Generator's new
+/// image is empty; a brush drag across it, through the host's camera,
 /// darkens the pixels under it; Undo restores them exactly; Redo paints them
-/// again; and after a restart the project gives the painted picture back.
+/// again; and after a restart the project gives the painted image back.
 #[test]
 fn a_brush_drag_paints_undoes_and_comes_back_from_the_project() {
     let dir = scratch("editor-loop");
@@ -74,7 +74,7 @@ fn a_brush_drag_paints_undoes_and_comes_back_from_the_project() {
     let view = display(&window).unwrap().view.clone();
     assert_eq!((view.width, view.height), (1920, 1080));
     let (x, y) = (960, 540);
-    assert_eq!(pixel(&window, x, y), [0, 0, 0, 0], "a new picture is not empty");
+    assert_eq!(pixel(&window, x, y), [0, 0, 0, 0], "a new image is not empty");
 
     window.app.run_action(&Action::with_arg("tool", json!({ "tool": "brush" })));
     window.until(|app| matches!(app.apps[0].running.declared.rasters.values().next().map(|display| &display.view.tool), Some(RasterTool::Brush { .. })));
@@ -94,7 +94,7 @@ fn a_brush_drag_paints_undoes_and_comes_back_from_the_project() {
     window.step();
     until_painted(&mut window, before, x, y);
     let painted = pixel(&window, x, y);
-    assert!(painted[3] > 128 && painted[0] < 128 && painted[1] < 128 && painted[2] < 128, "the drag did not paint the picture: {painted:?}");
+    assert!(painted[3] > 128 && painted[0] < 128 && painted[1] < 128 && painted[2] < 128, "the drag did not paint the image: {painted:?}");
     assert_eq!(pixel(&window, x, 100), [0, 0, 0, 0], "the drag painted far from where it went");
 
     window.app.run_action(&Action::new("undo"));
@@ -104,21 +104,21 @@ fn a_brush_drag_paints_undoes_and_comes_back_from_the_project() {
     until_pixel(&mut window, x, y, |pixel| pixel == painted);
     assert_eq!(pixel(&window, x, y), painted, "Redo did not paint them again");
 
-    // The picture keeps itself in the project.
+    // The image keeps itself in the project.
     keep_ticking(&mut window);
     keep_ticking(&mut window);
     window.app.write_project(true);
     keep_ticking(&mut window);
     let folder = window.app.project.as_ref().unwrap().folder.clone();
     let kept = std::fs::read_dir(&folder).unwrap().flatten().any(|entry| entry.path().extension().is_some_and(|ext| ext == "ipx"));
-    assert!(kept, "no picture file was kept in the project");
+    assert!(kept, "no image file was kept in the project");
     drop(window);
 
     let stand_in = StandIn::start(Vec::new());
     let mut window = editor(&dir, &stand_in);
     window.until(move |app| {
         app.apps[0].running.declared.rasters.values().next().is_some_and(|display| {
-            std::fs::read(&display.view.picture).is_ok_and(|bytes| {
+            std::fs::read(&display.view.image).is_ok_and(|bytes| {
                 let at = ((y * display.view.width + x) * 4) as usize;
                 bytes.len() == (display.view.width * display.view.height * 4) as usize && bytes[at..at + 4] == painted
             })
@@ -133,7 +133,7 @@ fn film(window: &Window) -> protocol::Film {
 
 /// The thumbnails drawn on the strip, left to right.
 fn thumbnails(window: &Window) -> Vec<egui::Rect> {
-    let mut thumbs: Vec<egui::Rect> = window.pictures.iter().copied().filter(|rect| rect.height() < 50.0 && rect.top() > 600.0).collect();
+    let mut thumbs: Vec<egui::Rect> = window.images.iter().copied().filter(|rect| rect.height() < 50.0 && rect.top() > 600.0).collect();
     thumbs.sort_by(|a, b| a.left().total_cmp(&b.left()));
     thumbs
 }
@@ -147,9 +147,9 @@ fn press(window: &mut Window, at: Pos2, button: egui::PointerButton) {
     }
 }
 
-/// Catches a gallery that only looks like one: with the real Image Editor,
-/// the + adds a picture that the strip and the canvas show; painting it
-/// leaves the first picture empty; its thumbnail brings the first back;
+/// Catches a gallery that only looks like one: with the real Image Generator,
+/// the + adds an image that the strip and the canvas show; painting it
+/// leaves the first image empty; its thumbnail brings the first back;
 /// Rename from its menu renames it in place; and the gallery returns after a
 /// restart.
 #[test]
@@ -159,7 +159,7 @@ fn a_gallery_adds_shows_renames_and_comes_back() {
     let mut window = editor(&dir, &stand_in);
     let first = film(&window);
     assert_eq!(first.items.len(), 1);
-    let add = first.add[0].action.clone().expect("the + has a New picture row");
+    let add = first.add[0].action.clone().expect("the + has a New image row");
     window.app.run_action(&add);
     window.until(|app| app.apps[0].running.declared.rasters.values().next().and_then(|display| display.view.film.as_ref()).is_some_and(|film| film.items.len() == 2 && film.shown == 1));
     for _ in 0..3 {
@@ -182,19 +182,19 @@ fn a_gallery_adds_shows_renames_and_comes_back() {
     window.events.push(egui::Event::PointerButton { pos: screens[2], button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     window.step();
     until_painted(&mut window, before, 960, 540);
-    assert!(pixel(&window, 960, 540)[3] > 128, "the new picture was not painted");
+    assert!(pixel(&window, 960, 540)[3] > 128, "the new image was not painted");
 
-    // Its thumbnail brings the first picture back, still empty.
+    // Its thumbnail brings the first image back, still empty.
     for _ in 0..3 {
         window.step();
     }
     let thumbs = thumbnails(&window);
-    assert_eq!(thumbs.len(), 2, "the strip does not show both pictures");
+    assert_eq!(thumbs.len(), 2, "the strip does not show both images");
     press(&mut window, thumbs[0].center(), egui::PointerButton::Primary);
     window.until(|app| app.apps[0].running.declared.rasters.values().next().and_then(|display| display.view.film.as_ref()).is_some_and(|film| film.shown == 0));
     window.until(|app| {
         app.apps[0].running.declared.rasters.values().next().is_some_and(|display| {
-            std::fs::read(&display.view.picture).is_ok_and(|bytes| {
+            std::fs::read(&display.view.image).is_ok_and(|bytes| {
                 let at = ((540 * display.view.width + 960) * 4) as usize;
                 bytes.len() == (display.view.width * display.view.height * 4) as usize && bytes[at + 3] == 0
             })
@@ -249,10 +249,10 @@ fn key(window: &mut Window, key: egui::Key, modifiers: egui::Modifiers) {
     window.step();
 }
 
-/// Whether any pixel of the picture inside `rect` is dark.
+/// Whether any pixel of the image inside `rect` is dark.
 fn dark_inside(window: &Window, rect: [f64; 4]) -> bool {
     let view = &display(window).expect("no raster tab").view;
-    let bytes = std::fs::read(&view.picture).expect("the picture file is missing");
+    let bytes = std::fs::read(&view.image).expect("the image file is missing");
     let (width, height) = (view.width as usize, view.height as usize);
     let x0 = (rect[0].max(0.0) as usize).min(width);
     let y0 = (rect[1].max(0.0) as usize).min(height);
@@ -264,19 +264,19 @@ fn dark_inside(window: &Window, rect: [f64; 4]) -> bool {
 fn choose_tool(window: &mut Window, tool: &str, is: fn(&RasterTool) -> bool) {
     window.app.run_action(&Action::with_arg("tool", json!({ "tool": tool })));
     window.until(move |app| app.apps[0].running.declared.rasters.values().next().is_some_and(|display| is(&display.view.tool)));
-    // The tool's settings row may move the picture: it settles first.
+    // The tool's settings row may move the image: it settles first.
     for _ in 0..5 {
         window.step();
     }
 }
 
-/// Catches typing that never reaches the picture, or that Undo cannot take
-/// back: with the real Image Editor, the T tool's click on the picture
+/// Catches typing that never reaches the image, or that Undo cannot take
+/// back: with the real Image Generator, the T tool's click on the image
 /// starts a text, typed letters through the window's keyboard become dark
 /// pixels in its box, and Ctrl+Z takes back the typing, leaving the box
 /// empty and the text gone.
 #[test]
-fn a_text_is_typed_on_the_picture_and_undone() {
+fn a_text_is_typed_on_the_image_and_undone() {
     let dir = scratch("editor-text");
     let stand_in = StandIn::start(Vec::new());
     let mut window = editor(&dir, &stand_in);
@@ -297,7 +297,7 @@ fn a_text_is_typed_on_the_picture_and_undone() {
         window.step();
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert!(dark_inside(&window, rect), "the typed words are not on the picture");
+    assert!(dark_inside(&window, rect), "the typed words are not on the image");
 
     key(&mut window, egui::Key::Z, egui::Modifiers::COMMAND);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

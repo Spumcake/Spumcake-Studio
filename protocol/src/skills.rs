@@ -47,7 +47,7 @@ pub struct ToolResult {
     pub ok: bool,
     /// What was found, or what was made and its ids, for the model to read.
     pub output: Value,
-    /// Pictures for the model to look at, each PNG data in standard base64.
+    /// Images for the model to look at, each PNG data in standard base64.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
 }

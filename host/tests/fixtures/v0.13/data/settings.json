@@ -1,0 +1,72 @@
+{
+  "project": "demo",
+  "endpoints": [
+    {
+      "id": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "name": "OpenRouter",
+      "kind": "openrouter",
+      "address": "http://127.0.0.1:18090"
+    }
+  ],
+  "skills": [
+    {
+      "id": "discussion",
+      "name": "Discussion",
+      "description": "How the assistant talks with you",
+      "endpoint": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "prompt": "Speak plainly and briefly, one idea per sentence.\nSay what you did, or what you found, then what the person can do next."
+    },
+    {
+      "id": "3dd84f11-92fa-4000-80da-d61848246abc",
+      "name": "Image generation",
+      "description": "Makes a picture from a description",
+      "endpoint": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "model": "openai/gpt-image-2.5-sunburst",
+      "prompt": "",
+      "makes": "images"
+    }
+  ],
+  "levels": [
+    {
+      "id": "a552cb5b-3464-4023-a5ea-46d3ecfce46f",
+      "name": "Haiku Low",
+      "endpoint": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "model": "anthropic/claude-haiku-5.5",
+      "effort": "low"
+    },
+    {
+      "id": "59d0a481-b4e9-4008-a5d5-36a6bb5d945d",
+      "name": "Haiku Medium",
+      "endpoint": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "model": "anthropic/claude-haiku-5.5",
+      "effort": "medium"
+    },
+    {
+      "id": "495f759c-1d2a-45f5-a762-f4d7220e412d",
+      "name": "Haiku High",
+      "endpoint": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "model": "anthropic/claude-haiku-5.5",
+      "effort": "high"
+    },
+    {
+      "id": "95980cd1-cbd9-49cb-bdcf-33d53a4e32d9",
+      "name": "Sonnet Medium",
+      "endpoint": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "model": "anthropic/claude-sonnet-5.5",
+      "effort": "medium"
+    },
+    {
+      "id": "92c2ce8c-a090-4cd6-b5b5-216578dbb49d",
+      "name": "Sonnet High",
+      "endpoint": "77848ae0-671b-477c-943a-c380b7c1f5a3",
+      "model": "anthropic/claude-sonnet-5.5",
+      "effort": "high"
+    }
+  ],
+  "default_level": "59d0a481-b4e9-4008-a5d5-36a6bb5d945d",
+  "image_skill_added": true,
+  "model": {
+    "id": "anthropic/claude-haiku-5.5",
+    "name": "Anthropic: Claude Haiku 5.5"
+  }
+}

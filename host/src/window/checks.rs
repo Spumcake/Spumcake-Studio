@@ -108,7 +108,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// A scripted OpenRouter: every chat request is recorded, and answered with
 /// the next scripted reply.
-/// The picture the stand-in makes: a 6 by 4 PNG.
+/// The image the stand-in makes: a 6 by 4 PNG.
 const STAND_IN_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAYAAAAECAIAAAAiZtkUAAAAHklEQVR4nGMU0ThxKSCBAQkwPqvQYEAFTAwYAIsQAAvOBBOk9STxAAAAAElFTkSuQmCC";
 
 struct StandIn {
@@ -118,9 +118,9 @@ struct StandIn {
     keys: Arc<Mutex<Vec<Option<String>>>>,
     /// What a model list is answered with.
     models: Arc<Mutex<Value>>,
-    /// Each picture asked for, by its request's body. Each is answered with
+    /// Each image asked for, by its request's body. Each is answered with
     /// `STAND_IN_PNG`.
-    pictures: Arc<Mutex<Vec<Value>>>,
+    images: Arc<Mutex<Vec<Value>>>,
     replies: Arc<Mutex<std::collections::VecDeque<Value>>>,
     /// While held, a streamed text reply sends its first part, flushes, and
     /// waits for `release` before it sends the rest, as a slow model does.
@@ -142,8 +142,8 @@ impl StandIn {
         let seen_keys = keys.clone();
         let models = Arc::new(Mutex::new(json!({"data": []})));
         let listed = models.clone();
-        let pictures = Arc::new(Mutex::new(Vec::new()));
-        let pictured = pictures.clone();
+        let images = Arc::new(Mutex::new(Vec::new()));
+        let asked_images = images.clone();
         let replies = Arc::new(Mutex::new(replies.into_iter().collect::<std::collections::VecDeque<_>>()));
         let script = replies.clone();
         let gate = Arc::new((Mutex::new(Gate::default()), std::sync::Condvar::new()));
@@ -173,12 +173,12 @@ impl StandIn {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
-                // OpenRouter's image API: the picture as base64, and its
+                // OpenRouter's image API: the image as base64, and its
                 // catalogue of image models.
                 let path = request_line.split_whitespace().nth(1).unwrap_or_default().to_string();
                 if path.ends_with("/images") || path.ends_with("/images/models") {
                     let reply = if path.ends_with("/images") {
-                        pictured.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap());
+                        asked_images.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap());
                         json!({"data": [{"b64_json": STAND_IN_PNG}]})
                     } else {
                         json!({"data": [{"id": crate::workspace::IMAGE_MODEL, "name": "OpenAI: GPT Image 2.5"}]})
@@ -234,7 +234,7 @@ impl StandIn {
             requests,
             keys,
             models,
-            pictures,
+            images,
             replies,
             gate,
         }
@@ -245,9 +245,9 @@ impl StandIn {
         self.keys.lock().unwrap().clone()
     }
 
-    /// Every picture asked for, by its request's body.
-    fn pictures(&self) -> Vec<Value> {
-        self.pictures.lock().unwrap().clone()
+    /// Every image asked for, by its request's body.
+    fn images(&self) -> Vec<Value> {
+        self.images.lock().unwrap().clone()
     }
 
     /// A model list asked for is answered with `list`.
@@ -326,8 +326,8 @@ struct Window {
     events: Vec<egui::Event>,
     /// The texts the last frame painted, with where each was drawn.
     texts: Vec<(String, Rect)>,
-    /// Where the last frame painted pictures, larger than the logo.
-    pictures: Vec<Rect>,
+    /// Where the last frame painted images, larger than the logo.
+    images: Vec<Rect>,
     /// Everything the last frame painted.
     shapes: Vec<egui::epaint::ClippedShape>,
     /// Every texture upload since the check last emptied this: the texture,
@@ -353,7 +353,7 @@ impl Window {
             frame: eframe::Frame::_new_kittest(),
             close_next: false,
         texts: Vec::new(),
-        pictures: Vec::new(),
+        images: Vec::new(),
         shapes: Vec::new(),
         uploads: Vec::new(),
             events: Vec::new(),
@@ -400,7 +400,7 @@ impl Window {
                 _ => None,
             })
             .collect();
-        self.pictures = output
+        self.images = output
             .shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
@@ -536,7 +536,7 @@ fn declared(app: &HostWindow) -> Vec<String> {
             })
         })
         .collect();
-    for tool in ["run_text_prompt", crate::route::EDIT_PICTURE] {
+    for tool in ["run_text_prompt", crate::route::EDIT_IMAGE] {
         names.push(protocol::tool_key(crate::route::HOST_ID, "prompt", tool));
     }
     names.sort();
@@ -580,51 +580,51 @@ fn an_unknown_skill_is_offered_routed_and_answered() {
 }
 
 /// Catches a host that offers tools by an application's id: a stand-in
-/// registered as `simple-sketch` is offered with its own skill only.
+/// registered as `storyboard-generator` is offered with its own skill only.
 #[test]
 fn a_stand_in_under_a_known_id_offers_only_its_own_skill() {
     let dir = scratch("known-id");
     let quill = quill_program(&dir);
     let stand_in = StandIn::start(vec![text_reply("Nothing to do.")]);
-    let mut window = Window::new(vec![start("simple-sketch", "Simple Sketch", &quill)], &stand_in);
+    let mut window = Window::new(vec![start("storyboard-generator", "Storyboard Generator", &quill)], &stand_in);
     window.ask("What can you do?");
     let requests = stand_in.requests();
     assert_eq!(
         offered(&requests[0]),
         vec![
-            "inpainter__prompt__edit_picture".to_string(),
+            "inpainter__prompt__edit_image".to_string(),
             "inpainter__prompt__run_text_prompt".to_string(),
-            "simple-sketch__quill__stamp_glyph".to_string(),
+            "storyboard-generator__quill__stamp_glyph".to_string(),
         ]
     );
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The marks the host draws for a tab: what Simple Sketch last sent it.
+/// The marks the host draws for a tab: what Storyboard Generator last sent it.
 fn marks(app: &HostWindow, tab: &str) -> usize {
-    app.apps[0].running.declared.documents[tab].sketch.scene(None).len()
+    app.apps[0].running.declared.documents[tab].drawing.scene(None).len()
 }
 
 /// Catches an assistant that works on its own copy, or a host that keeps a
-/// history: the assistant's two shapes arrive as Simple Sketch's documents,
+/// history: the assistant's two shapes arrive as Storyboard Generator's documents,
 /// and one undo, sent as the person's own, takes the whole request back.
 #[test]
-fn the_assistants_work_is_simple_sketchs_and_one_undo_takes_it_back() {
+fn the_assistants_work_is_storyboard_generators_and_one_undo_takes_it_back() {
     let stand_in = StandIn::start(Vec::new());
     let mut window = Window::new(
-        vec![start("simple-sketch", "Simple Sketch", &built("simple-sketch"))],
+        vec![start("storyboard-generator", "Storyboard Generator", &built("storyboard-generator"))],
         &stand_in,
     );
-    let tab = window.app.apps[0].running.tabs().1.expect("a sketch is open");
+    let tab = window.app.apps[0].running.tabs().1.expect("a storyboard is open");
     window.until(|app| app.apps[0].running.declared.documents.contains_key(&tab));
     let before = marks(&window.app, &tab);
     stand_in.script(vec![
         call_reply(
-            "simple-sketch__draw__add_shape",
+            "storyboard-generator__draw__add_shape",
             json!({"tab": tab, "kind": "ellipse", "from": [0, 0], "to": [100, 100]}),
         ),
         call_reply(
-            "simple-sketch__draw__add_shape",
+            "storyboard-generator__draw__add_shape",
             json!({"tab": tab, "kind": "rectangle", "from": [140, 0], "to": [240, 100]}),
         ),
         text_reply("Done."),
@@ -720,10 +720,17 @@ fn use_stand_in(app: &mut HostWindow, url: &str) -> String {
 /// A window on a fresh data folder: every given sub-application is started
 /// inside the project the folder holds, which is a new one when it is empty.
 fn project_window(specs: Vec<super::AppSpec>, stand_in: &StandIn, data: &Path) -> Window {
+    project_window_with(specs, stand_in, data, None)
+}
+
+/// As [`project_window`], with the sub-applications installed in `programs`
+/// found as the host finds those beside its own program.
+fn project_window_with(specs: Vec<super::AppSpec>, stand_in: &StandIn, data: &Path, programs: Option<PathBuf>) -> Window {
     let _ = std::fs::create_dir_all(data);
     let ctx = egui::Context::default();
     let mut app = HostWindow::with_apps(&ctx, Vec::new(), Tablet::none());
     app.launch = specs;
+    app.programs = programs;
     let wake_ctx = ctx.clone();
     app.assistant = Assistant::spawn(Config {
         base_url: stand_in.url.clone(),
@@ -740,7 +747,7 @@ fn project_window(specs: Vec<super::AppSpec>, stand_in: &StandIn, data: &Path) -
         frame: eframe::Frame::_new_kittest(),
         close_next: false,
         texts: Vec::new(),
-        pictures: Vec::new(),
+        images: Vec::new(),
         shapes: Vec::new(),
         uploads: Vec::new(),
         events: Vec::new(),
@@ -795,16 +802,16 @@ fn spec(id: &str, name: &str, program: &Path) -> super::AppSpec {
 
 fn both() -> Vec<super::AppSpec> {
     vec![
-        spec("simple-sketch", "Simple Sketch", &built("simple-sketch")),
+        spec("storyboard-generator", "Storyboard Generator", &built("storyboard-generator")),
         spec("template", "Template", &built("template")),
     ]
 }
 
-/// Changes a saved sketch with no window: a separate Simple Sketch opens
+/// Changes a saved storyboard with no window: a separate Storyboard Generator opens
 /// it, adds a line, and saves it.
-fn change_on_its_own(sketch: &Path) {
+fn change_on_its_own(storyboard: &Path) {
     use std::process::{Command as Program, Stdio};
-    let mut child = Program::new(built("simple-sketch"))
+    let mut child = Program::new(built("storyboard-generator"))
         .arg(protocol::RESTORE_FLAG)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -825,11 +832,11 @@ fn change_on_its_own(sketch: &Path) {
                 return message;
             }
         }
-        panic!("Simple Sketch stopped before answering");
+        panic!("Storyboard Generator stopped before answering");
     };
     wait(&|message| matches!(message, protocol::AppMessage::End));
     say(protocol::HostMessage::Open {
-        path: Some(sketch.display().to_string()),
+        path: Some(storyboard.display().to_string()),
     });
     let protocol::AppMessage::Tabs(tabs) =
         wait(&|message| matches!(message, protocol::AppMessage::Tabs(tabs) if !tabs.tabs.is_empty()))
@@ -840,7 +847,7 @@ fn change_on_its_own(sketch: &Path) {
     say(protocol::HostMessage::Invoke {
         call: String::from("c1"),
         tab: tab.clone(),
-        tool: String::from("simple-sketch__draw__add_shape"),
+        tool: String::from("storyboard-generator__draw__add_shape"),
         input: json!({"kind": "line", "from": [0, 200], "to": [240, 200]}),
         group: String::from("g1"),
     });
@@ -936,14 +943,14 @@ fn a_new_data_folder_opens_on_an_untitled_project() {
     assert!(!project.workspace_open);
     assert!(window.app.chat.input_centered, "the empty conversation's input is not centred");
     assert!(window.app.chat.conversation.iter().all(|entry| entry.role != Role::Person));
-    let sketch = window
+    let storyboard = window
         .app
         .apps
         .iter()
-        .find(|started| started.id == "simple-sketch")
-        .expect("Simple Sketch is running");
-    assert!(sketch.running.tabs().1.is_some(), "Simple Sketch has no tab");
-    assert!(!sketch.running.declared.skills.is_empty());
+        .find(|started| started.id == "storyboard-generator")
+        .expect("Storyboard Generator is running");
+    assert!(storyboard.running.tabs().1.is_some(), "Storyboard Generator has no tab");
+    assert!(!storyboard.running.declared.skills.is_empty());
     assert!(
         window.app.bar_rect.center().x > 1200.0,
         "the bar is not at the right edge: {:?}",
@@ -985,7 +992,7 @@ fn the_bar_shows_and_hides_the_workspace() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Catches a bar that a tool underneath also takes: with Simple Sketch's
+/// Catches a bar that a tool underneath also takes: with Storyboard Generator's
 /// brush, a real press on the bar over the canvas, moving a little as a pen
 /// does, closes the workspace and draws nothing.
 #[test]
@@ -993,7 +1000,7 @@ fn clicking_the_bar_over_the_canvas_draws_nothing() {
     let dir = scratch("bar-click");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(both(), &stand_in, &dir);
-    window.select("simple-sketch");
+    window.select("storyboard-generator");
     window.app.toggle_workspace();
     keep_ticking(&mut window);
     let tab = window.app.apps[0].running.tabs().1.clone().unwrap();
@@ -1031,14 +1038,14 @@ fn clicking_the_bar_over_the_canvas_draws_nothing() {
 }
 
 /// Catches a press that closes the session menu and also reaches the
-/// drawing beneath: with the menu open over Simple Sketch's brush, a press
+/// drawing beneath: with the menu open over Storyboard Generator's brush, a press
 /// on the canvas outside the menu closes it and draws nothing.
 #[test]
 fn a_press_that_closes_the_session_menu_draws_nothing() {
     let dir = scratch("menu-away");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(both(), &stand_in, &dir);
-    window.select("simple-sketch");
+    window.select("storyboard-generator");
     window.app.toggle_workspace();
     keep_ticking(&mut window);
     let tab = window.app.apps[0].running.tabs().1.clone().unwrap();
@@ -1101,13 +1108,13 @@ fn the_reopened_session_menu_is_above_its_overlay() {
 }
 
 /// Reach with the workspace hidden matches reach with it shown, including a
-/// picture of the visible area and a new canvas, which need that size.
+/// image of the visible area and a new canvas, which need that size.
 #[test]
 fn reach_is_the_same_with_the_workspace_hidden() {
     let hidden = reach(false);
     let shown = reach(true);
-    assert_eq!(hidden.picture_ok, shown.picture_ok);
-    assert!(hidden.picture_ok, "the picture was refused: {}", hidden.picture);
+    assert_eq!(hidden.image_ok, shown.image_ok);
+    assert!(hidden.image_ok, "the image was refused: {}", hidden.image);
     assert_eq!(hidden.canvas_ok, shown.canvas_ok);
     assert!(hidden.canvas_ok, "the new canvas was refused: {}", hidden.canvas);
     assert!(
@@ -1120,8 +1127,8 @@ fn reach_is_the_same_with_the_workspace_hidden() {
 }
 
 struct Reach {
-    picture_ok: bool,
-    picture: String,
+    image_ok: bool,
+    image: String,
     canvas_ok: bool,
     canvas: String,
     viewport: [f64; 2],
@@ -1131,7 +1138,7 @@ fn reach(show: bool) -> Reach {
     let dir = scratch(if show { "reach-shown" } else { "reach-hidden" });
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(
-        vec![spec("simple-sketch", "Simple Sketch", &built("simple-sketch"))],
+        vec![spec("storyboard-generator", "Storyboard Generator", &built("storyboard-generator"))],
         &stand_in,
         &dir,
     );
@@ -1147,21 +1154,21 @@ fn reach(show: bool) -> Reach {
     let viewport = window.app.viewport;
     stand_in.script(vec![
         call_reply(
-            "simple-sketch__look__look_at",
+            "storyboard-generator__look__look_at",
             json!({"tab": tab, "visible_area": true, "size": 128}),
         ),
-        call_reply("simple-sketch__edit__new_canvas", json!({"tab": tab})),
+        call_reply("storyboard-generator__edit__new_canvas", json!({"tab": tab})),
         text_reply("Done."),
     ]);
-    window.ask("Picture what I see, then add a canvas.");
+    window.ask("Look at what I see, then add a canvas.");
     let requests = stand_in.requests();
     assert!(requests.len() >= 3, "the model was not asked enough: {requests:#?}");
-    let picture = requests[1].to_string();
+    let image = requests[1].to_string();
     let canvas = requests[2].to_string();
     let _ = std::fs::remove_dir_all(dir);
     Reach {
-        picture_ok: picture.contains("\\\"ok\\\":true"),
-        picture,
+        image_ok: image.contains("\\\"ok\\\":true"),
+        image,
         canvas_ok: canvas.contains("\\\"ok\\\":true"),
         canvas,
         viewport,
@@ -1169,7 +1176,7 @@ fn reach(show: bool) -> Reach {
 }
 
 /// The intent guide's project test: two sessions of one project, each with a
-/// Simple Sketch tab and the template's, switched back and forth and after a
+/// Storyboard Generator tab and the template's, switched back and forth and after a
 /// restart, each bring back their own conversation, tabs, order, and
 /// selection, with nothing asked and nothing saved by hand. Every activity
 /// is a file in the project's folder, and the session holds only its path
@@ -1182,8 +1189,8 @@ fn each_session_keeps_its_own_conversation_and_tabs() {
     let mut window = project_window(both(), &stand_in, &dir);
     let (project, folder, first) = window.here();
     window.ask("Remember the first.");
-    let sketch = save_tab(&mut window, 0);
-    assert!(sketch.starts_with(&folder), "the sketch was written outside the project: {}", sketch.display());
+    let storyboard = save_tab(&mut window, 0);
+    assert!(storyboard.starts_with(&folder), "the storyboard was written outside the project: {}", storyboard.display());
     window.select("template");
     keep_ticking(&mut window);
     let first_tabs = open_tabs(&window.app);
@@ -1212,7 +1219,7 @@ fn each_session_keeps_its_own_conversation_and_tabs() {
 
     let text = std::fs::read_to_string(crate::workspace::session_path(&folder, &first)).unwrap();
     let file = crate::workspace::SessionFile::parse(&text).unwrap();
-    let relative = sketch.strip_prefix(&folder).unwrap().display().to_string();
+    let relative = storyboard.strip_prefix(&folder).unwrap().display().to_string();
     assert!(file.tabs.iter().any(|tab| tab.path.as_deref() == Some(relative.as_str())), "{text}");
     assert!(!text.contains(&folder.display().to_string()), "the session holds an absolute path:\n{text}");
     drop(window);
@@ -1353,7 +1360,7 @@ fn deleted_sessions_and_projects_come_back_from_trash() {
     let mut window = project_window(both(), &stand_in, &dir);
     let (project, folder, first) = window.here();
     window.ask("Keep this.");
-    let sketch = save_tab(&mut window, 0);
+    let storyboard = save_tab(&mut window, 0);
     window.menu(SessionChoice::DeleteSession { project: project.clone(), session: first.clone() });
     window.until(|app| app.project.as_ref().is_some_and(|open| open.session != first));
     let other = window.here().2;
@@ -1384,7 +1391,7 @@ fn deleted_sessions_and_projects_come_back_from_trash() {
     window.menu(SessionChoice::EmptyTrash);
     window.app.answer_question("empty");
     assert!(!crate::workspace::session_path(&folder, &other).exists());
-    assert!(sketch.is_file(), "emptying a session's Trash removed its project's work");
+    assert!(storyboard.is_file(), "emptying a session's Trash removed its project's work");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1456,7 +1463,7 @@ fn an_attachment_is_copied_into_the_project() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Catches a change that only Save keeps: a sketch changed by hand and
+/// Catches a change that only Save keeps: a storyboard changed by hand and
 /// left at once, before it was written, is written by the switch, and the
 /// session it was left in holds its file.
 #[test]
@@ -1477,13 +1484,13 @@ fn a_change_left_at_once_is_written_by_the_switch() {
     window.settle_on(&second);
     let file = crate::workspace::SessionFile::read(&folder, &first).unwrap();
     let written: Vec<String> = file.tabs.iter().filter_map(|tab| tab.path.clone()).collect();
-    assert_eq!(written, vec!["Untitled 1.smx".to_string()], "the change left at once is not in its session");
-    assert!(folder.join("Untitled 1.smx").is_file());
+    assert_eq!(written, vec!["Untitled Storyboard.smx".to_string()], "the change left at once is not in its session");
+    assert!(folder.join("Untitled Storyboard.smx").is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Catches a switch that loses work it could not write: with the project's
-/// folder read-only, a changed sketch stops the switch, says so, and stays
+/// folder read-only, a changed storyboard stops the switch, says so, and stays
 /// open with its change.
 #[test]
 fn a_change_that_cannot_be_written_stops_the_switch() {
@@ -1515,7 +1522,7 @@ fn a_change_that_cannot_be_written_stops_the_switch() {
 
 /// Catches projects from before 0.7 left behind: at start, an old project
 /// in the data folder moves into a folder of its own, its conversation
-/// becomes its first session, and its sketch saved elsewhere is copied in
+/// becomes its first session, and its storyboard saved elsewhere is copied in
 /// and reopens from the copy.
 #[test]
 fn an_old_project_moves_into_a_folder_with_nothing_lost() {
@@ -1524,8 +1531,8 @@ fn an_old_project_moves_into_a_folder_with_nothing_lost() {
     std::fs::create_dir_all(&elsewhere).unwrap();
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(both(), &stand_in, &dir);
-    let sketch = save_tab(&mut window, 0);
-    std::fs::rename(&sketch, elsewhere.join("Harbor.smx")).unwrap();
+    let storyboard = save_tab(&mut window, 0);
+    std::fs::rename(&storyboard, elsewhere.join("Harbor.smx")).unwrap();
     drop(window);
     let _ = std::fs::remove_file(dir.join("projects.json"));
     let _ = std::fs::remove_dir_all(dir.join("Inpainter"));
@@ -1534,7 +1541,7 @@ fn an_old_project_moves_into_a_folder_with_nothing_lost() {
     let file = serde_json::json!({
         "version": 1,
         "name": "Harbor",
-        "tabs": [{"app": "simple-sketch", "path": elsewhere.join("Harbor.smx").display().to_string(), "label": "Harbor"}],
+        "tabs": [{"app": "storyboard-generator", "path": elsewhere.join("Harbor.smx").display().to_string(), "label": "Harbor"}],
         "selected": 0,
         "workspace_open": true,
         "conversation": [{"role": "person", "text": "The harbor at night.", "time": 1}]
@@ -1548,10 +1555,96 @@ fn an_old_project_moves_into_a_folder_with_nothing_lost() {
     assert_eq!(window.app.project.as_ref().unwrap().name, "Harbor");
     assert!(window.app.chat.conversation.iter().any(|entry| entry.text == "The harbor at night."));
     let copy = folder.join("Harbor.smx");
-    assert!(copy.is_file(), "the sketch was not copied in");
+    assert!(copy.is_file(), "the storyboard was not copied in");
     assert!(elsewhere.join("Harbor.smx").is_file(), "the original moved");
     assert!(window.app.apps[0].running.tabs().0.iter().any(|entry| entry.path.as_deref() == Some(copy.to_str().unwrap())));
     assert!(dir.join("projects-before-0.7").join("old-one").join("project.json").is_file(), "no backup was kept");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Copies `from` into `to`, folders and all.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Catches a rename that strands what people made: a project, data folder,
+/// and image file that 0.13's own programs wrote, with a tab of every
+/// workspace under its former id, a Template tab, and an earlier tool call,
+/// open in the renamed workspaces; the data folder and the tool's name
+/// become the new ids'; the session is written back with them; it opens
+/// again the same; and the image file still says which recipe it came from.
+#[test]
+fn what_0_13_kept_opens_in_the_renamed_workspaces() {
+    let dir = scratch("from-0-13");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v0.13");
+    copy_tree(&fixture.join("data"), &dir);
+    let folder = dir.join("projects").join("Lighthouse");
+    copy_tree(&fixture.join("project"), &folder);
+    let mut list: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("projects.json")).unwrap()).unwrap();
+    list["projects"][0]["folder"] = Value::from(folder.display().to_string());
+    std::fs::write(dir.join("projects.json"), list.to_string()).unwrap();
+    let programs = built("template").parent().unwrap().to_path_buf();
+    let specs = || {
+        vec![
+            spec("image-generator", "Image Generator", &built("image-generator")),
+            spec("recipe-creation", "Recipe Creation", &built("recipe-creation")),
+            spec("storyboard-generator", "Storyboard Generator", &built("storyboard-generator")),
+        ]
+    };
+    let opened = |window: &Window| {
+        let mut tabs: Vec<(String, Option<String>)> = open_tabs(&window.app)
+            .into_iter()
+            .map(|(app, path, _, _)| (app, path.map(|path| Path::new(&path).file_name().unwrap().to_string_lossy().into_owned())))
+            .collect();
+        tabs.sort();
+        tabs
+    };
+
+    let stand_in = StandIn::start(Vec::new());
+    let mut window = project_window_with(specs(), &stand_in, &dir, Some(programs.clone()));
+    let first = opened(&window);
+    for (app, file) in [("storyboard-generator", Some("Untitled 1.smx")), ("recipe-creation", Some("pitch.smx")), ("template", None)] {
+        assert!(
+            first.iter().any(|(id, path)| id == app && path.as_deref() == file),
+            "{app}'s tab of {file:?} did not open: {first:?}"
+        );
+    }
+    assert!(first.iter().any(|(id, _)| id == "image-generator"), "the image tab did not open: {first:?}");
+    assert!(dir.join("apps/storyboard-generator/preferences.json").is_file(), "the data folder did not move");
+    assert!(!dir.join("apps/simple-sketch").exists(), "the former data folder is still there"); // stored spelling
+    let tools: Vec<String> = window.app.chat.conversation.iter().filter_map(|entry| entry.tool.clone()).collect();
+    assert_eq!(tools, ["storyboard-generator__draw__add_shape"], "the earlier tool call kept its former name");
+    // Choosing another tab is a change, so the session is written again.
+    window.select("recipe-creation");
+    keep_ticking(&mut window);
+    drop(window);
+
+    let sessions = folder.join(".inpainter").join("sessions");
+    for entry in std::fs::read_dir(&sessions).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        for former in ["simple-sketch", "image-editor", "mission-control"] { // stored spelling
+            assert!(!text.contains(&format!("\"app\":\"{former}\"")), "the session still keeps {former}: {text}");
+        }
+    }
+    let stand_in = StandIn::start(Vec::new());
+    let window = project_window_with(specs(), &stand_in, &dir, Some(programs));
+    assert_eq!(opened(&window), first, "the session did not open the same again");
+    drop(window);
+
+    let ipx = std::fs::read(folder.join("Lamp from pitch.ipx")).unwrap();
+    let header = ipx[5..].split(|byte| *byte == b'\n').next().unwrap();
+    let header: Value = serde_json::from_slice(header).unwrap();
+    let source: protocol::OpenedFrom = serde_json::from_value(header["source"].clone()).unwrap();
+    assert_eq!((source.image.as_str(), source.recipe.as_deref()), ("images/lamp.png", Some("pitch.smx")));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1603,20 +1696,20 @@ fn a_change_is_kept_without_closing() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A sketch changed by Simple Sketch with no host shows when the session
-/// reopens, and the session holds the sketch's path, never its content.
+/// A storyboard changed by Storyboard Generator with no host shows when the session
+/// reopens, and the session holds the storyboard's path, never its content.
 #[test]
 fn a_change_made_with_no_host_shows_when_the_session_reopens() {
     let dir = scratch("reopen");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(both(), &stand_in, &dir);
     let (_, folder, session) = window.here();
-    let sketch = save_tab(&mut window, 0);
+    let storyboard = save_tab(&mut window, 0);
     drop(window);
     let text = std::fs::read_to_string(crate::workspace::session_path(&folder, &session)).unwrap();
-    assert!(!text.contains("\"nodes\"") && !text.contains("\"strokes\""), "the session holds the sketch:\n{text}");
+    assert!(!text.contains("\"nodes\"") && !text.contains("\"strokes\""), "the session holds the storyboard:\n{text}");
 
-    change_on_its_own(&sketch);
+    change_on_its_own(&storyboard);
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(both(), &stand_in, &dir);
     let reopened = window.app.apps[0].running.tabs().1.clone().unwrap();

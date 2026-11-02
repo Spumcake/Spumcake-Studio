@@ -1,0 +1,346 @@
+{
+  "camera": {
+    "origin": [
+      -540.0,
+      -357.0
+    ],
+    "zoom": 1.0
+  },
+  "format_version": 1,
+  "id": 2,
+  "name": "Untitled 1",
+  "nodes": [
+    {
+      "colors": [
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 36,
+            "name": "Black",
+            "opacity": 1.0,
+            "rgb": [
+              20,
+              20,
+              20
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 1,
+          "strokes": [
+            {
+              "dynamics": {
+                "curve": [
+                  {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  {
+                    "x": 1.0,
+                    "y": 1.0
+                  }
+                ],
+                "pressure_size": true,
+                "smoothing": 50,
+                "stabilization": 0,
+                "streamline": 50
+              },
+              "erases": [],
+              "id": 1,
+              "samples": [
+                {
+                  "pressure": null,
+                  "x": -260.0,
+                  "y": -43.0
+                },
+                {
+                  "pressure": null,
+                  "x": -248.0,
+                  "y": -39.0
+                },
+                {
+                  "pressure": null,
+                  "x": -260.0,
+                  "y": -43.0
+                },
+                {
+                  "pressure": null,
+                  "x": -248.0,
+                  "y": -39.0
+                },
+                {
+                  "pressure": null,
+                  "x": -236.0,
+                  "y": -35.0
+                },
+                {
+                  "pressure": null,
+                  "x": -224.0,
+                  "y": -31.0
+                },
+                {
+                  "pressure": null,
+                  "x": -212.0,
+                  "y": -27.0
+                },
+                {
+                  "pressure": null,
+                  "x": -200.0,
+                  "y": -23.0
+                },
+                {
+                  "pressure": null,
+                  "x": -188.0,
+                  "y": -19.0
+                },
+                {
+                  "pressure": null,
+                  "x": -176.0,
+                  "y": -15.0
+                },
+                {
+                  "pressure": null,
+                  "x": -164.0,
+                  "y": -11.0
+                },
+                {
+                  "pressure": null,
+                  "x": -152.0,
+                  "y": -7.0
+                },
+                {
+                  "pressure": null,
+                  "x": -140.0,
+                  "y": -3.0
+                },
+                {
+                  "pressure": null,
+                  "x": -128.0,
+                  "y": 1.0
+                },
+                {
+                  "pressure": null,
+                  "x": -116.0,
+                  "y": 5.0
+                },
+                {
+                  "pressure": null,
+                  "x": -104.0,
+                  "y": 9.0
+                },
+                {
+                  "pressure": null,
+                  "x": -92.0,
+                  "y": 13.0
+                },
+                {
+                  "pressure": null,
+                  "x": -80.0,
+                  "y": 17.0
+                },
+                {
+                  "pressure": null,
+                  "x": -68.0,
+                  "y": 21.0
+                },
+                {
+                  "pressure": null,
+                  "x": -56.0,
+                  "y": 25.0
+                },
+                {
+                  "pressure": null,
+                  "x": -44.0,
+                  "y": 29.0
+                },
+                {
+                  "pressure": null,
+                  "x": -32.0,
+                  "y": 33.0
+                }
+              ],
+              "size": null
+            }
+          ]
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 37,
+            "name": "Red",
+            "opacity": 1.0,
+            "rgb": [
+              214,
+              48,
+              49
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 2,
+          "strokes": []
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 38,
+            "name": "Orange",
+            "opacity": 1.0,
+            "rgb": [
+              238,
+              122,
+              40
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 3,
+          "strokes": []
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 39,
+            "name": "Yellow",
+            "opacity": 1.0,
+            "rgb": [
+              241,
+              196,
+              15
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 4,
+          "strokes": []
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 40,
+            "name": "Green",
+            "opacity": 1.0,
+            "rgb": [
+              39,
+              174,
+              96
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 5,
+          "strokes": []
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 41,
+            "name": "Blue",
+            "opacity": 1.0,
+            "rgb": [
+              52,
+              120,
+              246
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 6,
+          "strokes": []
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 42,
+            "name": "Purple",
+            "opacity": 1.0,
+            "rgb": [
+              142,
+              68,
+              173
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 7,
+          "strokes": []
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 43,
+            "name": "Pink",
+            "opacity": 1.0,
+            "rgb": [
+              232,
+              67,
+              147
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 8,
+          "strokes": []
+        },
+        {
+          "color": {
+            "cap": "round",
+            "dash": "solid",
+            "id": 44,
+            "name": "Light gray",
+            "opacity": 1.0,
+            "rgb": [
+              189,
+              195,
+              199
+            ],
+            "role": "layer",
+            "size": 3,
+            "visible": true
+          },
+          "locked": false,
+          "source": 9,
+          "strokes": []
+        }
+      ],
+      "id": 2,
+      "kind": "canvas",
+      "locked": false,
+      "name": "Canvas 1",
+      "padding": 16.0,
+      "transform": [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "visible": true
+    }
+  ]
+}

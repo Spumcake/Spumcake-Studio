@@ -19,8 +19,8 @@ mod openrouter;
 mod prompt;
 pub use openrouter::{image_models, make_image, models, status, stream_prompt};
 
-/// A picture's bytes as the standard base64 a tool result carries.
-pub fn picture_base64(bytes: &[u8]) -> String {
+/// An image's bytes as the standard base64 a tool result carries.
+pub fn image_base64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -90,7 +90,7 @@ pub struct TabInfo {
 /// A file attached to a message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attachment {
-    /// A picture: PNG, JPEG, WebP, or GIF bytes and their media type.
+    /// An image: PNG, JPEG, WebP, or GIF bytes and their media type.
     Image {
         path: PathBuf,
         mime: String,
@@ -263,7 +263,7 @@ pub enum Role {
 pub struct Model {
     pub id: String,
     pub name: String,
-    /// The model accepts pictures.
+    /// The model accepts images.
     pub images: bool,
 }
 

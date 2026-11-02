@@ -1,19 +1,19 @@
-//! Starts Simple Sketch with no host and no window, and makes one sketch
+//! Starts Storyboard Generator with no host and no window, and makes one storyboard
 //! entirely through the protocol.
 //!
-//! The process is sent `new_sketch`, a stroke, an erase across part of that
+//! The process is sent `new_storyboard`, a stroke, an erase across part of that
 //! stroke, the canvas's properties page and a change to its padding, undo,
-//! redo, and save, answering Simple Sketch's own file request. Every reply
+//! redo, and save, answering Storyboard Generator's own file request. Every reply
 //! must equal what an in-process `Server` (the same code behind the process)
 //! sends for the same messages, and the two saved files must be identical.
-//! The sketch must not exist before `new_sketch`. Temporary files are removed.
+//! The storyboard must not exist before `new_storyboard`. Temporary files are removed.
 //!
-//! Then it drives every tool of Simple Sketch's skills through `invoke`, the
+//! Then it drives every tool of Storyboard Generator's skills through `invoke`, the
 //! way the assistant does, comparing every reply, the undo of a whole
 //! request, and a saved file with the in-process session (`assist.rs`);
-//! reopens files and keeps an untitled sketch as a workspace does, with
+//! reopens files and keeps an untitled storyboard as a workspace does, with
 //! `--restore`, `open`, `keep`, and `kept` (`assist.rs`); and checks that
-//! every part of Simple Sketch's hand surface that changes a sketch's
+//! every part of Storyboard Generator's hand surface that changes a storyboard's
 //! contents has a tool (`coverage.rs`).
 
 mod assist;
@@ -23,7 +23,7 @@ use draw::document::{ColorId, Dynamics, NodeId, Sample};
 use draw::gesture::{Gesture, GestureKind};
 use protocol::{AppMessage, FileKind, HostMessage};
 use serde_json::Value;
-use simple_sketch::serve::Server;
+use storyboard_generator::serve::Server;
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -63,32 +63,32 @@ fn hand_check(dir: &Path) -> Result<(), String> {
     let first = document_of(&greeting).ok_or("the greeting has no document")?;
     let first_tab = first.0.clone();
 
-    let replies = exchange(&mut link, &mut oracle, command("new_sketch", None, None))?;
-    let (tab, sketch, camera) = document_of(&replies).ok_or("new_sketch sent no document")?;
+    let replies = exchange(&mut link, &mut oracle, command("new_storyboard", None, None))?;
+    let (tab, storyboard, camera) = document_of(&replies).ok_or("new_storyboard sent no document")?;
     if tab == first_tab || !camera {
-        return Err("new_sketch did not open a new sketch with its camera".into());
+        return Err("new_storyboard did not open a new storyboard with its camera".into());
     }
-    if sketch_existed_before(&greeting, &tab) {
-        return Err("the new sketch existed before new_sketch".into());
+    if storyboard_existed_before(&greeting, &tab) {
+        return Err("the new storyboard existed before new_storyboard".into());
     }
-    let (canvas, source) = canvas_and_source(&sketch).ok_or("the new sketch has no canvas")?;
-    let padding_before = canvas_padding(&sketch).ok_or("the canvas has no padding")?;
+    let (canvas, source) = canvas_and_source(&storyboard).ok_or("the new storyboard has no canvas")?;
+    let padding_before = canvas_padding(&storyboard).ok_or("the canvas has no padding")?;
 
     let replies = exchange(
         &mut link,
         &mut oracle,
         gesture(&tab, brush_gesture(canvas, source)),
     )?;
-    let sketch = document_of(&replies)
+    let storyboard = document_of(&replies)
         .ok_or("the stroke sent no document")?
         .1;
-    if stroke_counts(&sketch) != (1, 0) {
+    if stroke_counts(&storyboard) != (1, 0) {
         return Err("the stroke did not land on the canvas".into());
     }
 
     let replies = exchange(&mut link, &mut oracle, gesture(&tab, erase_gesture(canvas)))?;
-    let sketch = document_of(&replies).ok_or("the erase sent no document")?.1;
-    if stroke_counts(&sketch).1 < 1 {
+    let storyboard = document_of(&replies).ok_or("the erase sent no document")?.1;
+    if stroke_counts(&storyboard).1 < 1 {
         return Err("the erase did not cross the stroke".into());
     }
 
@@ -100,21 +100,21 @@ fn hand_check(dir: &Path) -> Result<(), String> {
         preview: false,
     };
     let replies = exchange(&mut link, &mut oracle, padding)?;
-    let sketch = document_of(&replies)
+    let storyboard = document_of(&replies)
         .ok_or("the property sent no document")?
         .1;
-    if canvas_padding(&sketch) != Some(32.0) {
+    if canvas_padding(&storyboard) != Some(32.0) {
         return Err("the canvas padding did not become 32".into());
     }
 
     let replies = exchange(&mut link, &mut oracle, command("undo", Some(&tab), None))?;
-    let sketch = document_of(&replies).ok_or("undo sent no document")?.1;
-    if canvas_padding(&sketch) != Some(padding_before) {
+    let storyboard = document_of(&replies).ok_or("undo sent no document")?.1;
+    if canvas_padding(&storyboard) != Some(padding_before) {
         return Err("undo did not restore the padding".into());
     }
     let replies = exchange(&mut link, &mut oracle, command("redo", Some(&tab), None))?;
-    let sketch = document_of(&replies).ok_or("redo sent no document")?.1;
-    if canvas_padding(&sketch) != Some(32.0) {
+    let storyboard = document_of(&replies).ok_or("redo sent no document")?.1;
+    if canvas_padding(&storyboard) != Some(32.0) {
         return Err("redo did not put the padding back".into());
     }
 
@@ -158,14 +158,14 @@ fn hand_check(dir: &Path) -> Result<(), String> {
         return Err("the reply to the saved file does not match the session".into());
     }
 
-    let written = std::fs::read(&process_file).map_err(|_| "simple-sketch wrote no file")?;
+    let written = std::fs::read(&process_file).map_err(|_| "storyboard-generator wrote no file")?;
     let reference = std::fs::read(&oracle_file).map_err(|_| "the session wrote no file")?;
     if written != reference {
         return Err("the saved file does not match the session's".into());
     }
-    let saved: Value = serde_json::from_slice(&written).map_err(|_| "the file is not a sketch")?;
+    let saved: Value = serde_json::from_slice(&written).map_err(|_| "the file is not a storyboard")?;
     if stroke_counts(&saved).0 != 1 || canvas_padding(&saved) != Some(32.0) {
-        return Err("the saved file does not hold the sketch".into());
+        return Err("the saved file does not hold the storyboard".into());
     }
     link.send(&HostMessage::Shutdown)?;
     link.finish()
@@ -222,15 +222,15 @@ pub(crate) fn document_of(messages: &[AppMessage]) -> Option<(String, Value, boo
     messages.iter().rev().find_map(|message| match message {
         AppMessage::Document {
             tab,
-            sketch,
+            drawing,
             camera,
             ..
-        } => Some((tab.clone(), sketch.clone(), camera.is_some())),
+        } => Some((tab.clone(), drawing.clone(), camera.is_some())),
         _ => None,
     })
 }
 
-fn sketch_existed_before(greeting: &[AppMessage], tab: &str) -> bool {
+fn storyboard_existed_before(greeting: &[AppMessage], tab: &str) -> bool {
     greeting.iter().any(|message| match message {
         AppMessage::Tab { id, .. } => id == tab,
         AppMessage::Document { tab: shown, .. } => shown == tab,
@@ -266,7 +266,7 @@ impl Link {
         // Built beside this program, in the same `target` folder.
         let executable = std::env::current_exe()
             .map_err(|error| error.to_string())?
-            .with_file_name("simple-sketch");
+            .with_file_name("storyboard-generator");
         let mut child = Command::new(&executable)
             .args(args)
             .stdin(Stdio::piped())
@@ -299,7 +299,7 @@ impl Link {
     fn read_message(&mut self) -> Result<AppMessage, String> {
         let mut line = String::new();
         if self.stdout.read_line(&mut line).unwrap_or(0) == 0 {
-            return Err("simple-sketch closed".into());
+            return Err("storyboard-generator closed".into());
         }
         protocol::parse_app_message(line.trim_end())
             .map_err(|error| format!("a reply did not parse: {}", error.line))
@@ -311,7 +311,7 @@ impl Link {
         if status.success() {
             Ok(())
         } else {
-            Err(format!("simple-sketch exited with {status}"))
+            Err(format!("storyboard-generator exited with {status}"))
         }
     }
 }
@@ -372,16 +372,16 @@ fn line(points: &[(f64, f64)]) -> Vec<Sample> {
         .collect()
 }
 
-fn canvas_node(sketch: &Value) -> Option<&Value> {
-    sketch
+fn canvas_node(storyboard: &Value) -> Option<&Value> {
+    storyboard
         .get("nodes")?
         .as_array()?
         .iter()
         .find(|node| node.get("kind").and_then(Value::as_str) == Some("canvas"))
 }
 
-pub(crate) fn canvas_and_source(sketch: &Value) -> Option<(u64, u64)> {
-    let canvas = canvas_node(sketch)?;
+pub(crate) fn canvas_and_source(storyboard: &Value) -> Option<(u64, u64)> {
+    let canvas = canvas_node(storyboard)?;
     let id = canvas.get("id")?.as_u64()?;
     let source = canvas
         .get("colors")?
@@ -391,14 +391,14 @@ pub(crate) fn canvas_and_source(sketch: &Value) -> Option<(u64, u64)> {
     Some((id, source))
 }
 
-fn canvas_padding(sketch: &Value) -> Option<f64> {
-    canvas_node(sketch)?.get("padding")?.as_f64()
+fn canvas_padding(storyboard: &Value) -> Option<f64> {
+    canvas_node(storyboard)?.get("padding")?.as_f64()
 }
 
-pub(crate) fn stroke_counts(sketch: &Value) -> (usize, usize) {
+pub(crate) fn stroke_counts(storyboard: &Value) -> (usize, usize) {
     let mut strokes = 0;
     let mut erases = 0;
-    for node in sketch
+    for node in storyboard
         .get("nodes")
         .and_then(Value::as_array)
         .into_iter()

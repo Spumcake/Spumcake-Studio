@@ -2,5 +2,6 @@
   "id": "template",
   "name": "Template",
   "executable": "template",
-  "protocol": 1
+  "protocol": 1,
+  "hidden": true
 }

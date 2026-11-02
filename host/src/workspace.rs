@@ -433,26 +433,13 @@ pub(crate) fn relative_to_project(project_folder: &Path, path: &Path) -> Option<
 fn unique_path(folder: &Path, stem: &str, ext: Option<&str>) -> PathBuf {
     let stem = stem.trim();
     let stem = if stem.is_empty() { "Untitled" } else { stem };
-    let mut index = 2u32;
-    let plain = folder.join(match ext {
-        Some(ext) if !ext.is_empty() => format!("{stem}.{ext}"),
-        _ => stem.to_string(),
-    });
-    if !plain.exists() {
-        return plain;
-    }
-    loop {
-        let name = format!("{stem} {index}");
-        let file_name = match ext {
+    let file = |name: &str| {
+        folder.join(match ext {
             Some(ext) if !ext.is_empty() => format!("{name}.{ext}"),
-            _ => name,
-        };
-        let candidate = folder.join(file_name);
-        if !candidate.exists() {
-            return candidate;
-        }
-        index += 1;
-    }
+            _ => name.to_string(),
+        })
+    };
+    file(&protocol::free_name(stem, |name| file(name).exists()))
 }
 
 fn fresh_session_id(project_folder: &Path) -> String {
@@ -884,7 +871,7 @@ pub(crate) struct SkillSetting {
     pub model: Option<String>,
     #[serde(default)]
     pub prompt: String,
-    /// What the skill makes: text, or pictures.
+    /// What the skill makes: text, or images.
     #[serde(default, skip_serializing_if = "Makes::is_text")]
     pub makes: Makes,
 }
@@ -957,6 +944,11 @@ pub(crate) struct Level {
     pub effort: Option<Effort>,
 }
 
+/// What the "Image generation" skill Studio adds says it does.
+const IMAGE_SKILL_DESCRIPTION: &str = "Makes an image from a description";
+/// What it said before 0.14, as settings files keep it: the stored spelling.
+const FORMER_IMAGE_SKILL_DESCRIPTION: &str = "Makes a picture from a description"; // stored spelling
+
 impl Settings {
     /// `<Inpainter data folder>/settings.json`.
     pub(crate) fn default_file() -> Option<PathBuf> {
@@ -971,6 +963,13 @@ impl Settings {
             .and_then(|text| serde_json::from_str::<Settings>(&text).ok())
             .unwrap_or_default();
         settings.file = file;
+        // The words Studio itself wrote before 0.14, which a person reads on
+        // the Settings page, as the conventions guide words them now.
+        for skill in &mut settings.skills {
+            if skill.description == FORMER_IMAGE_SKILL_DESCRIPTION {
+                skill.description = IMAGE_SKILL_DESCRIPTION.to_string();
+            }
+        }
         settings
     }
 
@@ -1099,7 +1098,7 @@ impl Settings {
         let skill = SkillSetting {
             id: protocol::cell_id(),
             name: "Image generation".to_string(),
-            description: "Makes a picture from a description".to_string(),
+            description: IMAGE_SKILL_DESCRIPTION.to_string(),
             endpoint: Some(endpoint),
             model: Some(IMAGE_MODEL.to_string()),
             prompt: String::new(),
@@ -1115,7 +1114,7 @@ impl Settings {
         true
     }
 
-    /// Whether a skill can run: a skill that makes pictures runs only on
+    /// Whether a skill can run: a skill that makes images runs only on
     /// OpenRouter in 0.9, whose image API Studio speaks; one that makes
     /// text runs on any chat endpoint.
     pub(crate) fn skill_runs(&self, skill: &SkillSetting) -> bool {
@@ -1142,13 +1141,7 @@ impl Settings {
 pub(crate) const UNTITLED_SESSION: &str = "Untitled Session";
 
 pub(crate) fn untitled_session_name(taken: &[String]) -> String {
-    if !taken.iter().any(|name| name == UNTITLED_SESSION) {
-        return UNTITLED_SESSION.to_string();
-    }
-    (2u32..)
-        .map(|n| format!("{UNTITLED_SESSION} {n}"))
-        .find(|name| !taken.contains(name))
-        .unwrap_or_else(|| UNTITLED_SESSION.to_string())
+    protocol::free_name(UNTITLED_SESSION, |name| taken.iter().any(|taken| taken == name))
 }
 
 /// A session with no conversation and no tabs, written into the project.
@@ -1267,14 +1260,7 @@ pub(crate) fn create_project_at(data: &Path, folder: &Path, name: &str) -> Resul
 /// Project`, then `<root>/Untitled Project 2`, and on, past folders that
 /// already hold something.
 pub(crate) fn default_project_folder(root: &Path) -> PathBuf {
-    let plain = root.join(UNTITLED);
-    if unusable_project_folder(&plain).is_none() {
-        return plain;
-    }
-    (2u32..)
-        .map(|n| root.join(format!("{UNTITLED} {n}")))
-        .find(|folder| unusable_project_folder(folder).is_none())
-        .unwrap_or(plain)
+    root.join(protocol::free_name(UNTITLED, |name| unusable_project_folder(&root.join(name)).is_some()))
 }
 
 /// A known project, read: its entry, folder, and record.
@@ -1547,6 +1533,19 @@ mod tests {
         Ok((id, file))
     }
 
+    /// Catches a settings file from before 0.14 that still shows the image
+    /// skill's former words on the Settings page.
+    #[test]
+    fn the_image_skills_former_words_read_as_the_guide_words_them() {
+        let folder = scratch("former-words");
+        let file = folder.join("settings.json");
+        let text = serde_json::json!({"skills": [{"id": "s1", "name": "Image generation", "description": FORMER_IMAGE_SKILL_DESCRIPTION, "makes": "images"}]});
+        std::fs::write(&file, text.to_string()).unwrap();
+        let settings = Settings::load(Some(file));
+        assert_eq!(settings.skills.first().map(|skill| skill.description.as_str()), Some(IMAGE_SKILL_DESCRIPTION));
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("inpainter-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
@@ -1661,7 +1660,7 @@ mod tests {
     }
 
     /// Catches an image skill that comes back after the person deletes it,
-    /// or one offered where Studio cannot make pictures.
+    /// or one offered where Studio cannot make images.
     #[test]
     fn the_image_skill_is_added_once_and_runs_on_openrouter() {
         let folder = scratch("image-skill");
@@ -1676,7 +1675,7 @@ mod tests {
         let mut local = skill.clone();
         settings.endpoints.push(EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into() });
         local.endpoint = Some("local".into());
-        assert!(!settings.skill_runs(&local), "an image skill runs where Studio cannot make pictures");
+        assert!(!settings.skill_runs(&local), "an image skill runs where Studio cannot make images");
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

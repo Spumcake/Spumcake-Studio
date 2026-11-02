@@ -201,7 +201,7 @@ fn settings_open_from_the_logo_and_close_without_drawing() {
     let dir = scratch("settings-panel");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(both(), &stand_in, &dir);
-    window.select("simple-sketch");
+    window.select("storyboard-generator");
     window.app.toggle_workspace();
     keep_ticking(&mut window);
     let tab = window.app.apps[0].running.tabs().1.clone().unwrap();

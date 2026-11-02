@@ -239,7 +239,7 @@ impl Probes {
     }
 
     /// The model list a skill offers: image models for one that makes
-    /// pictures, chat models otherwise.
+    /// images, chat models otherwise.
     pub(crate) fn models_for(&mut self, ctx: &egui::Context, endpoint: &EndpointSetting, key: Option<String>, makes: crate::workspace::Makes) -> Option<&Models> {
         match makes {
             crate::workspace::Makes::Images => self.image_models(ctx, endpoint, key),

@@ -43,7 +43,7 @@ pub(crate) fn host_skill() -> protocol::Skill {
         id: PROMPT_SKILL.into(),
         name: "Prompt".into(),
         description: "Write a prompt and run it as a cell in the conversation.".into(),
-        instructions: "When the person asks for a piece of writing, or to write or run a prompt, call run_text_prompt with the prompt. Do not write the piece in the reply. When they ask to edit a picture an Image cell made, call edit_picture with the cell's id, or with none for the latest. After the tool returns, reply briefly.".into(),
+        instructions: "When the person asks for a piece of writing, or to write or run a prompt, call run_text_prompt with the prompt. Do not write the piece in the reply. When they ask to edit an image an Image cell made, call edit_image with the cell's id, or with none for the latest. After the tool returns, reply briefly.".into(),
         tools: vec![
             protocol::Tool {
                 name: RUN_PROMPT.into(),
@@ -58,8 +58,8 @@ pub(crate) fn host_skill() -> protocol::Skill {
                 }),
             },
             protocol::Tool {
-                name: EDIT_PICTURE.into(),
-                description: "Open the picture an Image cell in the conversation shows as new work, in its own tab, ready to paint. The cell is unchanged.".into(),
+                name: EDIT_IMAGE.into(),
+                description: "Open the image an Image cell in the conversation shows as new work, in its own tab, ready to paint. The cell is unchanged.".into(),
                 input: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -72,12 +72,25 @@ pub(crate) fn host_skill() -> protocol::Skill {
     }
 }
 
-/// The host's own skill, which runs prompts and opens cells' pictures.
+/// The host's own skill, which runs prompts and opens cells' images.
 pub(crate) const PROMPT_SKILL: &str = "prompt";
 
-/// The tool that opens a cell's picture as new work. A skill of the
+/// The tool that opens a cell's image as new work. A skill of the
 /// person's never takes this name.
-pub(crate) const EDIT_PICTURE: &str = "edit_picture";
+pub(crate) const EDIT_IMAGE: &str = "edit_image";
+
+/// `EDIT_IMAGE`'s name before 0.14, the spelling earlier conversations
+/// stored. It is read as `EDIT_IMAGE`, so a later turn can call it again.
+const FORMER_EDIT_IMAGE: &str = "edit_picture"; // stored spelling
+
+/// A stored tool key as the host's tools name it now: the host's own tool
+/// under its former name becomes `EDIT_IMAGE`; any other key is unchanged.
+pub(crate) fn current_host_tool_key(key: &str) -> String {
+    match protocol::split_tool_key(key) {
+        Some((HOST_ID, PROMPT_SKILL, FORMER_EDIT_IMAGE)) => protocol::tool_key(HOST_ID, PROMPT_SKILL, EDIT_IMAGE),
+        _ => key.to_string(),
+    }
+}
 
 /// The tool the host's prompt skill offers. A skill of the person's never
 /// takes this name.
@@ -103,7 +116,7 @@ pub(crate) fn offered_skills(settings: &Settings) -> Vec<(String, SkillSetting)>
             .collect();
         slug = slug.split('_').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("_");
         slug.truncate(48);
-        if slug.is_empty() || slug == RUN_PROMPT || slug == EDIT_PICTURE {
+        if slug.is_empty() || slug == RUN_PROMPT || slug == EDIT_IMAGE {
             slug = format!("skill_{slug}").trim_end_matches('_').to_string();
         }
         let mut name = slug.clone();
@@ -142,15 +155,15 @@ fn your_skills(settings: &Settings) -> Option<protocol::Skill> {
         .into_iter()
         .map(|(name, skill)| {
             let described = if skill.description.trim().is_empty() { skill.name.clone() } else { format!("{}: {}", skill.name, skill.description) };
-            // An image skill makes one picture from a prompt, shown as an
+            // An image skill makes one image from a prompt, shown as an
             // Image cell; the assistant writes the whole description.
             let (description, input) = match skill.makes {
                 Makes::Images => (
-                    format!("{described}. Makes one picture from the prompt and shows it as an Image cell in the conversation."),
+                    format!("{described}. Makes one image from the prompt and shows it as an Image cell in the conversation."),
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "prompt": {"type": "string", "description": "The picture, described in full."}
+                            "prompt": {"type": "string", "description": "The image, described in full."}
                         },
                         "required": ["prompt"],
                         "additionalProperties": false
@@ -175,7 +188,7 @@ fn your_skills(settings: &Settings) -> Option<protocol::Skill> {
         id: SKILLS.into(),
         name: "Your skills".into(),
         description: "Skills the person made, each running its own prompt on its own endpoint.".into(),
-        instructions: "When the person asks for something one of these skills is described for, call it with what to ask. When they ask for a picture, call a skill that makes pictures with the picture described in full. Its result shows as a cell in the conversation. After the tool returns, reply briefly.".into(),
+        instructions: "When the person asks for something one of these skills is described for, call it with what to ask. When they ask for an image, call a skill that makes images with the image described in full. Its result shows as a cell in the conversation. After the tool returns, reply briefly.".into(),
         tools,
     })
 }
@@ -319,6 +332,15 @@ impl Routing {
 
 #[cfg(test)]
 mod tests {
+
+    /// Catches a session from before 0.14 whose earlier calls to the host's
+    /// image tool no longer read: the former name is the current one.
+    #[test]
+    fn the_host_tools_former_name_is_its_current_one() {
+        let former = protocol::tool_key(HOST_ID, PROMPT_SKILL, FORMER_EDIT_IMAGE);
+        assert_eq!(current_host_tool_key(&former), protocol::tool_key(HOST_ID, PROMPT_SKILL, EDIT_IMAGE));
+        assert_eq!(current_host_tool_key("app__skill__tool"), "app__skill__tool");
+    }
     use super::*;
 
     /// Catches a skill offered before it can run: New Skill makes one with

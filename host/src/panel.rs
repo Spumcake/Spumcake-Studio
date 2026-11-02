@@ -90,7 +90,7 @@ pub(crate) fn show(ui: &mut egui::Ui, properties: Option<&Properties>, rect: Rec
                 ui.add_space(PAD);
                 return;
             };
-            // With page tabs, as the asset-editor mockup shows: the tabs,
+            // With page tabs, as the gallery mockup shows: the tabs,
             // then the chosen layer's settings, then the list of layers.
             if !properties.pages.is_empty() {
                 page_tabs(ui, &properties.pages, &mut sent);
@@ -195,7 +195,7 @@ const PAGE_TOP: f32 = S.of(14.0);
 const PAGE_TEXT: f32 = S.of(15.5);
 const PAGE_PAD: f32 = S.of(14.0);
 
-/// Page tabs across the panel's top, as the asset-editor mockup shows: the
+/// Page tabs across the panel's top, as the gallery mockup shows: the
 /// chosen page underlined, the others in gray,
 /// and a page that waits lighter still. A click on another page that can be
 /// used sends its action.

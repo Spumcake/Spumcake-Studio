@@ -7,9 +7,9 @@ members = [
     "draw",
     "client",
     "apps/template",
-    "apps/simple-sketch",
-    "apps/mission-control",
-    "apps/image-editor",
+    "apps/storyboard-generator",
+    "apps/recipe-creation",
+    "apps/image-generator",
 ]
 
 # octotablet 0.1.0 binds tablet protocol versions it cannot parse, which
@@ -17,7 +17,7 @@ members = [
 [patch.crates-io]
 octotablet = { path = "host/vendor/octotablet" }
 
-# Pictures are composited and painted pixel by pixel, which an unoptimised
+# Images are composited and painted pixel by pixel, which an unoptimised
 # build does twenty times slower: everyday builds are optimised, and keep
 # their debug checks.
 [profile.dev]

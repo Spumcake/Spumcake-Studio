@@ -1,6 +1,6 @@
-//! A tab of pixels: the picture a sub-application composites, what the
+//! A tab of pixels: the image a sub-application composites, what the
 //! host's pointer does on it, and the gestures the host sends back. The host
-//! draws the picture, its selection, crop box, and layer bounds, previews a
+//! draws the image, its selection, crop box, and layer bounds, previews a
 //! brush stroke while it is drawn, and owns the camera. The sub-application
 //! owns every pixel, layer, and step of history.
 
@@ -8,34 +8,34 @@ use crate::DocumentCamera;
 use serde::{Deserialize, Serialize};
 
 /// What the host draws in a tab whose contents are `raster`. Sent after
-/// every change; the host reads the picture again when `revision` changes.
+/// every change; the host reads the image again when `revision` changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RasterView {
     pub tab: String,
-    /// The picture's size, in pixels.
+    /// The image's size, in pixels.
     pub width: u32,
     pub height: u32,
     /// A text being typed in, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextEditing>,
-    /// The composited picture: a file of `width × height × 4` bytes, RGBA
+    /// The composited image: a file of `width × height × 4` bytes, RGBA
     /// with straight (unpremultiplied) alpha, rows top to bottom. It is
     /// replaced whole, by a write to a scratch file and a rename, so the
     /// host never reads half of one.
-    pub picture: String,
-    /// Rises with every change to the picture.
+    pub image: String,
+    /// Rises with every change to the image.
     pub revision: u64,
-    /// The part of the picture that differs from revision `since` of the
+    /// The part of the image that differs from revision `since` of the
     /// same file. A host that still shows `since` reads only these rows;
-    /// any other host reads the whole picture.
+    /// any other host reads the whole image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<RasterPatch>,
     pub tool: RasterTool,
-    /// The selection, as closed outlines in picture pixels, drawn with a
+    /// The selection, as closed outlines in image pixels, drawn with a
     /// marching edge. Empty when nothing is selected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selection: Vec<Vec<[f64; 2]>>,
-    /// The crop box being set, `[x, y, width, height]` in picture pixels:
+    /// The crop box being set, `[x, y, width, height]` in image pixels:
     /// drawn with thirds and its outside dimmed. Its edges and corners drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<[f64; 4]>,
@@ -43,11 +43,11 @@ pub struct RasterView {
     /// while the move tool is chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bounds: Option<[f64; 4]>,
-    /// Where the host's camera goes, when a picture is opened or made. The
+    /// Where the host's camera goes, when a image is opened or made. The
     /// host owns the camera after that and reports it with `camera`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<DocumentCamera>,
-    /// The tab's pictures, as a filmstrip along the bottom of the working
+    /// The tab's images, as a filmstrip along the bottom of the working
     /// area, as the owner's mockup and 0.11's gallery views show. None draws
     /// no strip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,26 +55,26 @@ pub struct RasterView {
 }
 
 /// What changed since an earlier revision: `[x, y, width, height]` in
-/// picture pixels.
+/// image pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RasterPatch {
     pub since: u64,
     pub rect: [u32; 4],
     /// While a change is still being made, such as a stroke being drawn,
     /// its rows are in a file of their own, `width × height × 4` bytes as
-    /// the picture's are, and the picture file is not written for this
+    /// the image's are, and the image file is not written for this
     /// revision. A host that does not hold `since` keeps what it shows
     /// until a view comes without a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }
 
-/// A gallery's filmstrip: every picture in the tab, the one shown outlined
+/// A gallery's filmstrip: every image in the tab, the one shown outlined
 /// in blue, and a bordered + tile at the end.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Film {
     pub items: Vec<FilmItem>,
-    /// The index of the picture shown.
+    /// The index of the image shown.
     pub shown: usize,
     /// A click on a thumbnail sends `select` with `{"value": index}`.
     pub select: crate::Action,
@@ -85,11 +85,11 @@ pub struct Film {
     /// The + tile's menu: a click opens these rows above it.
     pub add: Vec<crate::MenuEntry>,
     /// A press anywhere on the strip sends `focus` first, so the
-    /// application knows the strip, not the picture, has the keyboard.
+    /// application knows the strip, not the image, has the keyboard.
     pub focus: crate::Action,
 }
 
-/// One picture on the filmstrip.
+/// One image on the filmstrip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FilmItem {
     /// Shown when the pointer rests on the thumbnail.
@@ -115,7 +115,7 @@ pub enum RasterTool {
     /// A click picks a colour: `pick`.
     Eyedropper,
     /// A pressure stroke, previewed as it is drawn: `stroke`. Sizes are in
-    /// picture pixels; hardness and opacity run from 0 to 1.
+    /// image pixels; hardness and opacity run from 0 to 1.
     Brush {
         rgb: [u8; 3],
         size: f64,
@@ -135,7 +135,7 @@ pub enum RasterTool {
     /// healing brush. Alt-click sends `source`; a drag paints as the brush
     /// does. The host draws a crosshair where it copies from: at the
     /// pointer plus `offset` when there is one, as during and after an
-    /// aligned stroke, or else at `source`. Sizes are in picture pixels.
+    /// aligned stroke, or else at `source`. Sizes are in image pixels.
     Sampler {
         size: f64,
         pressure: bool,
@@ -152,16 +152,16 @@ pub enum RasterTool {
     Zoom,
 }
 
-/// One finished gesture on a raster tab, in picture pixels.
+/// One finished gesture on a raster tab, in image pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RasterGesture {
     /// The newest points of a brush or eraser stroke still being drawn,
     /// sent as they come, so the sub-application paints them at once:
     /// `from` is how many points were sent before. The host draws no
-    /// preview of its own; the picture shows the stroke.
+    /// preview of its own; the image shows the stroke.
     StrokePart { from: usize, points: Vec<[f64; 3]> },
-    /// The open stroke was let go with Escape: it is taken off the picture.
+    /// The open stroke was let go with Escape: it is taken off the image.
     StrokeCancel,
     /// A finished brush or eraser stroke, every point: `[x, y, pressure]`,
     /// pressure from 0 to 1, and 1 with a mouse.
@@ -189,7 +189,7 @@ pub enum RasterGesture {
 }
 
 /// A text being typed in: its box, its caret, and its selected spans, as
-/// `[x, y, width, height]` in picture pixels. While it is set, the host
+/// `[x, y, width, height]` in image pixels. While it is set, the host
 /// draws the box with side handles and a blinking caret, and sends the
 /// keyboard as `raster_text`, except undo and redo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,8 +237,8 @@ pub enum TextKey {
     Cut,
 }
 
-/// A small picture of one layer, for its row: a file of `width × height × 4`
-/// bytes, as `RasterView::picture` is. The host reads it again when
+/// A small image of one layer, for its row: a file of `width × height × 4`
+/// bytes, as `RasterView::image` is. The host reads it again when
 /// `revision` changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thumbnail {
@@ -260,7 +260,7 @@ mod tests {
             tab: "1".into(),
             width: 1920,
             height: 1080,
-            picture: "/tmp/1.rgba".into(),
+            image: "/tmp/1.rgba".into(),
             revision: 3,
             text: Some(TextEditing { rect: [1.0, 2.0, 30.0, 10.0], caret: [5.0, 2.0, 1.0, 10.0], selection: vec![[1.0, 2.0, 4.0, 10.0]] }),
             patch: Some(RasterPatch { since: 2, rect: [1, 2, 3, 4], file: Some("/tmp/1-2.patch".into()) }),
@@ -276,8 +276,8 @@ mod tests {
                     menu: Vec::new(),
                 }],
                 shown: 0,
-                select: crate::Action::new("select_picture"),
-                reorder: crate::Action::new("move_picture"),
+                select: crate::Action::new("select_image"),
+                reorder: crate::Action::new("move_image"),
                 add: Vec::new(),
                 focus: crate::Action::new("film_focus"),
             }),

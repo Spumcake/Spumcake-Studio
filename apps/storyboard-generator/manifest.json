@@ -1,0 +1,7 @@
+{
+  "id": "storyboard-generator",
+  "name": "Storyboard Generator",
+  "executable": "storyboard-generator",
+  "protocol": 1,
+  "formerly": ["simple-sketch"]
+}

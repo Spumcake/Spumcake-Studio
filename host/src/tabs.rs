@@ -262,7 +262,7 @@ fn close_control(
     ui.interact(rect, egui::Id::new(("tab-close", app, id)), sense)
 }
 
-/// The close mark, or a dot while the sketch has unsaved changes and the
+/// The close mark, or a dot while the drawing has unsaved changes and the
 /// pointer is away from its tab.
 fn paint_close_mark(ui: &egui::Ui, rect: egui::Rect, enabled: bool, dot: bool) {
     let color = if enabled { ICON } else { toolbar::ICON_QUIET };

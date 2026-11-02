@@ -1,11 +1,11 @@
-//! The coverage check: everything a person can do to a sketch's contents by
+//! The coverage check: everything a person can do to a storyboard's contents by
 //! hand has a tool the assistant can call.
 //!
-//! It reads Simple Sketch's own hand surface: its command list
+//! It reads Storyboard Generator's own hand surface: its command list
 //! (`registry::commands`), every action its toolbar, menu, keys, panel,
 //! outliner, and canvas declare, the properties its panel shows on every
 //! object and color page, the drawing surface's gesture kinds, and the
-//! select tool's operations. Each one that changes a sketch's contents must
+//! select tool's operations. Each one that changes a storyboard's contents must
 //! map to a tool, and an argument, that the declared skills offer. The rest
 //! are named below as left out, each with the reason from systems' "Left
 //! out": undo and redo; opening, saving, and closing files; recent files;
@@ -21,8 +21,8 @@ use draw::document::{ColorId, Dynamics, NodeId, ShapeKind, TextBox};
 use draw::gesture::GestureKind;
 use protocol::{AppMessage, HostMessage, SelectOp, Skill};
 use serde_json::{Value, json};
-use simple_sketch::registry::{self, CommandId};
-use simple_sketch::serve::Server;
+use storyboard_generator::registry::{self, CommandId};
+use storyboard_generator::serve::Server;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Where one part of the hand surface went.
@@ -33,7 +33,7 @@ enum Place {
     Tool(&'static str, Option<(&'static str, &'static str)>),
     /// Several tools between them.
     Tools(&'static [&'static str]),
-    /// Left out, and why: not a sketch's contents, or the person's own. The
+    /// Left out, and why: not a storyboard's contents, or the person's own. The
     /// reason is for the people reading this list.
     Left(#[allow(dead_code)] &'static str),
 }
@@ -52,7 +52,7 @@ const TEXT_STYLE: Place = Place::Tool("style__set_object_properties", None);
 fn command(id: CommandId) -> Place {
     use Place::{Left, Tool};
     match id {
-        CommandId::NewSketch | CommandId::Open | CommandId::Save | CommandId::SaveAs | CommandId::SaveCopy | CommandId::Close => Left(FILES),
+        CommandId::NewStoryboard | CommandId::Open | CommandId::Save | CommandId::SaveAs | CommandId::SaveCopy | CommandId::Close => Left(FILES),
         CommandId::ClearRecent => Left(RECENT),
         CommandId::Undo | CommandId::Redo => Left(UNDO),
         CommandId::ZoomIn | CommandId::ZoomOut | CommandId::Fit | CommandId::ZoomToSelection | CommandId::Maximize => Left(VIEW),
@@ -256,7 +256,7 @@ fn actions_in(value: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// What the person sees, gathered from an in-process Simple Sketch put
+/// What the person sees, gathered from an in-process Storyboard Generator put
 /// through every page: actions, and the panel's properties on object pages
 /// and on object colors' pages.
 struct Seen {
@@ -311,7 +311,7 @@ impl Walk {
             HostMessage::Invoke {
                 call: format!("walk-{}", self.calls),
                 tab: self.tab.clone(),
-                tool: protocol::tool_key("simple-sketch", skill, name),
+                tool: protocol::tool_key("storyboard-generator", skill, name),
                 input,
                 group: format!("walk-{}", self.calls),
             },
@@ -342,12 +342,12 @@ fn gather() -> Result<(Vec<Skill>, Seen), String> {
             AppMessage::Skills { skills } => Some(skills.clone()),
             _ => None,
         })
-        .ok_or("simple-sketch declared no skills")?;
+        .ok_or("storyboard-generator declared no skills")?;
     walk.tab = crate::document_of(&greeting).ok_or("no document")?.0;
     walk.send(HostMessage::Viewport { viewport: crate::VIEWPORT }, None);
 
     // One of each object, so every page and menu exists.
-    let read = walk.invoke("look__read_sketch", json!({"points": false}));
+    let read = walk.invoke("look__read_storyboard", json!({"points": false}));
     let canvas = read["active_canvas"].as_u64().ok_or("no canvas")?;
     let layer = read["objects_front_to_back"][0]["layers_top_to_bottom"][0]["id"].as_u64().ok_or("no layer")?;
     let mut objects = Vec::new();
@@ -419,7 +419,7 @@ pub(crate) fn check() -> Result<(), String> {
         offered(&tools, &format!("the action {id:?}"), place)?;
     }
     if seen.actions.len() < 20 {
-        return Err("the walk saw too few of Simple Sketch's actions to be a check".into());
+        return Err("the walk saw too few of Storyboard Generator's actions to be a check".into());
     }
 
     for (seen_props, tool) in [(&seen.object_props, "style__set_object_properties"), (&seen.color_props, "style__set_color_properties")] {

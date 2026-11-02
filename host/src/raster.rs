@@ -1,11 +1,11 @@
-//! A raster tab: a picture of pixels a sub-application composites, drawn
+//! A raster tab: an image of pixels a sub-application composites, drawn
 //! through a camera the host keeps, and the pointer on it. The host draws the
-//! picture, its selection's marching edge, the crop box, and the active
+//! image, its selection's marching edge, the crop box, and the active
 //! layer's box, previews a paint drag while it is drawn, and sends each
-//! finished gesture in picture pixels. It knows no editor: what a gesture
+//! finished gesture in image pixels. It knows no editor: what a gesture
 //! does is the sub-application's, and the next `raster` view shows it. A
 //! view with a filmstrip gives the strip the bottom of the area, and the
-//! picture the rest. While the view has a text being typed in, the host
+//! image the rest. While the view has a text being typed in, the host
 //! draws its box and caret, and the keyboard and the pointer in the box go
 //! to the text.
 
@@ -22,11 +22,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// White around the picture, as the owner set on 2026-11-01.
+/// White around the image, as the owner set on 2026-11-01.
 pub(crate) const GROUND: Color32 = Color32::WHITE;
-/// The picture's border, a dark grey, as the owner set the same day.
+/// The image's border, a dark grey, as the owner set the same day.
 const EDGE: Color32 = Color32::from_rgb(0x6E, 0x6E, 0x6E);
-/// The workspace's bar beside a picture: black, as the owner set the same
+/// The workspace's bar beside an image: black, as the owner set the same
 /// day.
 pub(crate) const BAR: Color32 = Color32::BLACK;
 /// The squares drawn under transparency.
@@ -45,7 +45,7 @@ const CROP_SHADE: Color32 = Color32::from_black_alpha(90);
 /// worked on and large photographs can be seen whole.
 const MIN_ZOOM: f64 = 1.0 / 64.0;
 const MAX_ZOOM: f64 = 64.0;
-/// The space Fit leaves around the picture, in points.
+/// The space Fit leaves around the image, in points.
 const FIT_MARGIN: f64 = 40.0;
 /// The toolbar's zoom buttons step as the drawing surface's do.
 const BUTTON_STEP: f64 = 5.0 / 4.0;
@@ -123,7 +123,7 @@ enum Grab {
 
 struct Drag {
     live: Live,
-    /// Where the press was, in picture pixels.
+    /// Where the press was, in image pixels.
     press: [f64; 2],
     /// The crop box when the press took it.
     crop: Option<(Grab, [f64; 4])>,
@@ -147,7 +147,7 @@ pub(crate) struct Pointer {
     /// The open paint drag takes its samples from the tablet.
     pen: bool,
     held: Vec<Held>,
-    /// Where the picture was last drawn: the tab's area above its
+    /// Where the image was last drawn: the tab's area above its
     /// filmstrip, when it has one.
     pub(crate) shown: Rect,
     film: crate::film::Strip,
@@ -285,7 +285,7 @@ impl Pointer {
             && ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary))
             && box_on_screen(&camera, rect, text.rect).contains(pos)
         {
-            out.push(Out::Text(TextInput::Word { at: picture_at(&camera, rect, pos) }));
+            out.push(Out::Text(TextInput::Word { at: image_at(&camera, rect, pos) }));
         }
 
         moved |= wheel(ui, display, rect, over || self.drag.is_some() || self.pan.is_some());
@@ -314,7 +314,7 @@ impl Pointer {
         let Some(camera) = display.camera else {
             return;
         };
-        let at = picture_at(&camera, rect, pos);
+        let at = image_at(&camera, rect, pos);
         let (shift, alt) = ui.input(|input| (input.modifiers.shift, input.modifiers.alt));
         // While a text is typed in, a press in its box goes to the text, a
         // side drags the box, and a press elsewhere is the text tool's.
@@ -394,7 +394,7 @@ impl Pointer {
         let Some(pos) = ui.input(|input| input.pointer.latest_pos()) else {
             return;
         };
-        let at = picture_at(&camera, rect, pos);
+        let at = image_at(&camera, rect, pos);
         let size = [f64::from(display.view.width), f64::from(display.view.height)];
         let paints = matches!(self.drag.as_ref().map(|drag| &drag.live), Some(Live::Paint { .. }));
         if paints {
@@ -443,7 +443,7 @@ impl Pointer {
     }
 
     /// Adds this frame's pointer or pen samples to the open paint drag, in
-    /// picture pixels, with the pen's pressure or 1 with a mouse. A sample
+    /// image pixels, with the pen's pressure or 1 with a mouse. A sample
     /// nearer the last than `spacing`, at much the same pressure, is left
     /// out: the paint moves less than that from where it would be, and a
     /// large brush is not painted over itself for every pixel moved.
@@ -476,7 +476,7 @@ impl Pointer {
             }
         }
         for (pos, pressure) in samples {
-            let at = picture_at(camera, rect, pos);
+            let at = image_at(camera, rect, pos);
             let point = [at[0], at[1], pressure];
             let apart = |last: &[f64; 3]| {
                 (point[0] - last[0]).hypot(point[1] - last[1]) >= spacing || (point[2] - last[2]).abs() > PRESSURE_STEP
@@ -505,7 +505,7 @@ impl Pointer {
             return;
         };
         let gesture = match &drag.live {
-            // The paint is on the picture already: nothing is held.
+            // The paint is on the image already: nothing is held.
             Live::Paint { points, .. } if !points.is_empty() => {
                 out.push(Out::Painted(points.clone()));
                 return;
@@ -597,7 +597,7 @@ impl Pointer {
         }
     }
 
-    /// The picture, then what lies over it: paint previews, the selection,
+    /// The image, then what lies over it: paint previews, the selection,
     /// the crop box, the layer's box, and the brush's ring.
     fn paint(&self, ui: &egui::Ui, display: &RasterDisplay, rect: Rect) {
         let painter = ui.painter().with_clip_rect(rect);
@@ -606,19 +606,19 @@ impl Pointer {
             return;
         };
         let view = &display.view;
-        let picture = picture_rect(&camera, rect, view);
-        // The picture, then a border around it, as the owner set on
-        // 2026-10-30, so a white picture stands apart from the grey.
-        match raw_picture(ui.ctx(), &view.picture, view.width, view.height, view.revision, &display.patches, view.patch.as_ref().is_some_and(|patch| patch.file.is_some())) {
+        let image = image_rect(&camera, rect, view);
+        // The image, then a border around it, as the owner set on
+        // 2026-10-30, so a white image stands apart from the grey.
+        match raw_image(ui.ctx(), &view.image, view.width, view.height, view.revision, &display.patches, view.patch.as_ref().is_some_and(|patch| patch.file.is_some())) {
             Some((texture, opaque)) => {
                 if !opaque {
-                    checker(ui.ctx(), &painter, picture);
+                    checker(ui.ctx(), &painter, image);
                 }
-                painter.image(texture, picture, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+                painter.image(texture, image, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
             }
-            None => checker(ui.ctx(), &painter, picture),
+            None => checker(ui.ctx(), &painter, image),
         }
-        widgets::outlined(&painter, picture.expand(1.0), 0.0, Color32::TRANSPARENT, EDGE);
+        widgets::outlined(&painter, image.expand(1.0), 0.0, Color32::TRANSPARENT, EDGE);
 
         let lives = self.held.iter().map(|held| &held.live).chain(self.drag.iter().map(|drag| &drag.live));
         let mut crop = view.crop;
@@ -661,7 +661,7 @@ impl Pointer {
             ui.ctx().request_repaint_after(MARCH);
         }
         if let Some(crop) = crop {
-            paint_crop(&painter, &camera, rect, picture, crop);
+            paint_crop(&painter, &camera, rect, image, crop);
         }
         if view.tool == RasterTool::Move
             && let Some(bounds) = view.bounds
@@ -672,7 +672,7 @@ impl Pointer {
         if let (Some(text), Some(box_)) = (&view.text, text_box) {
             self.paint_text(ui, &painter, &camera, rect, text, box_);
         }
-        // Only where the picture's view is uppermost: over the workspace's
+        // Only where the image's view is uppermost: over the workspace's
         // bar, the pointer is the bar's.
         let hover = ui.input(|input| input.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(rect) && self.pan.is_none());
         if let RasterTool::Brush { size, .. } | RasterTool::Erase { size, .. } | RasterTool::Sampler { size, .. } = view.tool
@@ -688,7 +688,7 @@ impl Pointer {
         if let RasterTool::Sampler { source, offset, .. } = view.tool {
             let from = match (offset, hover) {
                 (Some(offset), Some(pos)) => {
-                    let at = picture_at(&camera, rect, pos);
+                    let at = image_at(&camera, rect, pos);
                     Some([at[0] + offset[0], at[1] + offset[1]])
                 }
                 (Some(_), None) => None,
@@ -818,7 +818,7 @@ fn hairline_box(painter: &egui::Painter, frame: Rect) {
     painter.line_segment([frame.left_bottom(), frame.left_top()], line);
 }
 
-/// A thin cross, dark over white so it shows on any picture.
+/// A thin cross, dark over white so it shows on any image.
 fn cross(painter: &egui::Painter, at: Pos2) {
     for (width, color) in [(3.0, Color32::from_white_alpha(200)), (1.0, CROSS_DARK)] {
         painter.line_segment([at - vec2(CROSS, 0.0), at + vec2(CROSS, 0.0)], (width, color));
@@ -826,7 +826,7 @@ fn cross(painter: &egui::Painter, at: Pos2) {
     }
 }
 
-/// How far apart, in picture pixels, a paint drag's samples are kept: a
+/// How far apart, in image pixels, a paint drag's samples are kept: a
 /// twenty-fifth of the brush, from half a pixel to eight.
 fn spacing(tool: &RasterTool) -> f64 {
     match tool {
@@ -842,15 +842,15 @@ fn usable(camera: &Camera) -> bool {
     camera.origin[0].is_finite() && camera.origin[1].is_finite() && camera.zoom.is_finite() && camera.zoom > 0.0
 }
 
-/// The picture's place on screen.
-fn picture_rect(camera: &Camera, rect: Rect, view: &RasterView) -> Rect {
+/// The image's place on screen.
+fn image_rect(camera: &Camera, rect: Rect, view: &RasterView) -> Rect {
     Rect::from_min_max(
         screen_at(camera, rect, [0.0, 0.0]),
         screen_at(camera, rect, [f64::from(view.width), f64::from(view.height)]),
     )
 }
 
-fn picture_at(camera: &Camera, rect: Rect, pos: Pos2) -> [f64; 2] {
+fn image_at(camera: &Camera, rect: Rect, pos: Pos2) -> [f64; 2] {
     [
         camera.origin[0] + f64::from(pos.x - rect.min.x) / camera.zoom,
         camera.origin[1] + f64::from(pos.y - rect.min.y) / camera.zoom,
@@ -873,13 +873,13 @@ fn box_on_screen(camera: &Camera, rect: Rect, box_: [f64; 4]) -> Rect {
 
 // The camera, which the host keeps while the tab is shown.
 
-/// Frames the whole picture in the viewport, with room around it.
+/// Frames the whole image in the viewport, with room around it.
 pub(crate) fn fit(display: &mut RasterDisplay, viewport: [f64; 2]) {
     let size = [f64::from(display.view.width.max(1)), f64::from(display.view.height.max(1))];
     frame(display, [0.0, 0.0, size[0], size[1]], viewport);
 }
 
-/// Frames the selection, or the whole picture when nothing is selected.
+/// Frames the selection, or the whole image when nothing is selected.
 pub(crate) fn zoom_to_selection(display: &mut RasterDisplay, viewport: [f64; 2]) {
     let points = display.view.selection.iter().flatten();
     let mut bounds: Option<[f64; 4]> = None;
@@ -923,7 +923,7 @@ pub(crate) fn set_zoom(display: &mut RasterDisplay, zoom: f64, viewport: [f64; 2
     zoom_toward(display, zoom / camera.zoom, vec2((viewport[0] / 2.0) as f32, (viewport[1] / 2.0) as f32));
 }
 
-/// Zooms by `factor`, keeping the picture point under `pointer`, which is
+/// Zooms by `factor`, keeping the image point under `pointer`, which is
 /// measured from the viewport's corner, where it is.
 fn zoom_toward(display: &mut RasterDisplay, factor: f64, pointer: egui::Vec2) {
     let Some(camera) = display.camera.as_mut() else {
@@ -1003,7 +1003,7 @@ fn crop_grab(camera: &Camera, rect: Rect, crop: [f64; 4], pos: Pos2) -> Grab {
 }
 
 /// The crop box a drag from `press` to `at` makes of `start`, kept on the
-/// picture.
+/// image.
 fn dragged_crop(grab: Grab, start: [f64; 4], press: [f64; 2], at: [f64; 2], size: [f64; 2]) -> [f64; 4] {
     let clamp = |point: [f64; 2]| [point[0].clamp(0.0, size[0]), point[1].clamp(0.0, size[1])];
     let corners = |a: [f64; 2], b: [f64; 2]| {
@@ -1037,7 +1037,7 @@ fn dragged_crop(grab: Grab, start: [f64; 4], press: [f64; 2], at: [f64; 2], size
     }
 }
 
-/// A crop box on whole pixels, inside the picture.
+/// A crop box on whole pixels, inside the image.
 fn whole_pixels(box_: [f64; 4], size: [u32; 2]) -> [f64; 4] {
     let x0 = box_[0].round().clamp(0.0, f64::from(size[0]));
     let y0 = box_[1].round().clamp(0.0, f64::from(size[1]));
@@ -1046,15 +1046,15 @@ fn whole_pixels(box_: [f64; 4], size: [u32; 2]) -> [f64; 4] {
     [x0, y0, x1 - x0, y1 - y0]
 }
 
-/// The crop box as crop.png shows it: the picture outside it dimmed, a
+/// The crop box as crop.png shows it: the image outside it dimmed, a
 /// white edge with thirds, and heavier corners.
-fn paint_crop(painter: &egui::Painter, camera: &Camera, rect: Rect, picture: Rect, crop: [f64; 4]) {
+fn paint_crop(painter: &egui::Painter, camera: &Camera, rect: Rect, image: Rect, crop: [f64; 4]) {
     let frame = box_on_screen(camera, rect, crop);
     for dim in [
-        Rect::from_min_max(picture.min, pos2(picture.right(), frame.top())),
-        Rect::from_min_max(pos2(picture.left(), frame.bottom()), picture.max),
-        Rect::from_min_max(pos2(picture.left(), frame.top()), pos2(frame.left(), frame.bottom())),
-        Rect::from_min_max(pos2(frame.right(), frame.top()), pos2(picture.right(), frame.bottom())),
+        Rect::from_min_max(image.min, pos2(image.right(), frame.top())),
+        Rect::from_min_max(pos2(image.left(), frame.bottom()), image.max),
+        Rect::from_min_max(pos2(image.left(), frame.top()), pos2(frame.left(), frame.bottom())),
+        Rect::from_min_max(pos2(frame.right(), frame.top()), pos2(image.right(), frame.bottom())),
     ] {
         if dim.is_positive() {
             painter.rect_filled(dim, 0.0, CROP_DIM);
@@ -1067,7 +1067,7 @@ fn paint_crop(painter: &egui::Painter, camera: &Camera, rect: Rect, picture: Rec
         painter.line_segment([pos2(frame.left(), y), pos2(frame.right(), y)], (1.0, Color32::from_white_alpha(190)));
     }
     // The edge and its corners, white over a faint dark line, so they show
-    // on a white picture and on the white around it.
+    // on a white image and on the white around it.
     let arm = 14.0_f32.min(frame.width() / 2.0).min(frame.height() / 2.0);
     let corners = [
         (frame.left_top(), 1.0, 1.0),
@@ -1146,13 +1146,13 @@ fn marching_edge(ui: &egui::Ui, painter: &egui::Painter, points: &[Pos2], closed
 
 /// A paint drag as it is drawn, in the tool's colour, size, and opacity,
 /// or as a light trail for the eraser.
-// Pictures read from raw RGBA files.
+// Images read from raw RGBA files.
 //
 // Files are read, and their pixels made into images, on threads of their
 // own. The window only uploads finished images, and shows what it last
 // uploaded until the next is ready.
 
-/// A picture as its texture shows it.
+/// An image as its texture shows it.
 #[derive(Clone)]
 struct Loaded {
     revision: u64,
@@ -1161,18 +1161,18 @@ struct Loaded {
     opaque: bool,
 }
 
-/// A picture's place among those read: what its texture shows, and the
+/// An image's place among those read: what its texture shows, and the
 /// reading under way for it, at most one at a time.
 #[derive(Clone, Default)]
 struct Entry {
     shown: Option<Loaded>,
     reading: Option<Arc<Reading>>,
-    /// The revision whose changes could not be read: the picture is read
+    /// The revision whose changes could not be read: the image is read
     /// whole instead.
     failed: Option<u64>,
     /// A file that was not whole is tried again after this.
     retry: Option<Instant>,
-    /// The last pass that drew it, so pictures no longer drawn are let go.
+    /// The last pass that drew it, so images no longer drawn are let go.
     used: u64,
 }
 
@@ -1185,7 +1185,7 @@ struct Reading {
 
 /// What a reading brought.
 enum Read {
-    /// The whole picture, as `revision`, at `size`.
+    /// The whole image, as `revision`, at `size`.
     Whole { revision: u64, size: [u32; 2], image: egui::ColorImage, opaque: bool },
     /// The parts that take a texture holding revision `from` to `to`, each
     /// with where it goes and whether it is opaque.
@@ -1206,32 +1206,32 @@ enum Job {
 enum Step {
     /// Rows written to a file of their own, while a change is being made.
     Rows { file: String, rect: [u32; 4] },
-    /// Rows of the picture file.
-    Picture { rect: [u32; 4] },
+    /// Rows of the image file.
+    Image { rect: [u32; 4] },
 }
 
-/// Pictures not drawn for this many passes are let go, and read again if
+/// Images not drawn for this many passes are let go, and read again if
 /// they are shown again.
 const FORGET_AFTER: u64 = 600;
-/// How long a picture with nothing of its size shown yet is waited for, so
-/// a picture opened shows at once rather than after a frame of squares.
+/// How long an image with nothing of its size shown yet is waited for, so
+/// an image opened shows at once rather than after a frame of squares.
 const FIRST_WAIT: Duration = Duration::from_millis(250);
 /// How long a file that was not whole is left before it is tried again.
 const RETRY: Duration = Duration::from_millis(100);
 
 /// A file of raw RGBA, `width × height × 4` bytes with straight alpha, as a
 /// texture, read again when `revision` changes. `patches` are the changes
-/// the views brought, oldest first, each with its picture and revision: the
+/// the views brought, oldest first, each with its image and revision: the
 /// texture takes those that follow what it holds, reading only their rows,
-/// and changes read from the picture file one after another are read as
-/// one, or as the whole picture when they cover most of it. While the
+/// and changes read from the image file one after another are read as
+/// one, or as the whole image when they cover most of it. While the
 /// view's own change is still being made (`making`), its rows in a file of
-/// their own, the picture file is older than the view: a texture that
-/// cannot follow keeps what it shows rather than read it whole. A picture
+/// their own, the image file is older than the view: a texture that
+/// cannot follow keeps what it shows rather than read it whole. An image
 /// file of the wrong length is not whole yet: the last texture is kept and
 /// the file is tried again later. A texture never goes back to an older
 /// revision. Returns the texture and whether every pixel is opaque.
-pub(crate) fn raw_picture(
+pub(crate) fn raw_image(
     ctx: &egui::Context,
     path: &str,
     width: u32,
@@ -1240,7 +1240,7 @@ pub(crate) fn raw_picture(
     patches: &[(String, u64, RasterPatch)],
     making: bool,
 ) -> Option<(egui::TextureId, bool)> {
-    let id = egui::Id::new("raster-pictures");
+    let id = egui::Id::new("raster-images");
     let pass = ctx.cumulative_pass_nr();
     let size = [width, height];
     let mut entry: Entry = ctx
@@ -1267,7 +1267,7 @@ pub(crate) fn raw_picture(
     ctx.data_mut(|data| {
         let cache = data.get_temp_mut_or_default::<HashMap<String, Entry>>(id);
         cache.insert(path.to_string(), Entry { used: pass, ..entry });
-        cache.retain(|_, picture| pass.saturating_sub(picture.used) < FORGET_AFTER);
+        cache.retain(|_, image| pass.saturating_sub(image.used) < FORGET_AFTER);
     });
     answer
 }
@@ -1292,7 +1292,7 @@ fn take(ctx: &egui::Context, path: &str, entry: &mut Entry, size: [u32; 2], revi
                 // unless the view has gone back past it.
                 Some(shown) if shown.size == size && read <= shown.revision && shown.revision <= revision => {}
                 Some(shown) if shown.size == size => {
-                    shown.texture.set(image, picture_options());
+                    shown.texture.set(image, image_options());
                     shown.revision = read;
                     shown.opaque = opaque;
                 }
@@ -1300,7 +1300,7 @@ fn take(ctx: &egui::Context, path: &str, entry: &mut Entry, size: [u32; 2], revi
                     entry.shown = Some(Loaded {
                         revision: read,
                         size,
-                        texture: ctx.load_texture(format!("raster:{path}"), image, picture_options()),
+                        texture: ctx.load_texture(format!("raster:{path}"), image, image_options()),
                         opaque,
                     });
                 }
@@ -1309,7 +1309,7 @@ fn take(ctx: &egui::Context, path: &str, entry: &mut Entry, size: [u32; 2], revi
         Read::Parts { from, to, parts } => {
             if let Some(shown) = entry.shown.as_mut().filter(|shown| shown.size == size && shown.revision == from) {
                 for (corner, image, opaque) in parts {
-                    shown.texture.set_partial(corner, image, picture_options());
+                    shown.texture.set_partial(corner, image, image_options());
                     shown.opaque &= opaque;
                 }
                 shown.revision = to;
@@ -1335,7 +1335,7 @@ fn plan(
     making: bool,
     largest: usize,
 ) -> Option<Job> {
-    // The picture file read while a change is still being made is older
+    // The image file read while a change is still being made is older
     // than the view: it is kept as no revision, so the view without a file
     // reads it again.
     let Some(shown) = entry.shown.as_ref().filter(|shown| shown.size == size) else {
@@ -1356,16 +1356,16 @@ fn plan(
 
 /// The reads that take a texture holding revision `from` along the changes
 /// that follow it, and the revision they reach. Changes read from the
-/// picture file one after another are read as one, over the rows they
+/// image file one after another are read as one, over the rows they
 /// cover, as the file holds the latest of them anyway. One that covers
-/// most of the picture reads it whole, and nothing before it is read.
+/// most of the image reads it whole, and nothing before it is read.
 fn steps(path: &str, size: [u32; 2], from: u64, patches: &[(String, u64, RasterPatch)]) -> (Vec<(u64, Step)>, u64) {
     let [width, height] = size;
     let whole = [0, 0, width, height];
     let mut at = from;
     let mut steps: Vec<(u64, Step)> = Vec::new();
-    for (picture, revision, patch) in patches {
-        if picture != path || *revision <= at {
+    for (image, revision, patch) in patches {
+        if image != path || *revision <= at {
             continue;
         }
         if patch.since != at {
@@ -1378,24 +1378,24 @@ fn steps(path: &str, size: [u32; 2], from: u64, patches: &[(String, u64, RasterP
                 let (x, y) = (x.min(width), y.min(height));
                 let rect = [x, y, w.min(width - x), h.min(height - y)];
                 match steps.last_mut() {
-                    Some((reached, Step::Picture { rect: last })) => {
+                    Some((reached, Step::Image { rect: last })) => {
                         *last = union(*last, rect);
                         *reached = *revision;
                     }
-                    _ => steps.push((*revision, Step::Picture { rect })),
+                    _ => steps.push((*revision, Step::Image { rect })),
                 }
             }
         }
         at = *revision;
     }
     for (_, step) in &mut steps {
-        if let Step::Picture { rect } = step
+        if let Step::Image { rect } = step
             && 2 * u64::from(rect[2]) * u64::from(rect[3]) >= u64::from(width) * u64::from(height)
         {
             *rect = whole;
         }
     }
-    if let Some(last) = steps.iter().rposition(|(_, step)| *step == Step::Picture { rect: whole }) {
+    if let Some(last) = steps.iter().rposition(|(_, step)| *step == Step::Image { rect: whole }) {
         steps.drain(..last);
     }
     (steps, at)
@@ -1428,7 +1428,7 @@ fn start(ctx: &egui::Context, path: &str, size: [u32; 2], largest: usize, job: J
     // Should no thread start, the reading is done here instead.
     let work = Arc::new(Mutex::new(Some(work)));
     let spare = work.clone();
-    let started = std::thread::Builder::new().name(String::from("picture-reader")).spawn(move || {
+    let started = std::thread::Builder::new().name(String::from("image-reader")).spawn(move || {
         if let Some(work) = spare.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
             work();
         }
@@ -1456,7 +1456,7 @@ fn run(path: &str, size: [u32; 2], largest: usize, job: Job) -> Read {
             for (reached, step) in steps {
                 let rows = match step {
                     Step::Rows { file, rect } => read_rows(&file, width, height, rect),
-                    Step::Picture { rect } => read_patch(path, width, height, rect),
+                    Step::Image { rect } => read_patch(path, width, height, rect),
                 };
                 let Some(rows) = rows else {
                     break;
@@ -1489,7 +1489,7 @@ fn read_rows(file: &str, width: u32, height: u32, rect: [u32; 4]) -> Option<([us
 }
 
 /// Pixels stay square when zoomed in, and blend smoothly when zoomed out.
-fn picture_options() -> egui::TextureOptions {
+fn image_options() -> egui::TextureOptions {
     egui::TextureOptions {
         magnification: egui::TextureFilter::Nearest,
         minification: egui::TextureFilter::Linear,
@@ -1500,7 +1500,7 @@ fn picture_options() -> egui::TextureOptions {
 
 /// Reads the rows of `rect` from a whole raw RGBA file, with where they go
 /// in the texture and whether they are opaque. Rows as wide as most of the
-/// picture are read in one piece. None when the file is not whole.
+/// image are read in one piece. None when the file is not whole.
 fn read_patch(path: &str, width: u32, height: u32, rect: [u32; 4]) -> Option<([usize; 2], egui::ColorImage, bool)> {
     use std::io::{Read, Seek, SeekFrom};
     let (width, height) = (width as usize, height as usize);
@@ -1562,7 +1562,7 @@ fn read_raw(path: &str, width: u32, height: u32, largest: usize) -> Option<(egui
     Some((egui::ColorImage::from_rgba_unmultiplied([small_w, small_h], &small), opaque))
 }
 
-/// Squares under a picture's transparency, fixed to the picture's corner.
+/// Squares under an image's transparency, fixed to the image's corner.
 pub(crate) fn checker(ctx: &egui::Context, painter: &egui::Painter, area: Rect) {
     let id = egui::Id::new("raster-checker");
     let texture = match ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
@@ -1588,24 +1588,24 @@ pub(crate) fn checker(ctx: &egui::Context, painter: &egui::Painter, area: Rect) 
 mod tests {
     use super::*;
 
-    /// Draws the picture until no reading is under way for it, as frames
+    /// Draws the image until no reading is under way for it, as frames
     /// do while the reader works.
     fn caught_up(ctx: &egui::Context, path: &str, revision: u64, patches: &[(String, u64, RasterPatch)], making: bool) -> bool {
         for _ in 0..400 {
-            let shown = raw_picture(ctx, path, 8, 6, revision, patches, making).is_some();
+            let shown = raw_image(ctx, path, 8, 6, revision, patches, making).is_some();
             let reading = ctx.data_mut(|data| {
-                data.get_temp_mut_or_default::<HashMap<String, Entry>>(egui::Id::new("raster-pictures")).get(path).is_some_and(|entry| entry.reading.is_some())
+                data.get_temp_mut_or_default::<HashMap<String, Entry>>(egui::Id::new("raster-images")).get(path).is_some_and(|entry| entry.reading.is_some())
             });
             if !reading {
                 return shown;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("the picture was never read");
+        panic!("the image was never read");
     }
 
-    /// Catches a change lost when two views come between frames, a picture
-    /// read whole for every change, and an older picture file shown as a
+    /// Catches a change lost when two views come between frames, an image
+    /// read whole for every change, and an older image file shown as a
     /// newer revision: two changes queued at once both reach the texture,
     /// in order, as partial updates; one that does not follow what the
     /// texture holds, while its change is still being made, is waited for.
@@ -1614,8 +1614,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("inpainter-raster-patches-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let picture = dir.join("1-1.rgba").display().to_string();
-        std::fs::write(&picture, [255u8; 8 * 6 * 4]).unwrap();
+        let image = dir.join("1-1.rgba").display().to_string();
+        std::fs::write(&image, [255u8; 8 * 6 * 4]).unwrap();
         let ctx = egui::Context::default();
         let deltas = |ctx: &egui::Context| -> Vec<egui::epaint::ImageDelta> {
             let mut delta = ctx.tex_manager().write().take_delta();
@@ -1623,17 +1623,17 @@ mod tests {
             delta.clear();
             set
         };
-        assert!(raw_picture(&ctx, &picture, 8, 6, 1, &[], false).is_some(), "a picture opened was not waited for");
-        assert!(deltas(&ctx).iter().any(|delta| delta.pos.is_none()), "the picture was not read");
+        assert!(raw_image(&ctx, &image, 8, 6, 1, &[], false).is_some(), "an image opened was not waited for");
+        assert!(deltas(&ctx).iter().any(|delta| delta.pos.is_none()), "the image was not read");
 
         let mut patches = Vec::new();
         for (revision, corner, colour) in [(2u64, [0u32, 0u32], [255u8, 0, 0, 255]), (3, [4, 4], [0, 0, 255, 255])] {
             let file = dir.join(format!("1-1-{revision}.patch"));
             std::fs::write(&file, colour.repeat(4)).unwrap();
             let patch = RasterPatch { since: revision - 1, rect: [corner[0], corner[1], 2, 2], file: Some(file.display().to_string()) };
-            patches.push((picture.clone(), revision, patch));
+            patches.push((image.clone(), revision, patch));
         }
-        assert!(caught_up(&ctx, &picture, 3, &patches, true));
+        assert!(caught_up(&ctx, &image, 3, &patches, true));
         let set = deltas(&ctx);
         let corners: Vec<Option<[usize; 2]>> = set.iter().map(|delta| delta.pos).collect();
         assert_eq!(corners, vec![Some([0, 0]), Some([4, 4])], "the changes did not reach the texture in order, as parts");
@@ -1641,47 +1641,47 @@ mod tests {
         assert_eq!(first.pixels[0], Color32::from_rgb(255, 0, 0));
 
         // The change made: the same revision, nothing more to read.
-        assert!(caught_up(&ctx, &picture, 3, &patches, false));
-        assert!(deltas(&ctx).is_empty(), "a picture already shown was read again");
+        assert!(caught_up(&ctx, &image, 3, &patches, false));
+        assert!(deltas(&ctx).is_empty(), "an image already shown was read again");
 
         // A change that does not follow what the texture holds, while it is
         // still being made, is waited for, not read from the older file.
         let file = dir.join("1-1-9.patch");
         std::fs::write(&file, [0u8; 16]).unwrap();
-        let stray = vec![(picture.clone(), 9, RasterPatch { since: 8, rect: [0, 0, 2, 2], file: Some(file.display().to_string()) })];
-        assert!(caught_up(&ctx, &picture, 9, &stray, true), "the picture shown was dropped");
-        assert!(deltas(&ctx).is_empty(), "an older picture file was read for a change still being made");
+        let stray = vec![(image.clone(), 9, RasterPatch { since: 8, rect: [0, 0, 2, 2], file: Some(file.display().to_string()) })];
+        assert!(caught_up(&ctx, &image, 9, &stray, true), "the image shown was dropped");
+        assert!(deltas(&ctx).is_empty(), "an older image file was read for a change still being made");
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Catches changes read from the picture file one by one: a run of them
+    /// Catches changes read from the image file one by one: a run of them
     /// is one read over the rows they cover, one that covers most of the
-    /// picture reads it whole with nothing before it, and rows written
+    /// image reads it whole with nothing before it, and rows written
     /// while a change is being made keep their place in the order.
     #[test]
-    fn changes_from_the_picture_file_are_read_as_one() {
-        let picture = |since: u64, rect: [u32; 4]| (String::from("p"), since + 1, RasterPatch { since, rect, file: None });
+    fn changes_from_the_image_file_are_read_as_one() {
+        let image = |since: u64, rect: [u32; 4]| (String::from("p"), since + 1, RasterPatch { since, rect, file: None });
         let rows = |since: u64, rect: [u32; 4]| (String::from("p"), since + 1, RasterPatch { since, rect, file: Some(format!("r{since}")) });
-        let full: Vec<_> = (1..=16).map(|since| picture(since, [0, 0, 100, 50])).collect();
-        assert_eq!(steps("p", [100, 50], 1, &full), (vec![(17, Step::Picture { rect: [0, 0, 100, 50] })], 17));
+        let full: Vec<_> = (1..=16).map(|since| image(since, [0, 0, 100, 50])).collect();
+        assert_eq!(steps("p", [100, 50], 1, &full), (vec![(17, Step::Image { rect: [0, 0, 100, 50] })], 17));
 
-        let small = [picture(1, [0, 0, 10, 10]), picture(2, [20, 5, 10, 10]), rows(3, [0, 0, 4, 4]), picture(4, [90, 40, 20, 20])];
+        let small = [image(1, [0, 0, 10, 10]), image(2, [20, 5, 10, 10]), rows(3, [0, 0, 4, 4]), image(4, [90, 40, 20, 20])];
         let expected = vec![
-            (3, Step::Picture { rect: [0, 0, 30, 15] }),
+            (3, Step::Image { rect: [0, 0, 30, 15] }),
             (4, Step::Rows { file: String::from("r3"), rect: [0, 0, 4, 4] }),
-            (5, Step::Picture { rect: [90, 40, 10, 10] }),
+            (5, Step::Image { rect: [90, 40, 10, 10] }),
         ];
         assert_eq!(steps("p", [100, 50], 1, &small), (expected, 5));
 
-        let most = [rows(1, [0, 0, 4, 4]), picture(2, [0, 0, 100, 30]), rows(3, [0, 0, 4, 4])];
-        let expected = vec![(3, Step::Picture { rect: [0, 0, 100, 50] }), (4, Step::Rows { file: String::from("r3"), rect: [0, 0, 4, 4] })];
+        let most = [rows(1, [0, 0, 4, 4]), image(2, [0, 0, 100, 30]), rows(3, [0, 0, 4, 4])];
+        let expected = vec![(3, Step::Image { rect: [0, 0, 100, 50] }), (4, Step::Rows { file: String::from("r3"), rect: [0, 0, 4, 4] })];
         assert_eq!(steps("p", [100, 50], 1, &most), (expected, 4));
     }
 
-    /// A crop drag keeps the box on the picture, whichever way it goes, and
+    /// A crop drag keeps the box on the image, whichever way it goes, and
     /// an edge crossed over the other swaps them instead of turning negative.
     #[test]
-    fn crop_drags_stay_on_the_picture() {
+    fn crop_drags_stay_on_the_image() {
         let size = [100.0, 50.0];
         assert_eq!(dragged_crop(Grab::New, [0.0; 4], [80.0, 40.0], [-20.0, 10.0], size), [0.0, 10.0, 80.0, 30.0]);
         assert_eq!(dragged_crop(Grab::Inside, [10.0, 10.0, 20.0, 20.0], [15.0, 15.0], [200.0, 15.0], size), [80.0, 10.0, 20.0, 20.0]);

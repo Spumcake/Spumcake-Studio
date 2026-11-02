@@ -422,10 +422,10 @@ fn failure(status: u16, text: &str) -> String {
     format!("The endpoint answered {status}: {detail}.")
 }
 
-/// How long one picture may take to make.
+/// How long one image may take to make.
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// One picture from a prompt: `POST {base}/images`, always at high quality,
+/// One image from a prompt: `POST {base}/images`, always at high quality,
 /// as PNG. Returns the PNG's bytes, or a sentence saying why not.
 pub fn make_image(base_url: &str, key: &str, model: &str, prompt: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
@@ -450,12 +450,12 @@ pub fn make_image(base_url: &str, key: &str, model: &str, prompt: &str) -> Resul
     let data = reply
         .pointer("/data/0/b64_json")
         .and_then(Value::as_str)
-        .ok_or_else(|| String::from("The endpoint's reply held no picture."))?;
+        .ok_or_else(|| String::from("The endpoint's reply held no image."))?;
     let png = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
-        .map_err(|_| String::from("The endpoint's picture could not be read."))?;
+        .map_err(|_| String::from("The endpoint's image could not be read."))?;
     if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Err(String::from("The endpoint's picture was not a PNG."));
+        return Err(String::from("The endpoint's image was not a PNG."));
     }
     Ok(png)
 }

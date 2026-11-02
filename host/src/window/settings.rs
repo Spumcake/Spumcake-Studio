@@ -25,7 +25,7 @@ impl HostWindow {
             .filter(|address| !address.trim().is_empty())
             .unwrap_or_else(|| OPENROUTER.to_string());
         let made = self.settings.first_start(&address);
-        // 0.9's first start: the skill that makes pictures, once.
+        // 0.9's first start: the skill that makes images, once.
         self.settings.add_image_skill();
         let Some(endpoint) = made else {
             return;
@@ -272,7 +272,7 @@ impl HostWindow {
         }
     }
 
-    /// A cell, from the conversation or a notebook, by id.
+    /// A cell, from the conversation or a recipe, by id.
     fn find_cell(&self, id: &str) -> Option<protocol::Cell> {
         if let Some(cell) = self.chat.conversation.iter().find_map(|entry| entry.cell.as_ref().filter(|cell| cell.id == id)) {
             return Some(cell.clone());
@@ -285,7 +285,7 @@ impl HostWindow {
     /// A level chosen from a cell's chevron: the cell runs on that level's
     /// model and effort, on the Discussion skill's endpoint, as the
     /// composer's level does. A conversation cell is the host's own and
-    /// takes it at once; a notebook cell's next run uses it, and its result
+    /// takes it at once; a recipe cell's next run uses it, and its result
     /// records it.
     pub(super) fn choose_cell_level(&mut self, id: &str, level: &str) {
         let Some(level) = self.settings.levels.iter().find(|known| known.id == level).cloned() else {
@@ -425,15 +425,15 @@ impl HostWindow {
             .settings
             .image_skill()
             .cloned()
-            .ok_or_else(|| String::from("No skill makes pictures. Add one in Settings, under Skills."))?;
+            .ok_or_else(|| String::from("No skill makes images. Add one in Settings, under Skills."))?;
         let keys = &mut self.keys;
         endpoints::skill_route(&self.settings, &skill, |id| keys.get(id))
     }
 
-    /// Keeps a run's picture in the project's `images` folder, one file per
+    /// Keeps a run's image in the project's `images` folder, one file per
     /// run, and names it relative to the project. With no project, as in a
     /// frame test with none, it goes to a scratch folder.
-    pub(super) fn keep_picture(&mut self, index: usize, png: Vec<u8>) {
+    pub(super) fn keep_image(&mut self, index: usize, png: Vec<u8>) {
         let Some(id) = self.board.runs.get(index).map(|run| run.id.clone()) else {
             return;
         };
@@ -442,14 +442,14 @@ impl HostWindow {
         let (folder, named) = match &self.project {
             Some(project) => (project.folder.join("images"), format!("images/{name}")),
             None => {
-                let folder = std::env::temp_dir().join("inpainter-pictures");
+                let folder = std::env::temp_dir().join("inpainter-images");
                 (folder.clone(), folder.join(&name).display().to_string())
             }
         };
         match std::fs::create_dir_all(&folder).and_then(|_| std::fs::write(folder.join(&name), &png)) {
-            Ok(()) => self.board.runs[index].picture = Some((named, png)),
+            Ok(()) => self.board.runs[index].image = Some((named, png)),
             // The run ends here, failed; the end that follows finds it gone.
-            Err(error) => self.finish_run(index, protocol::CellState::Failed, Some(format!("The picture could not be kept: {error}."))),
+            Err(error) => self.finish_run(index, protocol::CellState::Failed, Some(format!("The image could not be kept: {error}."))),
         }
     }
 

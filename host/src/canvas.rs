@@ -17,7 +17,7 @@ use eframe::egui::{
 use kurbo::{Affine, Vec2};
 
 const NOTCH_POINTS: f64 = 50.0;
-/// A hair darker than the white toolbar and active tab, as in the picture.
+/// A hair darker than the white toolbar and active tab, as in the mockup.
 pub(crate) const CANVAS: Color32 = Color32::from_rgb(251, 251, 252);
 
 /// The drawing surface's state between frames.
@@ -204,7 +204,7 @@ impl Surface {
     }
 
     /// `hovered` is egui's answer to whether the canvas itself is under the
-    /// pointer. The sketch menu and the keep-this-sketch dialog float over the
+    /// pointer. The drawing menu and the keep-this-drawing dialog float over the
     /// canvas rectangle, and a press on them must not start a stroke beneath.
     /// `dismissing` means a menu was open when this frame began: the press
     /// that closes it does nothing else.
@@ -1535,7 +1535,7 @@ fn document_to_screen(rect: Rect, origin: [f64; 2], zoom: f64, point: [f64; 2]) 
 }
 
 pub(crate) fn paint_grid(painter: &egui::Painter, rect: Rect, origin: [f64; 2], zoom: f64) {
-    // As faint as the picture's grid: a guide, not a feature of the drawing.
+    // As faint as the mockup's grid: a guide, not a feature of the drawing.
     let stroke = Stroke::new(1.0, Color32::from_rgb(234, 235, 238));
     let top_left = screen_to_document(rect, origin, zoom, rect.min);
     let bottom_right = screen_to_document(rect, origin, zoom, rect.max);

@@ -460,19 +460,19 @@ fn an_image_result_becomes_an_image_part() {
     let chats = stand_in.chats();
     let messages = chats[1]["messages"].as_array().expect("messages");
     let tool_at = messages.iter().position(|m| m["role"] == "tool").expect("tool");
-    let pictures = &messages[tool_at + 1];
-    assert_eq!(pictures["role"], "user");
-    let parts = pictures["content"].as_array().expect("parts");
+    let image_message = &messages[tool_at + 1];
+    assert_eq!(image_message["role"], "user");
+    let parts = image_message["content"].as_array().expect("parts");
     let image = parts.iter().find(|part| part["type"] == "image_url").expect("image part");
     assert_eq!(image["image_url"]["url"], "data:image/png;base64,iVBORw0KGgo=");
     assert!(!messages[tool_at]["content"].as_str().expect("text").contains("iVBORw0KGgo"));
 }
 
-/// Catches a conversation that carries every earlier read and picture into
-/// every later turn: the next request sees earlier tool outputs and pictures
+/// Catches a conversation that carries every earlier read and image into
+/// every later turn: the next request sees earlier tool outputs and images
 /// only as stubs, and still sees what was said.
 #[test]
-fn earlier_tool_outputs_and_pictures_are_cut_from_later_requests() {
+fn earlier_tool_outputs_and_images_are_cut_from_later_requests() {
     let stand_in = StandIn::start(|index, _| match index {
         0 => calls_reply(&[("fixture-notes__reading__look", json!({"tab": "n1", "text": "all"}))]),
         1 => text_reply("I see it."),
@@ -486,7 +486,7 @@ fn earlier_tool_outputs_and_pictures_are_cut_from_later_requests() {
     let chats = stand_in.chats();
     let later = chats[2].to_string();
     assert!(!later.contains("secret_detail"), "an earlier output was resent: {later}");
-    assert!(!later.contains("iVBORw0KGgo"), "an earlier picture was resent");
+    assert!(!later.contains("iVBORw0KGgo"), "an earlier image was resent");
     assert!(later.contains("I see it."), "the earlier reply was lost");
     assert!(later.contains("fixture-notes__reading__look"), "the earlier call was lost");
 }
@@ -796,7 +796,7 @@ fn attachments_go_to_the_model_as_parts() {
     let mut sent = request("use these", targets());
     sent.attachments = vec![
         Attachment::Image {
-            path: "/pictures/guide.png".into(),
+            path: "/images/guide.png".into(),
             mime: String::from("image/png"),
             data: vec![1, 2, 3],
         },
@@ -807,7 +807,7 @@ fn attachments_go_to_the_model_as_parts() {
     ];
     assistant.send(Command::Send(sent));
     let events = drive(&assistant, |_, _| {});
-    assert_eq!(entries(&events)[0].attachments, ["/pictures/guide.png", "/words/brief.md"]);
+    assert_eq!(entries(&events)[0].attachments, ["/images/guide.png", "/words/brief.md"]);
     let chats = stand_in.chats();
     let parts = chats[0]["messages"][1]["content"].as_array().expect("parts").clone();
     assert_eq!(parts[2]["image_url"]["url"], "data:image/png;base64,AQID");
@@ -861,10 +861,10 @@ fn the_model_list_keeps_only_models_that_use_tools() {
 #[test]
 fn the_source_names_no_application_or_work() {
     let words = [
-        "simple sketch",
-        "simple-sketch",
-        "simple_sketch",
-        "sketch",
+        "storyboard generator",
+        "storyboard-generator",
+        "storyboard_generator",
+        "storyboard",
         "template",
         "canvas",
         "stroke",

@@ -1921,7 +1921,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "image-editor"
+name = "image-generator"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
@@ -2245,15 +2245,6 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
-]
-
-[[package]]
-name = "mission-control"
-version = "0.1.0"
-dependencies = [
- "protocol",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3197,6 +3188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "recipe-creation"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3586,35 +3586,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "simple-sketch"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "directories",
- "draw",
- "egui",
- "iconflow",
- "kurbo",
- "protocol",
- "serde_json",
- "tiny-skia",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
-
-[[package]]
-name = "sketch-client"
-version = "0.1.0"
-dependencies = [
- "draw",
- "protocol",
- "serde_json",
- "simple-sketch",
-]
 
 [[package]]
 name = "skrifa"
@@ -3739,6 +3714,31 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "storyboard-client"
+version = "0.1.0"
+dependencies = [
+ "draw",
+ "protocol",
+ "serde_json",
+ "storyboard-generator",
+]
+
+[[package]]
+name = "storyboard-generator"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "directories",
+ "draw",
+ "egui",
+ "iconflow",
+ "kurbo",
+ "protocol",
+ "serde_json",
+ "tiny-skia",
+]
 
 [[package]]
 name = "strict-num"

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// and parts this build does not show stay in `input` and `output`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
-    /// Unique everywhere, so a later version can name any cell in any book.
+    /// Unique everywhere, so a later version can name any cell in any recipe.
     pub id: String,
     /// When the cell was dragged in, the id of the cell it was copied from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,7 +73,7 @@ pub struct CellVersion {
 
 /// The kind of a cell that sends its prompt to a language model.
 pub const TEXT_KIND: &str = "text";
-/// The kind of a cell that makes a picture from its prompt.
+/// The kind of a cell that makes a image from its prompt.
 pub const IMAGE_KIND: &str = "image";
 /// The kind of a cell of Markdown, which runs by showing its source as rich
 /// text, calls nothing, and has no versions.
@@ -86,7 +86,7 @@ pub enum CellPart {
     Text { text: String },
     Path { path: String, media_type: String },
     /// A part of a shape a later version adds. It is kept as it was, so a
-    /// cells message or a book holding one never fails to read.
+    /// cells message or a recipe holding one never fails to read.
     Other(serde_json::Value),
 }
 

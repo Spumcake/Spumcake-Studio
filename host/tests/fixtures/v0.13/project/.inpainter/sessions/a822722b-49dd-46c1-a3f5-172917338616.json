@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "id": "a822722b-49dd-46c1-a3f5-172917338616",
+  "name": "Untitled Session",
+  "created_at": 1793577751,
+  "updated_at": 1793577765,
+  "tabs": [
+    {
+      "app": "simple-sketch",
+      "path": "Untitled 1.smx",
+      "label": "Untitled 1",
+      "camera": {
+        "origin": [
+          -540.0,
+          -357.0
+        ],
+        "zoom": 1.0
+      }
+    },
+    {
+      "app": "image-editor",
+      "label": "Untitled Asset"
+    },
+    {
+      "app": "mission-control",
+      "path": "pitch.smx",
+      "label": "pitch"
+    },
+    {
+      "app": "template",
+      "label": "Template"
+    }
+  ],
+  "selected": 0,
+  "workspace_open": true,
+  "conversation": [
+    {
+      "role": "person",
+      "text": "Draw a tower.",
+      "time": 1793146000
+    },
+    {
+      "role": "tool",
+      "text": "",
+      "time": 1793146002,
+      "tool": "simple-sketch__draw__add_shape",
+      "ok": true
+    },
+    {
+      "role": "assistant",
+      "text": "The tower is on the canvas.",
+      "time": 1793146003
+    }
+  ]
+}

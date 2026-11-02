@@ -69,9 +69,9 @@ fn slate_program(dir: &Path) -> std::path::PathBuf {
 
 fn apps() -> Vec<super::super::AppSpec> {
     vec![
-        spec("simple-sketch", "Simple Sketch", &built("simple-sketch")),
+        spec("storyboard-generator", "Storyboard Generator", &built("storyboard-generator")),
         spec("template", "Template", &built("template")),
-        spec("mission-control", "Mission Control", &built("mission-control")),
+        spec("recipe-creation", "Recipe Creation", &built("recipe-creation")),
     ]
 }
 
@@ -91,19 +91,19 @@ fn command(window: &mut Window, app_id: &str, id: &str) {
     window.step();
 }
 
-pub(super) fn book_cells(app: &crate::window::HostWindow) -> Vec<protocol::Cell> {
+pub(super) fn recipe_cells(app: &crate::window::HostWindow) -> Vec<protocol::Cell> {
     app.apps
         .iter()
-        .find(|started| started.id == "mission-control")
+        .find(|started| started.id == "recipe-creation")
         .and_then(|started| started.running.declared.cells.values().next())
         .map(|(cells, _)| cells.clone())
         .unwrap_or_default()
 }
 
-fn book_selected(app: &crate::window::HostWindow) -> Option<String> {
+fn recipe_selected(app: &crate::window::HostWindow) -> Option<String> {
     app.apps
         .iter()
-        .find(|started| started.id == "mission-control")
+        .find(|started| started.id == "recipe-creation")
         .and_then(|started| started.running.declared.cells.values().next())
         .and_then(|(_, selected)| selected.clone())
 }
@@ -306,19 +306,19 @@ fn a_cells_result_shows_while_the_model_is_still_writing() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// C-3. Mission Control's book, through its own commands.
+/// C-3. Recipe Creation's recipe, through its own commands.
 #[test]
-fn a_mission_book_adds_runs_and_undoes_a_cell() {
-    let dir = scratch("book");
+fn a_recipe_adds_runs_and_undoes_a_cell() {
+    let dir = scratch("recipe");
     let stand_in = StandIn::start(vec![text_reply(PIECE)]);
     let mut window = project_window(apps(), &stand_in, &dir);
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
     let label = window
         .app
         .apps
         .iter()
-        .find(|started| started.id == "mission-control")
+        .find(|started| started.id == "recipe-creation")
         .unwrap()
         .running
         .tabs()
@@ -328,54 +328,54 @@ fn a_mission_book_adds_runs_and_undoes_a_cell() {
         .unwrap()
         .label
         .clone();
-    assert_eq!(label, "Untitled Notebook");
-    // A new notebook has one empty cell, active.
-    assert_eq!(book_cells(&window.app).len(), 1);
-    command(&mut window, "mission-control", "add_cell");
-    window.until(|app| book_cells(app).len() == 2);
-    command(&mut window, "mission-control", "undo");
-    window.until(|app| book_cells(app).len() == 1);
-    command(&mut window, "mission-control", "redo");
-    window.until(|app| book_cells(app).len() == 2);
-    let id = book_cells(&window.app)[1].id.clone();
+    assert_eq!(label, "Untitled Recipe");
+    // A new recipe has one empty cell, active.
+    assert_eq!(recipe_cells(&window.app).len(), 1);
+    command(&mut window, "recipe-creation", "add_cell");
+    window.until(|app| recipe_cells(app).len() == 2);
+    command(&mut window, "recipe-creation", "undo");
+    window.until(|app| recipe_cells(app).len() == 1);
+    command(&mut window, "recipe-creation", "redo");
+    window.until(|app| recipe_cells(app).len() == 2);
+    let id = recipe_cells(&window.app)[1].id.clone();
     type_prompt(&mut window, &id, "A keeper at the lamp.");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
-    command(&mut window, "mission-control", "undo");
-    window.until(|app| book_cells(app)[1].prompt().is_empty());
-    command(&mut window, "mission-control", "redo");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
-    command(&mut window, "mission-control", "run");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.state == CellState::Done));
-    let ran = book_cells(&window.app);
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
+    command(&mut window, "recipe-creation", "undo");
+    window.until(|app| recipe_cells(app)[1].prompt().is_empty());
+    command(&mut window, "recipe-creation", "redo");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
+    command(&mut window, "recipe-creation", "run");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.state == CellState::Done));
+    let ran = recipe_cells(&window.app);
     assert_eq!(ran[1].prompt(), "A keeper at the lamp.");
     assert_eq!(ran[1].model.as_deref(), Some("stand-in/model"));
     assert_eq!(ran[1].versions.len(), 1, "the run made no version");
     assert_eq!(ran[1].versions[0].input, ran[1].input, "the version does not hold the prompt that ran");
     // Undo takes back the edit, never the run: the result stays.
-    command(&mut window, "mission-control", "undo");
-    window.until(|app| book_cells(app)[1].prompt().is_empty());
-    assert_eq!(book_cells(&window.app)[1].versions.len(), 1, "undo removed a run");
-    assert_eq!(book_cells(&window.app)[1].result_text(), PIECE);
-    command(&mut window, "mission-control", "redo");
-    window.until(|app| book_cells(app)[1].prompt() == "A keeper at the lamp.");
-    command(&mut window, "mission-control", "delete_cell");
-    window.until(|app| book_cells(app).len() == 1);
-    command(&mut window, "mission-control", "undo");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.versions.len() == 1));
-    command(&mut window, "mission-control", "redo");
-    window.until(|app| book_cells(app).len() == 1);
-    command(&mut window, "mission-control", "new_book");
+    command(&mut window, "recipe-creation", "undo");
+    window.until(|app| recipe_cells(app)[1].prompt().is_empty());
+    assert_eq!(recipe_cells(&window.app)[1].versions.len(), 1, "undo removed a run");
+    assert_eq!(recipe_cells(&window.app)[1].result_text(), PIECE);
+    command(&mut window, "recipe-creation", "redo");
+    window.until(|app| recipe_cells(app)[1].prompt() == "A keeper at the lamp.");
+    command(&mut window, "recipe-creation", "delete_cell");
+    window.until(|app| recipe_cells(app).len() == 1);
+    command(&mut window, "recipe-creation", "undo");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.versions.len() == 1));
+    command(&mut window, "recipe-creation", "redo");
+    window.until(|app| recipe_cells(app).len() == 1);
+    command(&mut window, "recipe-creation", "new_recipe");
     window.until(|app| {
         app.apps.iter().any(|started| {
-            started.id == "mission-control" && started.running.tabs().0.len() == 2
+            started.id == "recipe-creation" && started.running.tabs().0.len() == 2
         })
     });
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// C-4. A conversation cell dragged onto a book is copied onto its end.
+/// C-4. A conversation cell dragged onto a recipe is copied onto its end.
 #[test]
-fn dragging_a_cell_onto_a_book_copies_it() {
+fn dragging_a_cell_onto_a_recipe_copies_it() {
     let dir = scratch("drag");
     let stand_in = StandIn::start(vec![
         call_reply(
@@ -395,10 +395,10 @@ fn dragging_a_cell_onto_a_book_copies_it() {
         })
     });
     let source = conversation_cell(&window.app);
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
     let from = window.app.board.card_rect.expect("the conversation cell was not drawn");
-    let onto = window.app.board.drop_rect.expect("the book was not drawn");
+    let onto = window.app.board.drop_rect.expect("the recipe was not drawn");
     let handle = Pos2::new(from.left() + 24.0, from.top() + 8.0);
     let drop = onto.center();
     window.events.push(egui::Event::PointerMoved(handle));
@@ -425,14 +425,14 @@ fn dragging_a_cell_onto_a_book_copies_it() {
             })
         })
     });
-    let copied = book_cells(&window.app).into_iter().find(|cell| cell.from.is_some()).unwrap();
+    let copied = recipe_cells(&window.app).into_iter().find(|cell| cell.from.is_some()).unwrap();
     assert_eq!(copied.prompt(), "Drag me.");
     assert_eq!(copied.result_text(), PIECE);
     assert_eq!(copied.model.as_deref(), Some("stand-in/model"));
     assert!(conversation_cell(&window.app).id == source.id);
     window.select("template");
     window.step();
-    let before = book_cells(&window.app).len();
+    let before = recipe_cells(&window.app).len();
     let from = window.app.board.card_rect.expect("the cell was not drawn");
     let handle = Pos2::new(from.left() + 24.0, from.top() + 8.0);
     let miss = Pos2::new(900.0, 400.0);
@@ -453,13 +453,13 @@ fn dragging_a_cell_onto_a_book_copies_it() {
     });
     window.step();
     window.step();
-    assert_eq!(book_cells(&window.app).len(), before, "a drop on a tab without cells changed the book");
+    assert_eq!(recipe_cells(&window.app).len(), before, "a drop on a tab without cells changed the recipe");
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// C-5 and C-6. The book's file, the project's folder, and the conversation's cell.
+/// C-5 and C-6. The recipe's file, the project's folder, and the conversation's cell.
 #[test]
-fn a_book_and_a_conversation_cell_come_back_with_the_project() {
+fn a_recipe_and_a_conversation_cell_come_back_with_the_project() {
     let dir = scratch("round");
     let stand_in = StandIn::start(vec![
         call_reply(
@@ -480,24 +480,24 @@ fn a_book_and_a_conversation_cell_come_back_with_the_project() {
         app.chat.conversation.iter().any(|entry| entry.cell.as_ref().is_some_and(|cell| cell.state == CellState::Done))
             && !app.chat.working
     });
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
-    let cell = book_cells(&window.app)[0].id.clone();
-    type_prompt(&mut window, &cell, "Saved from the book.");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.prompt() == "Saved from the book."));
-    command(&mut window, "mission-control", "run");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.result_text() == PIECE));
-    // The notebook writes itself into the project, with no dialog.
-    let book = files.join("Untitled Notebook.smx");
+    let cell = recipe_cells(&window.app)[0].id.clone();
+    type_prompt(&mut window, &cell, "Saved from the recipe.");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.prompt() == "Saved from the recipe."));
+    command(&mut window, "recipe-creation", "run");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.result_text() == PIECE));
+    // The recipe writes itself into the project, with no dialog.
+    let recipe = files.join("Untitled Recipe.smx");
     window.until(|app| {
         app.apps.iter().any(|started| {
-            started.id == "mission-control"
-                && started.running.tabs().0.iter().any(|tab| tab.path.as_deref() == Some(book.to_str().unwrap()))
+            started.id == "recipe-creation"
+                && started.running.tabs().0.iter().any(|tab| tab.path.as_deref() == Some(recipe.to_str().unwrap()))
         })
     });
-    window.until(|_| std::fs::read_to_string(&book).is_ok_and(|saved| saved.contains(PIECE)));
-    let saved = std::fs::read_to_string(&book).unwrap();
-    assert!(saved.contains("Saved from the book."));
+    window.until(|_| std::fs::read_to_string(&recipe).is_ok_and(|saved| saved.contains(PIECE)));
+    let saved = std::fs::read_to_string(&recipe).unwrap();
+    assert!(saved.contains("Saved from the recipe."));
     assert!(saved.contains(PIECE));
     keep_ticking(&mut window);
     let project = crate::workspace::SessionFile::read(&files, &session).unwrap();
@@ -531,9 +531,9 @@ fn a_book_and_a_conversation_cell_come_back_with_the_project() {
                 entry.cell.as_ref().is_some_and(|cell| cell.prompt() == "Remember this." && cell.result_text() == PIECE)
             })
             && app.apps.iter().any(|started| {
-                started.id == "mission-control"
+                started.id == "recipe-creation"
                     && started.running.declared.cells.values().any(|(cells, _)| {
-                        cells.iter().any(|cell| cell.prompt() == "Saved from the book." && cell.result_text() == PIECE)
+                        cells.iter().any(|cell| cell.prompt() == "Saved from the recipe." && cell.result_text() == PIECE)
                     })
             })
     });
@@ -551,40 +551,40 @@ fn a_book_and_a_conversation_cell_come_back_with_the_project() {
         app.chat.conversation.iter().any(|entry| {
             entry.cell.as_ref().is_some_and(|cell| cell.prompt() == "Remember this." && cell.result_text() == PIECE)
         }) && app.apps.iter().any(|started| {
-            started.id == "mission-control"
-                && started.running.tabs().0.iter().any(|tab| tab.path.as_deref() == Some(book.to_str().unwrap()))
+            started.id == "recipe-creation"
+                && started.running.tabs().0.iter().any(|tab| tab.path.as_deref() == Some(recipe.to_str().unwrap()))
                 && started.running.declared.cells.values().any(|(cells, _)| {
-                    cells.iter().any(|cell| cell.prompt() == "Saved from the book." && cell.result_text() == PIECE)
+                    cells.iter().any(|cell| cell.prompt() == "Saved from the recipe." && cell.result_text() == PIECE)
                 })
         })
     });
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// S-4. Closing a changed notebook in a project writes it there and asks
+/// S-4. Closing a changed recipe in a project writes it there and asks
 /// nothing.
 #[test]
-fn closing_a_changed_book_writes_it_and_asks_nothing() {
-    let dir = scratch("close-book");
+fn closing_a_changed_recipe_writes_it_and_asks_nothing() {
+    let dir = scratch("close-recipe");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(apps(), &stand_in, &dir);
     let folder = window.here().1;
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
-    command(&mut window, "mission-control", "add_cell");
-    window.until(|app| book_cells(app).len() == 2);
-    command(&mut window, "mission-control", "close_tab");
-    let book = folder.join("Untitled Notebook.smx");
-    window.until(|_| book.is_file());
+    command(&mut window, "recipe-creation", "add_cell");
+    window.until(|app| recipe_cells(app).len() == 2);
+    command(&mut window, "recipe-creation", "close_tab");
+    let recipe = folder.join("Untitled Recipe.smx");
+    window.until(|_| recipe.is_file());
     keep_ticking(&mut window);
     assert!(window.app.apps.iter().all(|started| started.running.declared.ask.is_none()), "closing asked");
-    let read = mission_control_cells(&book);
-    assert_eq!(read, 2, "the closed notebook lost its cells");
+    let read = recipe_creation_cells(&recipe);
+    assert_eq!(read, 2, "the closed recipe lost its cells");
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The cells a notebook file holds.
-fn mission_control_cells(path: &std::path::Path) -> usize {
+/// The cells a recipe file holds.
+fn recipe_creation_cells(path: &std::path::Path) -> usize {
     let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     value["cells"].as_array().map_or(0, Vec::len)
 }
@@ -694,52 +694,52 @@ fn the_application_that_claims_a_file_opens_it() {
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(
         vec![
-            spec("simple-sketch", "Simple Sketch", &built("simple-sketch")),
-            spec("mission-control", "Mission Control", &built("mission-control")),
+            spec("storyboard-generator", "Storyboard Generator", &built("storyboard-generator")),
+            spec("recipe-creation", "Recipe Creation", &built("recipe-creation")),
             spec("slate", "Slate", &program),
         ],
         &stand_in,
         &dir,
     );
     let files = window.here().1;
-    let sketch = super::save_tab(&mut window, 0);
-    let book = files.join("story.smx");
+    let storyboard = super::save_tab(&mut window, 0);
+    let recipe = files.join("story.smx");
     std::fs::write(
-        &book,
-        r#"{"version":1,"cells":[{"id":"kept","kind":"text","input":[{"text":"From the book."}],"state":"idle"}]}"#,
+        &recipe,
+        r#"{"version":1,"cells":[{"id":"kept","kind":"text","input":[{"text":"From the recipe."}],"state":"idle"}]}"#,
     )
     .unwrap();
     let slate = files.join("board.smx");
     std::fs::write(&slate, "SLATE board").unwrap();
 
-    window.select("simple-sketch");
-    command(&mut window, "simple-sketch", "open");
+    window.select("storyboard-generator");
+    command(&mut window, "storyboard-generator", "open");
     window.until(|app| app.apps.iter().any(|started| !started.running.declared.files.is_empty()));
-    window.answer_saves(&book);
-    // Mission Control now has two tabs: the new notebook, and the one opened.
+    window.answer_saves(&recipe);
+    // Recipe Creation now has two tabs: the new recipe, and the one opened.
     window.until(|app| {
         app.apps.iter().any(|started| {
-            started.id == "mission-control"
-                && started.running.declared.cells.values().any(|(cells, _)| cells.iter().any(|cell| cell.prompt() == "From the book."))
+            started.id == "recipe-creation"
+                && started.running.declared.cells.values().any(|(cells, _)| cells.iter().any(|cell| cell.prompt() == "From the recipe."))
         })
     });
-    assert!(window.app.apps.iter().find(|started| started.id == "simple-sketch").unwrap().running.tabs().0.iter().all(|tab| {
-        tab.path.as_deref() != Some(book.to_str().unwrap())
+    assert!(window.app.apps.iter().find(|started| started.id == "storyboard-generator").unwrap().running.tabs().0.iter().all(|tab| {
+        tab.path.as_deref() != Some(recipe.to_str().unwrap())
     }));
 
-    window.select("mission-control");
-    command(&mut window, "mission-control", "open");
-    window.until(|app| app.apps.iter().any(|started| started.id == "mission-control" && !started.running.declared.files.is_empty()));
-    window.answer_saves(&sketch);
+    window.select("recipe-creation");
+    command(&mut window, "recipe-creation", "open");
+    window.until(|app| app.apps.iter().any(|started| started.id == "recipe-creation" && !started.running.declared.files.is_empty()));
+    window.answer_saves(&storyboard);
     window.until(|app| {
         app.apps.iter().any(|started| {
-            started.id == "simple-sketch" && started.running.tabs().0.iter().any(|tab| tab.path.as_deref() == Some(sketch.to_str().unwrap()))
+            started.id == "storyboard-generator" && started.running.tabs().0.iter().any(|tab| tab.path.as_deref() == Some(storyboard.to_str().unwrap()))
         })
     });
 
-    window.select("simple-sketch");
-    command(&mut window, "simple-sketch", "open");
-    window.until(|app| app.apps.iter().any(|started| started.id == "simple-sketch" && !started.running.declared.files.is_empty()));
+    window.select("storyboard-generator");
+    command(&mut window, "storyboard-generator", "open");
+    window.until(|app| app.apps.iter().any(|started| started.id == "storyboard-generator" && !started.running.declared.files.is_empty()));
     window.answer_saves(&slate);
     window.until(|app| {
         app.apps.iter().any(|started| {
@@ -839,10 +839,10 @@ fn card_of(window: &Window, id: &str) -> egui::Rect {
     window.app.board.cards.iter().find(|(cell, _)| cell == id).map(|(_, card)| *card).expect("the cell was not drawn")
 }
 
-fn notebook(window: &mut Window) {
-    window.select("mission-control");
+fn recipe(window: &mut Window) {
+    window.select("recipe-creation");
     show_workspace(window);
-    window.app.notebook_focus = true;
+    window.app.recipe_focus = true;
     window.step();
 }
 
@@ -853,20 +853,20 @@ fn a_version_holds_the_prompt_that_ran() {
     let dir = scratch("ran");
     let stand_in = StandIn::start(vec![text_reply(PIECE)]);
     let mut window = project_window(apps(), &stand_in, &dir);
-    notebook(&mut window);
-    let id = book_cells(&window.app)[0].id.clone();
+    recipe(&mut window);
+    let id = recipe_cells(&window.app)[0].id.clone();
     type_prompt(&mut window, &id, "What ran.");
-    window.until(|app| book_cells(app)[0].prompt() == "What ran.");
+    window.until(|app| recipe_cells(app)[0].prompt() == "What ran.");
     stand_in.hold();
-    command(&mut window, "mission-control", "run");
+    command(&mut window, "recipe-creation", "run");
     window.until(|app| app.board.runs.iter().any(|run| !run.settled && !run.text.is_empty()));
-    // The first part shows in the notebook's card while the run goes on.
+    // The first part shows in the recipe's card while the run goes on.
     assert!(window.app.board.running(&id).is_some_and(|run| run.text != PIECE));
     type_prompt(&mut window, &id, " Edited meanwhile.");
-    window.until(|app| book_cells(app)[0].prompt().ends_with("Edited meanwhile."));
+    window.until(|app| recipe_cells(app)[0].prompt().ends_with("Edited meanwhile."));
     stand_in.release();
-    window.until(|app| book_cells(app)[0].versions.len() == 1);
-    let cell = &book_cells(&window.app)[0];
+    window.until(|app| recipe_cells(app)[0].versions.len() == 1);
+    let cell = &recipe_cells(&window.app)[0];
     assert_eq!(cell.versions[0].input, vec![protocol::CellPart::Text { text: "What ran.".into() }]);
     assert!(cell.prompt().ends_with("Edited meanwhile."), "the edit was lost");
     let _ = std::fs::remove_dir_all(dir);
@@ -876,37 +876,37 @@ fn a_version_holds_the_prompt_that_ran() {
 /// version, and Enter shows its source; Shift+Enter at the last cell adds
 /// one; Up and Down change the active cell; D D deletes.
 #[test]
-fn notebook_keys_and_the_markdown_swap() {
+fn recipe_keys_and_the_markdown_swap() {
     let dir = scratch("keys");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(apps(), &stand_in, &dir);
-    notebook(&mut window);
-    command(&mut window, "mission-control", "kind_markdown");
-    command(&mut window, "mission-control", "add_cell");
-    window.until(|app| book_cells(app).len() == 2);
-    let notes = book_cells(&window.app)[1].id.clone();
+    recipe(&mut window);
+    command(&mut window, "recipe-creation", "kind_markdown");
+    command(&mut window, "recipe-creation", "add_cell");
+    window.until(|app| recipe_cells(app).len() == 2);
+    let notes = recipe_cells(&window.app)[1].id.clone();
     type_prompt(&mut window, &notes, "# The Last Signal");
-    window.until(|app| book_cells(app)[1].prompt() == "# The Last Signal");
-    window.app.notebook_focus = true;
+    window.until(|app| recipe_cells(app)[1].prompt() == "# The Last Signal");
+    window.app.recipe_focus = true;
     key(&mut window, egui::Key::Enter, egui::Modifiers::COMMAND);
-    window.until(|app| book_cells(app)[1].state == CellState::Done);
-    assert!(book_cells(&window.app)[1].versions.is_empty(), "rendering made a version");
+    window.until(|app| recipe_cells(app)[1].state == CellState::Done);
+    assert!(recipe_cells(&window.app)[1].versions.is_empty(), "rendering made a version");
     assert!(stand_in.requests().is_empty(), "a Markdown cell called a model");
     window.step();
     assert!(window.texts.iter().any(|(text, _)| text == "The Last Signal"), "the cell is not rendered");
     key(&mut window, egui::Key::Enter, egui::Modifiers::NONE);
-    window.until(|app| book_cells(app)[1].state == CellState::Idle);
+    window.until(|app| recipe_cells(app)[1].state == CellState::Idle);
 
     // Shift+Enter on the last cell runs it and adds a cell after it.
-    window.app.notebook_focus = true;
+    window.app.recipe_focus = true;
     key(&mut window, egui::Key::Escape, egui::Modifiers::NONE);
     key(&mut window, egui::Key::Enter, egui::Modifiers::SHIFT);
-    window.until(|app| book_cells(app).len() == 3);
-    let added = book_cells(&window.app)[2].id.clone();
+    window.until(|app| recipe_cells(app).len() == 3);
+    let added = recipe_cells(&window.app)[2].id.clone();
     window.until(|app| selected_cell(app).as_deref() == Some(added.as_str()));
 
     // Up makes the cell above active; D D deletes it.
-    window.app.notebook_focus = true;
+    window.app.recipe_focus = true;
     key(&mut window, egui::Key::ArrowUp, egui::Modifiers::NONE);
     window.until(|app| selected_cell(app).as_deref() == Some(notes.as_str()));
     // One D alone deletes nothing.
@@ -915,21 +915,21 @@ fn notebook_keys_and_the_markdown_swap() {
         window.step();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert_eq!(book_cells(&window.app).len(), 3, "a single D deleted a cell");
+    assert_eq!(recipe_cells(&window.app).len(), 3, "a single D deleted a cell");
     key(&mut window, egui::Key::D, egui::Modifiers::NONE);
-    window.until(|app| book_cells(app).len() == 2 && book_cells(app).iter().all(|cell| cell.id != notes));
+    window.until(|app| recipe_cells(app).len() == 2 && recipe_cells(app).iter().all(|cell| cell.id != notes));
     for _ in 0..20 {
         window.step();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert_eq!(book_cells(&window.app).len(), 2, "D D deleted more than one cell");
+    assert_eq!(recipe_cells(&window.app).len(), 2, "D D deleted more than one cell");
     let _ = std::fs::remove_dir_all(dir);
 }
 
 fn selected_cell(app: &crate::window::HostWindow) -> Option<String> {
     app.apps
         .iter()
-        .find(|started| started.id == "mission-control")
+        .find(|started| started.id == "recipe-creation")
         .and_then(|started| started.running.declared.cells.values().next())
         .and_then(|(_, selected)| selected.clone())
 }
@@ -941,15 +941,15 @@ fn the_cell_menu_switches_versions() {
     let dir = scratch("menu");
     let stand_in = StandIn::start(vec![text_reply("One."), text_reply("Two.")]);
     let mut window = project_window(apps(), &stand_in, &dir);
-    notebook(&mut window);
-    let id = book_cells(&window.app)[0].id.clone();
+    recipe(&mut window);
+    let id = recipe_cells(&window.app)[0].id.clone();
     type_prompt(&mut window, &id, "First prompt.");
-    command(&mut window, "mission-control", "run");
-    window.until(|app| book_cells(app)[0].versions.len() == 1);
+    command(&mut window, "recipe-creation", "run");
+    window.until(|app| recipe_cells(app)[0].versions.len() == 1);
     type_prompt(&mut window, &id, " Second.");
-    window.until(|app| book_cells(app)[0].prompt().ends_with("Second."));
-    command(&mut window, "mission-control", "run");
-    window.until(|app| book_cells(app)[0].versions.len() == 2 && book_cells(app)[0].result_text() == "Two.");
+    window.until(|app| recipe_cells(app)[0].prompt().ends_with("Second."));
+    command(&mut window, "recipe-creation", "run");
+    window.until(|app| recipe_cells(app)[0].versions.len() == 2 && recipe_cells(app)[0].result_text() == "Two.");
     window.step();
     let more = crate::cells::more_button(card_of(&window, &id)).center();
     click(&mut window, more);
@@ -957,8 +957,8 @@ fn the_cell_menu_switches_versions() {
     let (_, count) = window.texts.iter().find(|(text, _)| text == "2/2").cloned().expect("the menu shows no 2/2");
     // Back is the icon just left of the count.
     click(&mut window, Pos2::new(count.left() - crate::toolbar::BUTTON_W / 2.0 - 4.0, count.center().y));
-    window.until(|app| book_cells(app)[0].current == Some(0));
-    let cell = &book_cells(&window.app)[0];
+    window.until(|app| recipe_cells(app)[0].current == Some(0));
+    let cell = &recipe_cells(&window.app)[0];
     assert_eq!((cell.prompt().as_str(), cell.result_text().as_str()), ("First prompt.", "One."));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1032,7 +1032,7 @@ fn open_menu(window: &mut Window, id: &str) {
 }
 
 #[test]
-fn any_application_that_keeps_cells_gets_the_notebook() {
+fn any_application_that_keeps_cells_gets_the_recipe() {
     for ignore in [false, true] {
         let dir = scratch(if ignore { "pad-deaf" } else { "pad" });
         let program = pad_program(&dir, ignore);
@@ -1063,7 +1063,7 @@ fn any_application_that_keeps_cells_gets_the_notebook() {
         click(&mut window, at);
         window.until(|app| pad_cells(app).first().is_some_and(|cell| cell.id == "pad-md"));
         // A click makes the rendered Markdown cell active and gives the
-        // notebook the keyboard; Enter shows its source.
+        // recipe the keyboard; Enter shows its source.
         window.step();
         let md = card_of(&window, "pad-md").center();
         click(&mut window, md);
@@ -1080,49 +1080,49 @@ fn any_application_that_keeps_cells_gets_the_notebook() {
 }
 
 /// N-3. A click on the active cell shows its border. A click away from it,
-/// in the notebook's empty space or outside the notebook, takes the border
+/// in the recipe's empty space or outside the recipe, takes the border
 /// away and the bar stays. A new active cell shows the border again.
 #[test]
 fn the_border_goes_on_a_click_away_and_the_bar_stays() {
     let dir = scratch("border");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(apps(), &stand_in, &dir);
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
     window.step();
-    let id = book_cells(&window.app)[0].id.clone();
+    let id = recipe_cells(&window.app)[0].id.clone();
     let card = card_of(&window, &id);
     click(&mut window, card.center());
     window.step();
     assert_eq!(window.app.board.bordered.as_deref(), Some(id.as_str()), "a click on the cell did not show its border");
     click(&mut window, Pos2::new(120.0, 300.0));
     window.step();
-    assert_eq!(window.app.board.bordered, None, "a click outside the notebook left the border");
+    assert_eq!(window.app.board.bordered, None, "a click outside the recipe left the border");
     click(&mut window, card.center());
     window.step();
     assert_eq!(window.app.board.bordered.as_deref(), Some(id.as_str()), "a second click did not bring the border back");
-    // Empty space in the notebook, below the only cell: the notebook keeps
+    // Empty space in the recipe, below the only cell: the recipe keeps
     // the keyboard.
     click(&mut window, Pos2::new(card.center().x, card.bottom() + 120.0));
     window.step();
-    assert_eq!(window.app.board.bordered, None, "a click in the notebook's empty space left the border");
-    assert_eq!(book_selected(&window.app).as_deref(), Some(id.as_str()), "a click away changed the active cell");
+    assert_eq!(window.app.board.bordered, None, "a click in the recipe's empty space left the border");
+    assert_eq!(recipe_selected(&window.app).as_deref(), Some(id.as_str()), "a click away changed the active cell");
     // Adding a cell makes it active, and selected.
     key(&mut window, egui::Key::B, egui::Modifiers::NONE);
-    window.until(|app| book_cells(app).len() == 2);
+    window.until(|app| recipe_cells(app).len() == 2);
     window.step();
-    let added = book_cells(&window.app)[1].id.clone();
+    let added = recipe_cells(&window.app)[1].id.clone();
     assert_eq!(window.app.board.bordered.as_deref(), Some(added.as_str()), "a new active cell has no border");
     let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Catches cells left on the old wiring: with the endpoint's address and
-/// key changed in Settings, a notebook cell reaches the new address with
+/// key changed in Settings, a recipe cell reaches the new address with
 /// the new key, and the level's model and effort. Nothing comes from the
 /// environment.
 #[test]
-fn a_notebook_cell_runs_on_what_settings_say() {
-    let dir = scratch("book-settings");
+fn a_recipe_cell_runs_on_what_settings_say() {
+    let dir = scratch("recipe-settings");
     let stand_in = StandIn::start(Vec::new());
     let moved = StandIn::start(vec![text_reply(PIECE)]);
     let mut window = project_window(apps(), &stand_in, &dir);
@@ -1139,34 +1139,34 @@ fn a_notebook_cell_runs_on_what_settings_say() {
         },
         frame,
     );
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
-    let id = book_cells(&window.app)[0].id.clone();
+    let id = recipe_cells(&window.app)[0].id.clone();
     type_prompt(&mut window, &id, "A keeper at the lamp.");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
-    command(&mut window, "mission-control", "run");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.state == CellState::Done));
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
+    command(&mut window, "recipe-creation", "run");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.state == CellState::Done));
     assert!(stand_in.requests().is_empty(), "the cell went to the old address");
     let sent = moved.requests();
     assert_eq!(sent[0]["model"], "stand-in/model");
     assert_eq!(sent[0]["reasoning"]["effort"], "medium");
     assert_eq!(moved.keys()[0].as_deref(), Some("Bearer new-key"));
-    assert_eq!(book_cells(&window.app)[0].endpoint.as_deref(), Some(endpoint.id.as_str()));
+    assert_eq!(recipe_cells(&window.app)[0].endpoint.as_deref(), Some(endpoint.id.as_str()));
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Catches a notebook cell whose chevron does nothing: the level chosen
+/// Catches a recipe cell whose chevron does nothing: the level chosen
 /// there is what its run sends, and the run's version records it.
 #[test]
-fn a_notebook_cells_chevron_chooses_its_level() {
-    let dir = scratch("book-chevron");
+fn a_recipe_cells_chevron_chooses_its_level() {
+    let dir = scratch("recipe-chevron");
     let stand_in = StandIn::start(vec![text_reply(PIECE)]);
     let mut window = project_window(apps(), &stand_in, &dir);
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
-    let id = book_cells(&window.app)[0].id.clone();
+    let id = recipe_cells(&window.app)[0].id.clone();
     type_prompt(&mut window, &id, "A keeper at the lamp.");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.prompt() == "A keeper at the lamp."));
     let mut sonnet = window.app.settings.levels.iter().find(|level| level.name == "Sonnet High").unwrap().clone();
     sonnet.model = String::from("stand-in/other");
     window.app.settings.update(|settings| {
@@ -1175,67 +1175,67 @@ fn a_notebook_cells_chevron_chooses_its_level() {
         }
     });
     window.app.choose_cell_level(&id, &sonnet.id);
-    command(&mut window, "mission-control", "run");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.state == CellState::Done));
+    command(&mut window, "recipe-creation", "run");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.result_text() == PIECE && cell.state == CellState::Done));
     assert_eq!(stand_in.requests()[0]["model"], "stand-in/other");
     assert_eq!(stand_in.requests()[0]["reasoning"]["effort"], "high");
-    let ran = &book_cells(&window.app)[0];
+    let ran = &recipe_cells(&window.app)[0];
     assert_eq!((ran.model.as_deref(), ran.effort.as_deref()), (Some("stand-in/other"), Some("high")));
     assert!(window.app.board.chosen.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Adds an Image cell to the notebook shown, types `prompt`, and runs it
-/// until its picture is made. Returns the cell's id.
-pub(super) fn make_book_picture(window: &mut Window, prompt: &str) -> String {
+/// Adds an Image cell to the recipe shown, types `prompt`, and runs it
+/// until its image is made. Returns the cell's id.
+pub(super) fn make_recipe_image(window: &mut Window, prompt: &str) -> String {
     show_workspace(window);
-    command(window, "mission-control", "kind_image");
-    command(window, "mission-control", "add_cell");
-    window.until(|app| book_cells(app).iter().any(|cell| cell.kind == protocol::IMAGE_KIND));
-    let id = book_cells(&window.app).iter().find(|cell| cell.kind == protocol::IMAGE_KIND).unwrap().id.clone();
+    command(window, "recipe-creation", "kind_image");
+    command(window, "recipe-creation", "add_cell");
+    window.until(|app| recipe_cells(app).iter().any(|cell| cell.kind == protocol::IMAGE_KIND));
+    let id = recipe_cells(&window.app).iter().find(|cell| cell.kind == protocol::IMAGE_KIND).unwrap().id.clone();
     type_prompt(window, &id, prompt);
     let typed = prompt.to_string();
-    window.until(move |app| book_cells(app).iter().any(|cell| cell.prompt() == typed));
-    command(window, "mission-control", "run");
+    window.until(move |app| recipe_cells(app).iter().any(|cell| cell.prompt() == typed));
+    command(window, "recipe-creation", "run");
     let made = id.clone();
-    window.until(move |app| book_cells(app).iter().any(|cell| cell.id == made && cell.state == CellState::Done && !cell.versions.is_empty()));
+    window.until(move |app| recipe_cells(app).iter().any(|cell| cell.id == made && cell.state == CellState::Done && !cell.versions.is_empty()));
     id
 }
 
-/// Catches an Image kind a notebook only lists: chosen from the kind
+/// Catches an Image kind a recipe only lists: chosen from the kind
 /// dropdown, added, typed, and run, the cell asks the image skill for a
-/// picture, and its version records the picture, kept in the project.
+/// image, and its version records the image, kept in the project.
 #[test]
-fn a_notebook_image_cell_makes_a_picture() {
-    let dir = scratch("book-image");
+fn a_recipe_image_cell_makes_a_image() {
+    let dir = scratch("recipe-image");
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(apps(), &stand_in, &dir);
     window.app.settings.add_image_skill();
-    window.select("mission-control");
-    let id = make_book_picture(&mut window, "A lighthouse in a storm.");
-    assert_eq!(stand_in.pictures()[0]["prompt"], "A lighthouse in a storm.");
+    window.select("recipe-creation");
+    let id = make_recipe_image(&mut window, "A lighthouse in a storm.");
+    assert_eq!(stand_in.images()[0]["prompt"], "A lighthouse in a storm.");
     assert!(stand_in.requests().is_empty(), "the Image cell went to a chat model");
-    let cell = book_cells(&window.app).into_iter().find(|cell| cell.id == id).unwrap();
+    let cell = recipe_cells(&window.app).into_iter().find(|cell| cell.id == id).unwrap();
     let path = match &cell.versions[0].output[0] {
         protocol::CellPart::Path { path, .. } => path.clone(),
-        other => panic!("the version holds no picture: {other:?}"),
+        other => panic!("the version holds no image: {other:?}"),
     };
     assert!(path.starts_with("images/"));
     assert!(window.app.project.as_ref().unwrap().folder.join(&path).is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Catches an Image cell that loses its picture on the way into a notebook:
-/// dragged in from the conversation, it keeps its picture and versions, and
+/// Catches an Image cell that loses its image on the way into a recipe:
+/// dragged in from the conversation, it keeps its image and versions, and
 /// its run there adds a new file beside the old one.
 #[test]
-fn a_dragged_image_cell_keeps_its_picture() {
+fn a_dragged_image_cell_keeps_its_image() {
     let dir = scratch("drag-image");
     let tool = protocol::tool_key(crate::route::HOST_ID, "skills", "image_generation");
     let stand_in = StandIn::start(vec![call_reply(&tool, serde_json::json!({"prompt": "A keeper's lamp."})), text_reply("Done.")]);
     let mut window = project_window(apps(), &stand_in, &dir);
     window.app.settings.add_image_skill();
-    window.app.chat.input = "Make a picture of the lamp.".into();
+    window.app.chat.input = "Make an image of the lamp.".into();
     let ctx = window.ctx.clone();
     window.app.chat_event(ChatEvent::Send, &ctx, &mut window.frame);
     window.until(|app| {
@@ -1245,12 +1245,12 @@ fn a_dragged_image_cell_keeps_its_picture() {
     let source = conversation_cell(&window.app);
     let first = match &source.output[0] {
         protocol::CellPart::Path { path, .. } => path.clone(),
-        other => panic!("no picture: {other:?}"),
+        other => panic!("no image: {other:?}"),
     };
-    window.select("mission-control");
+    window.select("recipe-creation");
     show_workspace(&mut window);
     let from = window.app.board.card_rect.expect("the conversation cell was not drawn");
-    let onto = window.app.board.drop_rect.expect("the book was not drawn");
+    let onto = window.app.board.drop_rect.expect("the recipe was not drawn");
     let handle = Pos2::new(from.left() + 24.0, from.top() + 8.0);
     window.events.push(egui::Event::PointerMoved(handle));
     window.events.push(egui::Event::PointerButton { pos: handle, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
@@ -1260,8 +1260,8 @@ fn a_dragged_image_cell_keeps_its_picture() {
     window.events.push(egui::Event::PointerButton { pos: onto.center(), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     window.step();
     let copied_from = source.id.clone();
-    window.until(move |app| book_cells(app).iter().any(|cell| cell.from.as_deref() == Some(copied_from.as_str())));
-    let copied = book_cells(&window.app).into_iter().find(|cell| cell.from.is_some()).unwrap();
+    window.until(move |app| recipe_cells(app).iter().any(|cell| cell.from.as_deref() == Some(copied_from.as_str())));
+    let copied = recipe_cells(&window.app).into_iter().find(|cell| cell.from.is_some()).unwrap();
     assert_eq!(copied.kind, protocol::IMAGE_KIND);
     assert_eq!(copied.versions.len(), 1, "the versions did not come along");
     assert!(matches!(&copied.output[0], protocol::CellPart::Path { path, .. } if *path == first));
@@ -1269,13 +1269,13 @@ fn a_dragged_image_cell_keeps_its_picture() {
     assert!(folder.join(&first).is_file());
     window.app.note_cell_actions(vec![crate::cells::CardAction::Run(copied.id.clone())]);
     let id = copied.id.clone();
-    window.until(move |app| book_cells(app).iter().any(|cell| cell.id == id && cell.versions.len() == 2));
-    let ran = book_cells(&window.app).into_iter().find(|cell| cell.id == copied.id).unwrap();
+    window.until(move |app| recipe_cells(app).iter().any(|cell| cell.id == id && cell.versions.len() == 2));
+    let ran = recipe_cells(&window.app).into_iter().find(|cell| cell.id == copied.id).unwrap();
     let second = match &ran.versions[1].output[0] {
         protocol::CellPart::Path { path, .. } => path.clone(),
-        other => panic!("no picture: {other:?}"),
+        other => panic!("no image: {other:?}"),
     };
     assert_ne!(first, second);
-    assert!(folder.join(&first).is_file() && folder.join(&second).is_file(), "a run in the notebook lost a picture");
+    assert!(folder.join(&first).is_file() && folder.join(&second).is_file(), "a run in the recipe lost an image");
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -27,23 +27,23 @@ pub(crate) enum CardAction {
     Models(String, Rect),
     /// A filmstrip thumbnail was clicked: show that version.
     ShowVersion(String, usize),
-    /// The Edit button on the cell's picture was clicked.
-    EditPicture(String),
+    /// The Edit button on the cell's image was clicked.
+    EditImage(String),
     /// A rendered Markdown cell was double-clicked: show its source.
     ShowSource(String),
 }
 
 pub(crate) enum Piece {
     Text(String),
-    /// A picture's PNG, from an Image cell's run.
-    Picture(Vec<u8>),
+    /// An image's PNG, from an Image cell's run.
+    Image(Vec<u8>),
     End,
     Failed(String),
 }
 
 pub(crate) enum Place {
     Conversation,
-    Book { app: usize, tab: String },
+    Recipe { app: usize, tab: String },
 }
 
 pub(crate) struct Run {
@@ -55,9 +55,9 @@ pub(crate) struct Run {
     pub endpoint: String,
     pub model: String,
     pub effort: Option<String>,
-    /// The picture an Image cell's run made: its path, as the cell names
+    /// The image an Image cell's run made: its path, as the cell names
     /// it, and its PNG, for the assistant to see.
-    pub picture: Option<(String, Vec<u8>)>,
+    pub image: Option<(String, Vec<u8>)>,
     /// The prompt as it was when the run began: the version the run makes
     /// holds this, whatever is typed meanwhile.
     pub prompt: String,
@@ -70,15 +70,15 @@ pub(crate) struct Run {
 /// Runs in progress, and the prompts being typed.
 pub(crate) struct Board {
     pub drafts: HashMap<String, String>,
-    /// The prompt last reported for a book cell, so a typed draft is not
-    /// replaced by the copy the book has not echoed yet.
+    /// The prompt last reported for a recipe cell, so a typed draft is not
+    /// replaced by the copy the recipe has not echoed yet.
     pub committed: HashMap<String, String>,
     pub runs: Vec<Run>,
     /// The conversation card last drawn, so a check can drag from it.
     pub card_rect: Option<Rect>,
     /// The cells area last drawn, so a check can drop on it.
     pub drop_rect: Option<Rect>,
-    /// Each notebook card last drawn, by cell id, so a check can press its
+    /// Each recipe card last drawn, by cell id, so a check can press its
     /// buttons.
     pub cards: Vec<(String, Rect)>,
     /// The cell drawn with the blue border last frame, if any.
@@ -86,7 +86,7 @@ pub(crate) struct Board {
     /// The open cell menu's buttons last frame, by name, so a check can
     /// press them.
     pub menu_buttons: Vec<(&'static str, Rect)>,
-    /// A notebook cell's level chosen from its chevron, by cell id: the
+    /// A recipe cell's level chosen from its chevron, by cell id: the
     /// endpoint id, model, and effort its next run uses. The run's result
     /// records them.
     pub chosen: HashMap<String, (String, String, Option<String>)>,
@@ -133,7 +133,7 @@ impl Board {
 
 /// Starts a text run on `route`, or fails at once with the reason there is
 /// none. Its pieces arrive on the run's channel as they are read.
-pub(crate) fn start_run(route: Result<crate::endpoints::Route, String>, prompt: &str, picture: bool) -> Receiver<Piece> {
+pub(crate) fn start_run(route: Result<crate::endpoints::Route, String>, prompt: &str, image: bool) -> Receiver<Piece> {
     let (tx, rx) = channel();
     let route = match route {
         Ok(route) => match route.blocked() {
@@ -151,8 +151,8 @@ pub(crate) fn start_run(route: Result<crate::endpoints::Route, String>, prompt: 
     };
     let prompt = prompt.to_string();
     let _ = std::thread::Builder::new().name(String::from("cell-run")).spawn(move || {
-        if picture {
-            picture_into(route, prompt, tx);
+        if image {
+            image_into(route, prompt, tx);
         } else {
             stream_into(route, prompt, tx);
         }
@@ -160,11 +160,11 @@ pub(crate) fn start_run(route: Result<crate::endpoints::Route, String>, prompt: 
     rx
 }
 
-/// An Image cell's run: one picture, then the end, or why it failed.
-fn picture_into(route: crate::endpoints::Route, prompt: String, tx: Sender<Piece>) {
+/// An Image cell's run: one image, then the end, or why it failed.
+fn image_into(route: crate::endpoints::Route, prompt: String, tx: Sender<Piece>) {
     let key = route.key.clone().unwrap_or_default();
     let _ = match assistant::make_image(&route.base, &key, &route.model, &prompt) {
-        Ok(png) => tx.send(Piece::Picture(png)).and_then(|_| tx.send(Piece::End)),
+        Ok(png) => tx.send(Piece::Image(png)).and_then(|_| tx.send(Piece::End)),
         Err(reason) => tx.send(Piece::Failed(reason)),
     };
 }
@@ -206,16 +206,16 @@ pub(crate) fn runs(kind: &str) -> bool {
     kind == protocol::TEXT_KIND || kind == protocol::MARKDOWN_KIND || kind == protocol::IMAGE_KIND
 }
 
-/// An Image cell's picture: the height it is drawn, and the filmstrip's.
-const PICTURE_H: f32 = 300.0;
+/// An Image cell's image: the height it is drawn, and the filmstrip's.
+const IMAGE_H: f32 = 300.0;
 
-/// How tall a cell's picture is drawn: at most `PICTURE_H`, and less when
+/// How tall a cell's image is drawn: at most `IMAGE_H`, and less when
 /// the card's width limits it, so no room is left empty under it.
-fn picture_height(ctx: &egui::Context, path: &str, width: f32) -> f32 {
-    picture_texture(ctx, path).map_or(PICTURE_H, |texture| fit(texture.size_vec2(), width, PICTURE_H).y)
+fn image_height(ctx: &egui::Context, path: &str, width: f32) -> f32 {
+    image_texture(ctx, path).map_or(IMAGE_H, |texture| fit(texture.size_vec2(), width, IMAGE_H).y)
 }
 const FILM_H: f32 = 52.0;
-/// The Edit button on a cell's picture: its height, inset from the corner,
+/// The Edit button on a cell's image: its height, inset from the corner,
 /// and its inside.
 const EDIT_H: f32 = 28.0;
 const EDIT_INSET: f32 = 8.0;
@@ -227,7 +227,7 @@ const THUMB_GAP: f32 = 8.0;
 const SHOWN: Color32 = Color32::from_rgb(37, 99, 235);
 
 /// The media types some running application edits, as the window last
-/// said: an Image cell's picture of one of them shows an Edit button. The
+/// said: an Image cell's image of one of them shows an Edit button. The
 /// window says none while the assistant works.
 pub(crate) fn set_editable(ctx: &egui::Context, media_types: Vec<String>) {
     ctx.data_mut(|data| data.insert_temp(egui::Id::new("cell-editable"), media_types));
@@ -238,24 +238,24 @@ fn editable(ctx: &egui::Context, media_type: &str) -> bool {
         .is_some_and(|types| types.iter().any(|known| known == media_type))
 }
 
-/// The picture a cell's output names, with its media type.
-pub(crate) fn picture_part(parts: &[CellPart]) -> Option<(&str, &str)> {
+/// The image a cell's output names, with its media type.
+pub(crate) fn image_part(parts: &[CellPart]) -> Option<(&str, &str)> {
     parts.iter().find_map(|part| match part {
         CellPart::Path { path, media_type } if media_type.starts_with("image/") => Some((path.as_str(), media_type.as_str())),
         _ => None,
     })
 }
 
-/// What new work made from a cell's picture is called: its prompt, safe as
-/// a file's name, cut at a word before 32 characters, or "Picture".
-pub(crate) fn picture_name(prompt: &str) -> String {
+/// What new work made from a cell's image is called: its prompt, safe as
+/// a file's name, cut at a word before 32 characters, or "Untitled Image".
+pub(crate) fn image_name(prompt: &str) -> String {
     let spaced: String = prompt.chars().map(|c| if c == '/' || c == '\\' || c.is_control() { ' ' } else { c }).collect();
     let mut name = String::new();
     for word in spaced.split_whitespace() {
         let length = name.chars().count() + usize::from(!name.is_empty()) + word.chars().count();
-        if length >= PICTURE_NAME {
+        if length >= IMAGE_NAME {
             if name.is_empty() {
-                name = word.chars().take(PICTURE_NAME - 1).collect();
+                name = word.chars().take(IMAGE_NAME - 1).collect();
             }
             break;
         }
@@ -267,44 +267,44 @@ pub(crate) fn picture_name(prompt: &str) -> String {
     // No leading dot, which would hide the file.
     let name = name.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
     let name = name.trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
-    if name.is_empty() { String::from("Picture") } else { name.to_string() }
+    if name.is_empty() { protocol::untitled("Image") } else { name.to_string() }
 }
 
 /// New work's names stay under this many characters.
-const PICTURE_NAME: usize = 32;
+const IMAGE_NAME: usize = 32;
 
-/// The picture a part names, if it is one.
-fn picture_path(parts: &[CellPart]) -> Option<&str> {
+/// The image a part names, if it is one.
+fn image_path(parts: &[CellPart]) -> Option<&str> {
     parts.iter().find_map(|part| match part {
         CellPart::Path { path, media_type } if media_type.starts_with("image/") => Some(path.as_str()),
         _ => None,
     })
 }
 
-/// The picture a cell shows, when it has one and is not running or failed.
-fn shown_picture<'a>(cell: &'a Cell, running: bool) -> Option<&'a str> {
+/// The image a cell shows, when it has one and is not running or failed.
+fn shown_image<'a>(cell: &'a Cell, running: bool) -> Option<&'a str> {
     if running || cell.state == CellState::Failed {
         return None;
     }
-    picture_path(&cell.output)
+    image_path(&cell.output)
 }
 
-/// The versions with a picture, by index, for the filmstrip, which shows
+/// The versions with an image, by index, for the filmstrip, which shows
 /// from the first version on, as the outcome says.
 fn film(cell: &Cell) -> Option<Vec<(usize, &str)>> {
-    let pictures: Vec<(usize, &str)> = cell
+    let images: Vec<(usize, &str)> = cell
         .versions
         .iter()
         .enumerate()
-        .filter_map(|(index, version)| picture_path(&version.output).map(|path| (index, path)))
+        .filter_map(|(index, version)| image_path(&version.output).map(|path| (index, path)))
         .collect();
-    (!pictures.is_empty()).then_some(pictures)
+    (!images.is_empty()).then_some(images)
 }
 
-/// Where pictures named by relative paths are: the project's folder, set
+/// Where images named by relative paths are: the project's folder, set
 /// by the window each frame.
-pub(crate) fn set_picture_root(ctx: &egui::Context, root: Option<std::path::PathBuf>) {
-    ctx.data_mut(|data| data.insert_temp(egui::Id::new("cell-picture-root"), root));
+pub(crate) fn set_image_root(ctx: &egui::Context, root: Option<std::path::PathBuf>) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new("cell-image-root"), root));
 }
 
 fn resolve(ctx: &egui::Context, path: &str) -> std::path::PathBuf {
@@ -312,16 +312,16 @@ fn resolve(ctx: &egui::Context, path: &str) -> std::path::PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
-    let root: Option<std::path::PathBuf> = ctx.data(|data| data.get_temp(egui::Id::new("cell-picture-root"))).flatten();
+    let root: Option<std::path::PathBuf> = ctx.data(|data| data.get_temp(egui::Id::new("cell-image-root"))).flatten();
     root.map_or_else(|| path.to_path_buf(), |root| root.join(path))
 }
 
-/// A picture as a texture, decoded once per file. None when it cannot be
+/// An image as a texture, decoded once per file. None when it cannot be
 /// read, as when it was deleted.
-fn picture_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
+fn image_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
     type Cache = HashMap<std::path::PathBuf, Option<egui::TextureHandle>>;
     let file = resolve(ctx, path);
-    let id = egui::Id::new("cell-pictures");
+    let id = egui::Id::new("cell-images");
     if let Some(Some(known)) = ctx.data(|data| data.get_temp::<Cache>(id).and_then(|cache| cache.get(&file).cloned())) {
         return Some(known);
     }
@@ -332,7 +332,7 @@ fn picture_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandl
             let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
             ctx.load_texture(file.display().to_string(), image, egui::TextureOptions::LINEAR)
         });
-    // Only a picture read is kept: one not there yet is read again later.
+    // Only an image read is kept: one not there yet is read again later.
     if let Some(texture) = &texture {
         ctx.data_mut(|data| {
             data.get_temp_mut_or_default::<Cache>(id).insert(file, Some(texture.clone()));
@@ -371,8 +371,8 @@ const GENERATED: Color32 = Color32::from_rgb(0x4B, 0x55, 0x63);
 struct Layout {
     input: f32,
     output: Option<crate::markdown::Laid>,
-    /// An Image cell's picture, and whether a filmstrip is below it.
-    picture: bool,
+    /// An Image cell's image, and whether a filmstrip is below it.
+    image: bool,
     film: bool,
     total: f32,
 }
@@ -437,12 +437,12 @@ fn layout(ui: &egui::Ui, cell: &Cell, draft: &str, live: Option<&str>, running: 
     let text = painter.layout_job(prompt_job(draft, inner_w - numbers_w(markdown), markdown)).size().y;
     let line = if markdown { ts::code_line() } else { ts::body_line() };
     let input = text.max(line * MIN_LINES as f32) + 24.0;
-    let picture_h = shown_picture(cell, running).map(|path| picture_height(ui.ctx(), path, inner_w));
-    let picture = picture_h.is_some();
-    // The filmstrip stays while a picture is made, and after a run fails or
+    let image_h = shown_image(cell, running).map(|path| image_height(ui.ctx(), path, inner_w));
+    let image = image_h.is_some();
+    // The filmstrip stays while an image is made, and after a run fails or
     // is stopped, so earlier versions are always in reach.
     let film = cell.kind == protocol::IMAGE_KIND && film(cell).is_some();
-    let output = if picture {
+    let output = if image {
         None
     } else {
         output_text(cell, live, running).map(|(text, color, generated)| {
@@ -453,8 +453,8 @@ fn layout(ui: &egui::Ui, cell: &Cell, draft: &str, live: Option<&str>, running: 
             }
         })
     };
-    let shown = if picture {
-        2.0 * OUTPUT_PAD + picture_h.unwrap_or(PICTURE_H)
+    let shown = if image {
+        2.0 * OUTPUT_PAD + image_h.unwrap_or(IMAGE_H)
     } else {
         output.as_ref().map_or(0.0, |output| output.height + 2.0 * OUTPUT_PAD)
     };
@@ -465,7 +465,7 @@ fn layout(ui: &egui::Ui, cell: &Cell, draft: &str, live: Option<&str>, running: 
         input,
         total: HEADER + input + below,
         output,
-        picture,
+        image,
         film,
     }
 }
@@ -477,7 +477,7 @@ fn output_text(cell: &Cell, live: Option<&str>, running: bool) -> Option<(String
     if running {
         let text = live.unwrap_or("");
         if cell.kind == protocol::IMAGE_KIND {
-            return Some((String::from("Making the picture…"), MUTED, false));
+            return Some((String::from("Making the image…"), MUTED, false));
         }
         if text.is_empty() {
             return Some((String::from("Writing…"), MUTED, false));
@@ -507,7 +507,7 @@ fn numbers_w(markdown: bool) -> f32 {
 }
 
 /// Draws one cell into `row` and returns the card. `number` is the margin
-/// mark a book shows, such as 1 for "[1]". The card follows the approved
+/// mark a recipe shows, such as 1 for "[1]". The card follows the approved
 /// reference, `llm-cell.png`: a header with the kind, the model, Generate
 /// and its menu; the prompt as a text box; and the result below, as
 /// Markdown. As `llm-cell-plain-prompt.png` shows, the prompt is plain text
@@ -672,26 +672,26 @@ pub(crate) fn paint_card(
         painter.hline(card.left() + PAD..=card.right() - PAD, top, egui::Stroke::new(1.0, HAIRLINE));
         output.paint(&painter, pos2(card.left() + PAD, top + OUTPUT_PAD));
     }
-    // An Image cell's picture, centred, and under it the filmstrip of its
+    // An Image cell's image, centred, and under it the filmstrip of its
     // versions, as the approved image-cell mockup shows.
-    if plan.picture
-        && let Some(path) = shown_picture(cell, running)
+    if plan.image
+        && let Some(path) = shown_image(cell, running)
     {
         let top = header_line + plan.input;
         painter.hline(card.left() + PAD..=card.right() - PAD, top, egui::Stroke::new(1.0, HAIRLINE));
-        let area = Rect::from_min_size(pos2(card.left() + PAD, top + OUTPUT_PAD), vec2(inner_w, picture_height(ui.ctx(), path, inner_w)));
-        match picture_texture(ui.ctx(), path) {
+        let area = Rect::from_min_size(pos2(card.left() + PAD, top + OUTPUT_PAD), vec2(inner_w, image_height(ui.ctx(), path, inner_w)));
+        match image_texture(ui.ctx(), path) {
             Some(texture) => {
                 let size = fit(texture.size_vec2(), area.width(), area.height());
                 let rect = Rect::from_center_size(pos2(area.center().x, area.top() + size.y / 2.0), size);
                 paint_rounded(&painter, rect, &texture, 8.0);
-                // Edit, always on the picture shown, as picture-edit.png
+                // Edit, always on the image shown, as the approved edit mockup
                 // shows and the owner set on 2026-10-31.
-                let media = picture_part(&cell.output).map_or("", |(_, media)| media);
+                let media = image_part(&cell.output).map_or("", |(_, media)| media);
                 if editable(ui.ctx(), media) {
                     let label = painter.layout_no_wrap("Edit".into(), ts::small(), TEXT);
                     let full = EDIT_PAD + EDIT_ICON + EDIT_GAP + label.size().x + EDIT_PAD + 2.0;
-                    // On a narrow picture, the brush alone, so the button
+                    // On a narrow image, the brush alone, so the button
                     // stays on it.
                     let worded = rect.width() >= full + 2.0 * EDIT_INSET;
                     let width = if worded { full } else { 2.0 * EDIT_PAD + EDIT_ICON };
@@ -706,12 +706,12 @@ pub(crate) fn paint_card(
                         painter.galley(at, label, TEXT);
                     }
                     if button.clicked() {
-                        actions.push(CardAction::EditPicture(cell.id.clone()));
+                        actions.push(CardAction::EditImage(cell.id.clone()));
                     }
                 }
             }
             None => {
-                painter.text(area.center(), Align2::CENTER_CENTER, "The picture could not be read.", ts::small(), MUTED);
+                painter.text(area.center(), Align2::CENTER_CENTER, "The image could not be read.", ts::small(), MUTED);
             }
         }
     }
@@ -719,15 +719,15 @@ pub(crate) fn paint_card(
         && let Some(film) = film(cell)
     {
         {
-            // Under the picture, or under the words of a run that is making
+            // Under the image, or under the words of a run that is making
             // one or failed.
-            if !plan.picture && !has_output {
+            if !plan.image && !has_output {
                 let top = header_line + plan.input;
                 painter.hline(card.left() + PAD..=card.right() - PAD, top, egui::Stroke::new(1.0, HAIRLINE));
             }
             let shown = cell.current.unwrap_or(cell.versions.len().saturating_sub(1));
             let thumbs: Vec<(usize, Option<egui::TextureHandle>)> =
-                film.iter().map(|(index, path)| (*index, picture_texture(ui.ctx(), path))).collect();
+                film.iter().map(|(index, path)| (*index, image_texture(ui.ctx(), path))).collect();
             let width = |texture: &Option<egui::TextureHandle>| {
                 texture.as_ref().map_or(FILM_H, |texture| fit(texture.size_vec2(), f32::MAX, FILM_H).x)
             };
@@ -760,7 +760,7 @@ pub(crate) fn paint_card(
     card
 }
 
-/// A picture in `rect`, its corners rounded by `radius`.
+/// An image in `rect`, its corners rounded by `radius`.
 fn paint_rounded(painter: &egui::Painter, rect: Rect, texture: &egui::TextureHandle, radius: f32) {
     painter.add(
         egui::epaint::RectShape::filled(rect, radius, Color32::WHITE)
@@ -821,7 +821,7 @@ const RENDERED_PAD: f32 = 12.0;
 
 /// The height a card needs at `width`, with its prompt and result laid out,
 /// so a list gives each card its own height. `numbered` leaves the margin a
-/// book's "[1]" takes.
+/// recipe's "[1]" takes.
 pub(crate) fn card_height(
     ui: &egui::Ui,
     cell: &Cell,

@@ -14,7 +14,7 @@ pub enum GestureError {
 }
 
 /// What is being drawn. A shape stores its [`ShapeKind`] here.
-/// Simple Sketch maps that kind to a step when it commits.
+/// The Storyboard Generator maps that kind to a step when it commits.
 #[derive(Clone, Debug)]
 pub enum GestureKind {
     /// `canvas` is the highlighted canvas, or `None` when the commit makes a
@@ -59,7 +59,7 @@ pub enum GestureKind {
     },
 }
 
-/// The stroke or drag still open. The host previews it. Simple Sketch does not.
+/// The stroke or drag still open. The host previews it. the Storyboard Generator does not.
 #[derive(Clone, Debug)]
 pub struct OpenGesture {
     pub kind: GestureKind,

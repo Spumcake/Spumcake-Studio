@@ -19,7 +19,7 @@ fn document_to_screen(rect: Rect, origin: [f64; 2], zoom: f64, point: [f64; 2]) 
 }
 
 pub(crate) fn paint_grid(painter: &egui::Painter, rect: Rect, origin: [f64; 2], zoom: f64) {
-    // As faint as the picture's grid: a guide, not a feature of the drawing.
+    // As faint as the mockup's grid: a guide, not a feature of the drawing.
     let stroke = Stroke::new(1.0, Color32::from_rgb(234, 235, 238));
     let top_left = screen_to_document(rect, origin, zoom, rect.min);
     let bottom_right = screen_to_document(rect, origin, zoom, rect.max);

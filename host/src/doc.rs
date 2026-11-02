@@ -150,7 +150,7 @@ impl Doc<'_> {
                 let layer_size = canvas
                     .filter(|id| *id != 0)
                     .zip(layer.filter(|id| *id != 0))
-                    .and_then(|(canvas, layer)| self.display.sketch.color_style(NodeId::new(canvas), ColorId::new(layer)))
+                    .and_then(|(canvas, layer)| self.display.drawing.color_style(NodeId::new(canvas), ColorId::new(layer)))
                     .map(|style| style.size)
                     .or_else(|| draw::document::snapshot::stroke_look_from(look).map(|look| look.0));
                 f64::from(size.or(layer_size)?)
@@ -197,17 +197,17 @@ impl Doc<'_> {
     fn fit(&mut self) {
         camera::fit(
             &mut self.display.camera,
-            &self.display.sketch,
+            &self.display.drawing,
             self.viewport,
         );
         self.live.moved = true;
     }
 
     fn zoom_to_selection(&mut self) {
-        let sketch = &mut self.display.sketch;
-        sketch.set_camera(self.display.camera);
-        if sketch.zoom_to_selection(self.viewport) {
-            self.display.camera = sketch.camera();
+        let drawing = &mut self.display.drawing;
+        drawing.set_camera(self.display.camera);
+        if drawing.zoom_to_selection(self.viewport) {
+            self.display.camera = drawing.camera();
             self.live.moved = true;
         }
     }
@@ -216,32 +216,32 @@ impl Doc<'_> {
     // sub-application.
 
     pub(crate) fn selection(&self) -> Vec<NodeId> {
-        self.display.sketch.selection().to_vec()
+        self.display.drawing.selection().to_vec()
     }
 
     pub(crate) fn selection_bounds(&self) -> Option<(Point, Point)> {
-        self.display.sketch.selection_bounds()
+        self.display.drawing.selection_bounds()
     }
 
     pub(crate) fn hit_test(&self, point: Point) -> Option<NodeId> {
-        self.display.sketch.hit_test(point)
+        self.display.drawing.hit_test(point)
     }
 
     pub(crate) fn selection_turns(&self) -> bool {
-        self.display.sketch.selection_turns()
+        self.display.drawing.selection_turns()
     }
 
     /// The one selected object, when it is a text object that can be changed.
     pub(crate) fn sole_text(&self) -> Option<NodeId> {
-        let [id] = self.display.sketch.selection() else {
+        let [id] = self.display.drawing.selection() else {
             return None;
         };
-        (self.display.sketch.is_text(*id) && self.display.sketch.transform_target(*id))
+        (self.display.drawing.is_text(*id) && self.display.drawing.transform_target(*id))
             .then_some(*id)
     }
 
     pub(crate) fn text_box(&self, id: NodeId) -> Option<TextFit> {
-        self.display.sketch.text_box(id)
+        self.display.drawing.text_box(id)
     }
 
     fn select(&mut self, op: SelectOp) {
@@ -284,10 +284,10 @@ impl Doc<'_> {
             && (min[0]..=max[0]).contains(&point[0])
             && (min[1]..=max[1]).contains(&point[1])
         {
-            return self.display.sketch.selection().first().copied();
+            return self.display.drawing.selection().first().copied();
         }
         let hit = self.hit_test(point)?;
-        if !self.display.sketch.selection().contains(&hit) {
+        if !self.display.drawing.selection().contains(&hit) {
             self.select_click(hit, false);
         }
         Some(hit)
@@ -309,13 +309,13 @@ impl Doc<'_> {
     /// The selection's local transforms that a drag may change, as the
     /// selection will be once `select` arrives: `predicted`, when given.
     pub(crate) fn changeable_locals(&self, predicted: Option<&[NodeId]>) -> Vec<(NodeId, Affine)> {
-        let sketch = &self.display.sketch;
+        let drawing = &self.display.drawing;
         predicted
-            .unwrap_or(sketch.selection())
+            .unwrap_or(drawing.selection())
             .iter()
-            .filter(|id| sketch.transform_target(**id))
+            .filter(|id| drawing.transform_target(**id))
             .filter_map(|id| {
-                sketch
+                drawing
                     .local_transform(*id)
                     .map(|transform| (*id, transform))
             })
@@ -329,7 +329,7 @@ impl Doc<'_> {
     ) {
         let mut locals = Vec::new();
         for (id, local) in before {
-            let Some(parent) = self.display.sketch.parent_of_world(*id) else {
+            let Some(parent) = self.display.drawing.parent_of_world(*id) else {
                 continue;
             };
             locals.push((*id, parent.inverse() * map(parent * *local)));
@@ -342,8 +342,8 @@ impl Doc<'_> {
     }
 
     fn show_locals(&mut self, locals: &[(NodeId, Affine)]) {
-        if let Some(step) = self.display.sketch.set_locals(locals) {
-            self.display.sketch.apply(&step);
+        if let Some(step) = self.display.drawing.set_locals(locals) {
+            self.display.drawing.apply(&step);
         }
     }
 
@@ -353,7 +353,7 @@ impl Doc<'_> {
             .iter()
             .filter_map(|(id, _)| {
                 self.display
-                    .sketch
+                    .drawing
                     .local_transform(*id)
                     .map(|transform| (*id, transform))
             })
@@ -390,24 +390,24 @@ impl Doc<'_> {
         to: Point,
         side: BoxSide,
     ) {
-        let sketch = &self.display.sketch;
-        let (Some(from), Some(to)) = (sketch.local_point(id, from), sketch.local_point(id, to))
+        let drawing = &self.display.drawing;
+        let (Some(from), Some(to)) = (drawing.local_point(id, from), drawing.local_point(id, to))
         else {
             return;
         };
-        let em = sketch.text_size(id).map_or(8.0, f64::from);
+        let em = drawing.text_size(id).map_or(8.0, f64::from);
         let after = dragged_box(before, [to[0] - from[0], to[1] - from[1]], em, side);
         self.restore_text_box(id, after);
     }
 
     pub(crate) fn restore_text_box(&mut self, id: NodeId, frame: TextBox) {
-        if let Some(step) = self.display.sketch.place_text_box(id, frame) {
-            self.display.sketch.apply(&step);
+        if let Some(step) = self.display.drawing.place_text_box(id, frame) {
+            self.display.drawing.apply(&step);
         }
     }
 
     pub(crate) fn commit_text_box(&mut self, id: NodeId, before: TextBox) {
-        let Some(after) = self.display.sketch.text_box(id).map(|fit| fit.frame) else {
+        let Some(after) = self.display.drawing.text_box(id).map(|fit| fit.frame) else {
             return;
         };
         if after == before {
@@ -566,7 +566,7 @@ impl Doc<'_> {
                 let id = NodeId::new(id);
                 let SceneMark::Text(view) = self
                     .display
-                    .sketch
+                    .drawing
                     .scene(None)
                     .into_iter()
                     .find(|mark| matches!(mark, SceneMark::Text(view) if view.id == id))?
@@ -609,7 +609,7 @@ impl Doc<'_> {
     /// and sent when it changed.
     pub(crate) fn set_text_metrics(&mut self, id: NodeId, width: f64, height: f64, natural: f64) {
         self.display
-            .sketch
+            .drawing
             .set_text_metrics(id, width, height, natural);
         let value = [width, height, natural];
         if self.live.metrics.get(&id.get()) == Some(&value) {
@@ -722,7 +722,7 @@ impl Doc<'_> {
         self.commit_text();
         let hit = self
             .hit_test(point)
-            .filter(|id| self.display.sketch.is_text(*id));
+            .filter(|id| self.display.drawing.is_text(*id));
         self.live.open = Some(OpenGesture::text(point, hit));
         Ok(())
     }
@@ -800,10 +800,10 @@ impl Doc<'_> {
         // waiting paint above, where they will land in a moment.
         let mut lives = shown.iter().filter_map(|open| self.live_stroke(open));
         let first = lives.next();
-        let mut marks = self.display.sketch.scene(first.as_ref());
+        let mut marks = self.display.drawing.scene(first.as_ref());
         let rest: Vec<LiveStroke> = lives.collect();
         // A stroke that will make a new canvas paints above everything, as
-        // that canvas will be the top of the sketch.
+        // that canvas will be the top of the drawing.
         for live in first
             .iter()
             .filter(|live| live.canvas.is_none())
@@ -840,10 +840,10 @@ impl Doc<'_> {
         else {
             return None;
         };
-        let sketch = &self.display.sketch;
+        let drawing = &self.display.drawing;
         let (style, layer) = match layer
             .zip(*canvas)
-            .and_then(|(layer, canvas)| Some((sketch.color_style(canvas, layer)?, layer)))
+            .and_then(|(layer, canvas)| Some((drawing.color_style(canvas, layer)?, layer)))
         {
             Some((style, layer)) => (
                 (
@@ -864,7 +864,7 @@ impl Doc<'_> {
         };
         let (layer_size, cap, dash, look) = style;
         let transform = canvas
-            .and_then(|canvas| sketch.world_transform(canvas))
+            .and_then(|canvas| drawing.world_transform(canvas))
             .unwrap_or(Affine::IDENTITY);
         let samples = map_samples(transform, &open.samples);
         let shapes = ink::stroke_visible(

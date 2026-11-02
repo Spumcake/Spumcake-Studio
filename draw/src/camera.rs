@@ -1,7 +1,7 @@
 //! Camera arithmetic. It acts on a [`Camera`] and, for fit, a document.
 //! It does not keep a session or a dirty flag.
 
-use crate::document::{Camera, Point, Sketch, FIT_MARGIN, MAX_ZOOM, MIN_ZOOM};
+use crate::document::{Camera, Point, Drawing, FIT_MARGIN, MAX_ZOOM, MIN_ZOOM};
 use eframe::egui::{Pos2, Rect};
 
 const ZOOM_IN_FACTOR: f64 = 5.0 / 4.0;
@@ -41,8 +41,8 @@ pub fn zoom_at_center(camera: &mut Camera, zoom_in: bool, viewport: Point) {
     zoom_toward(camera, factor, [viewport[0] / 2.0, viewport[1] / 2.0]);
 }
 
-pub fn fit(camera: &mut Camera, sketch: &Sketch, viewport: Point) {
-    frame_bounds(camera, sketch.visible_bounds(), viewport);
+pub fn fit(camera: &mut Camera, drawing: &Drawing, viewport: Point) {
+    frame_bounds(camera, drawing.visible_bounds(), viewport);
 }
 
 /// Frames `bounds` the way Fit frames every visible object. No bounds

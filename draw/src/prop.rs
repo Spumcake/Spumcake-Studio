@@ -1,5 +1,5 @@
 //! Property ids and values stored on a [`crate::document::Step`].
-//! Sections and pages stay in Simple Sketch.
+//! Sections and pages stay in the Storyboard Generator.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PropId {

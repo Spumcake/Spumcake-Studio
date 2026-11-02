@@ -1,5 +1,5 @@
 [package]
-name = "sketch-client"
+name = "storyboard-client"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
@@ -9,4 +9,4 @@ publish = false
 draw = { path = "../draw" }
 protocol = { path = "../protocol" }
 serde_json = "=1.0.152"
-simple-sketch = { path = "../apps/simple-sketch" }
+storyboard-generator = { path = "../apps/storyboard-generator" }

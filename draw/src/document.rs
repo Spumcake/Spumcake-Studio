@@ -1,5 +1,5 @@
-//! One sketch's object tree, palette layers, and camera.
-//! History lives on Simple Sketch's record. This module does not depend on egui.
+//! One drawing's object tree, palette layers, and camera.
+//! History lives on the Storyboard Generator's record. This module does not depend on egui.
 
 use crate::defaults::{self, SIZE_MAX, SIZE_MIN};
 use crate::ink::{self, Shapes};
@@ -16,7 +16,7 @@ pub const GRID_SPACING: f64 = 24.0;
 pub type Point = [f64; 2];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SketchId(u64);
+pub struct DrawingId(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(u64);
@@ -42,7 +42,7 @@ macro_rules! id_newtype {
     };
 }
 
-id_newtype!(SketchId);
+id_newtype!(DrawingId);
 id_newtype!(NodeId);
 id_newtype!(ColorId);
 id_newtype!(StrokeId);
@@ -2074,9 +2074,9 @@ pub struct InkPaint {
     pub triangles: Vec<[Point; 3]>,
 }
 
-pub struct Sketch {
+pub struct Drawing {
     origin_canvas: NodeId,
-    /// The layers this sketch's canvas was created with. A clean sketch still matches them.
+    /// The layers this drawing's canvas was created with. A clean drawing still matches them.
     born: Vec<PaletteColor>,
     nodes: Vec<Node>,
     selection: Vec<NodeId>,
@@ -2086,7 +2086,7 @@ pub struct Sketch {
     camera: Camera,
 }
 
-impl Sketch {
+impl Drawing {
     pub fn untitled(ids: &mut Allocator, palette: &[ToolColor]) -> Self {
         let canvas_id = ids.node();
         let canvas = canvas_node(canvas_id, "Canvas 1", palette, ids);
@@ -2111,8 +2111,8 @@ impl Sketch {
             .map(|node| node.name.as_str())
     }
 
-    /// Starting canvas only, no strokes, and the palette this sketch was born
-    /// with. The name and whether it was saved live on Simple Sketch's record.
+    /// Starting canvas only, no strokes, and the palette this drawing was born
+    /// with. The name and whether it was saved live on the Storyboard Generator's record.
     pub fn model_is_blank(&self) -> bool {
         if self.nodes.len() != 1 || self.nodes[0].id != self.origin_canvas {
             return false;
@@ -2125,7 +2125,7 @@ impl Sketch {
             return false;
         };
         // The active color is a view choice, like the camera, so it does not
-        // make a sketch unclean. Padding and the born palette do.
+        // make a drawing unclean. Padding and the born palette do.
         if (canvas.padding - defaults::CANVAS_PADDING).abs() > 1.0e-9 {
             return false;
         }
@@ -2161,16 +2161,16 @@ impl Sketch {
         }
     }
 
-    /// Ids this sketch shares with `held` become new ones. A layer's `source`
-    /// stays as stored: it names a brush color, not this sketch's palette.
-    /// The sketch id itself lives on the record.
+    /// Ids this drawing shares with `held` become new ones. A layer's `source`
+    /// stays as stored: it names a brush color, not this drawing's palette.
+    /// The drawing id itself lives on the record.
     pub fn separate_ids(&mut self, held: &HeldIds, ids: &mut Allocator) {
         for node in &mut self.nodes {
             separate_node(node, held, ids, &mut self.origin_canvas);
         }
     }
 
-    /// A clean opening sketch takes a palette loaded after it was made, so
+    /// A clean opening drawing takes a palette loaded after it was made, so
     /// its canvas starts from the brush's saved colors.
     pub fn adopt_palette(&mut self, palette: &[ToolColor], ids: &mut Allocator) {
         if palette.is_empty() || !self.model_is_blank() {
@@ -2188,7 +2188,7 @@ impl Sketch {
         self.camera
     }
 
-    /// Sets the camera. Simple Sketch's record decides whether that is a change.
+    /// Sets the camera. the Storyboard Generator's record decides whether that is a change.
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
     }
@@ -3349,7 +3349,7 @@ impl Sketch {
     }
 
     /// A brush stroke drawn with no canvas highlighted: a new canvas, named
-    /// Canvas N, at the top of the sketch with the stroke in the layer that
+    /// Canvas N, at the top of the drawing with the stroke in the layer that
     /// came from `source`, as one step. The new canvas is highlighted. The
     /// step is not applied here.
     #[must_use]
@@ -3472,7 +3472,7 @@ impl Sketch {
         Some(unmap_point(self.world_transform(id)?, point))
     }
 
-    /// Removes a text object that is already in the sketch. The returned step
+    /// Removes a text object that is already in the drawing. The returned step
     /// restores it, including the content it had before the edit. The step is
     /// not applied here.
     #[must_use]
@@ -3695,7 +3695,7 @@ impl Sketch {
             return None;
         }
         // The reference selected the copies after inserting them. Selection
-        // drops ids not in the tree yet, so Simple Sketch selects them after
+        // drops ids not in the tree yet, so the Storyboard Generator selects them after
         // its record commits this step.
         Some(Step::InsertNodes {
             parent: None,
@@ -5214,10 +5214,10 @@ fn collect_held_node(node: &Node, held: &mut HeldIds) {
     }
 }
 
-/// Ids already live in the session. An opened sketch does not reuse them.
+/// Ids already live in the session. An opened drawing does not reuse them.
 #[derive(Default)]
 pub struct HeldIds {
-    pub sketches: HashSet<u64>,
+    pub drawings: HashSet<u64>,
     pub nodes: HashSet<u64>,
     pub colors: HashSet<u64>,
     pub strokes: HashSet<u64>,

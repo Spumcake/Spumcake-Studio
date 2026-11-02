@@ -1,6 +1,6 @@
 //! Window checks for raster tabs, against a stand-in sub-application that
 //! no part of the host was written for. It declares a tab of pixels, writes a
-//! known picture as raw RGBA, and logs every line the host sends it, so each
+//! known image as raw RGBA, and logs every line the host sends it, so each
 //! check reads what the host drew and what it sent. They spend nothing.
 
 use super::{StandIn, Window, scratch, start};
@@ -35,7 +35,7 @@ while IFS= read -r line; do
 done
 "#;
 
-/// The picture's size, and the camera the view carries: the picture is
+/// The image's size, and the camera the view carries: the image is
 /// drawn 50 points in from the contents' corner, 10 points to a pixel.
 const W: u32 = 40;
 const H: u32 = 20;
@@ -53,7 +53,7 @@ fn view(dir: &Path, tool: RasterTool) -> RasterView {
         tab: String::from("r1"),
         width: W,
         height: H,
-        picture: dir.join("picture.rgba").display().to_string(),
+        image: dir.join("image.rgba").display().to_string(),
         revision: 1,
         patch: None,
         tool,
@@ -165,7 +165,7 @@ fn toolbar(kind: &str) -> Toolbar {
     Toolbar { items: Vec::new(), trailing: Vec::new(), options, options_trailing }
 }
 
-/// A row of the Layers list. A layer has a picture; a group has none.
+/// A row of the Layers list. A layer has an image; a group has none.
 fn layer_row(dir: &Path, id: u64, parent: Option<u64>, depth: u32, name: &str, group: bool) -> LayerRow {
     LayerRow {
         id,
@@ -310,9 +310,9 @@ fn curve_sections() -> Vec<Section> {
     }]
 }
 
-/// The picture: opaque red, but for one clear pixel in its corner, so it
+/// The image: opaque red, but for one clear pixel in its corner, so it
 /// is drawn over squares.
-fn picture_bytes() -> Vec<u8> {
+fn image_bytes() -> Vec<u8> {
     let mut bytes = Vec::new();
     for index in 0..W * H {
         bytes.extend_from_slice(if index == 0 { &[0, 0, 0, 0] } else { &[220, 40, 40, 255] });
@@ -330,13 +330,13 @@ fn easel_with(name: &str, rows: impl FnOnce(&Path) -> Vec<LayerRow>) -> (Window,
     easel_of(name, rows, false)
 }
 
-/// The film's pictures: their names and their thumbnails' sizes, a wide one,
+/// The film's images: their names and their thumbnails' sizes, a wide one,
 /// a tall one, and a square one.
-const PICTURES: [(&str, u32, u32); 3] = [("Harbor", 32, 18), ("Tower", 18, 32), ("Tile", 20, 20)];
+const IMAGES: [(&str, u32, u32); 3] = [("Harbor", 32, 18), ("Tower", 18, 32), ("Tile", 20, 20)];
 
 /// A gallery of the three, the second shown, whose rows and tiles send
 /// actions only this stand-in declares. Its view leaves the camera to the
-/// host, so the host frames the picture above the strip.
+/// host, so the host frames the image above the strip.
 fn film(dir: &Path) -> Film {
     let row = |label: &str, id: &str, arg: Option<Value>| MenuEntry {
         label: label.to_string(),
@@ -348,7 +348,7 @@ fn film(dir: &Path) -> Film {
         rename: false,
     };
     Film {
-        items: PICTURES
+        items: IMAGES
             .iter()
             .enumerate()
             .map(|(index, (name, width, height))| FilmItem {
@@ -364,21 +364,21 @@ fn film(dir: &Path) -> Film {
         shown: 1,
         select: Action::new("show_item"),
         reorder: Action::with_arg("order_items", json!({ "strip": true })),
-        add: vec![row("New picture", "new_item", None), row("Open PNG or JPEG…", "open_item", None)],
+        add: vec![row("New image", "new_item", None), row("Open PNG or JPEG…", "open_item", None)],
         focus: Action::new("strip_focus"),
     }
 }
 
-/// The stand-in with a filmstrip of three pictures.
+/// The stand-in with a filmstrip of three images.
 fn filmed(name: &str) -> (Window, PathBuf, StandIn) {
     easel_of(name, |dir| vec![layer_row(dir, 1, None, 0, "Background", false)], true)
 }
 
 fn easel_of(name: &str, rows: impl FnOnce(&Path) -> Vec<LayerRow>, filmed: bool) -> (Window, PathBuf, StandIn) {
     let dir = scratch(&format!("raster-{name}"));
-    std::fs::write(dir.join("picture.rgba"), picture_bytes()).unwrap();
-    std::fs::write(dir.join("thumb.rgba"), picture_bytes()).unwrap();
-    for (index, (_, width, height)) in PICTURES.iter().enumerate() {
+    std::fs::write(dir.join("image.rgba"), image_bytes()).unwrap();
+    std::fs::write(dir.join("thumb.rgba"), image_bytes()).unwrap();
+    for (index, (_, width, height)) in IMAGES.iter().enumerate() {
         std::fs::write(dir.join(format!("film{index}.rgba")), vec![200; (width * height * 4) as usize]).unwrap();
     }
     let declared = |dir: &Path, tool: RasterTool| {
@@ -396,13 +396,13 @@ fn easel_of(name: &str, rows: impl FnOnce(&Path) -> Vec<LayerRow>, filmed: bool)
     };
     let greeting = [
         String::from("{\"type\":\"hello\",\"protocol\":1}\n"),
-        String::from("{\"type\":\"tab\",\"id\":\"r1\",\"label\":\"Picture\"}\n"),
+        String::from("{\"type\":\"tab\",\"id\":\"r1\",\"label\":\"Image\"}\n"),
         String::from("{\"type\":\"contents\",\"tab\":\"r1\",\"kind\":\"raster\"}\n"),
         String::from("{\"type\":\"panel\",\"tab\":\"r1\",\"side\":\"right\"}\n"),
         String::from("{\"type\":\"end\"}\n"),
-        String::from("{\"type\":\"skills\",\"skills\":[{\"id\":\"easel\",\"name\":\"Easel\",\"description\":\"Shows a picture.\",\"instructions\":\"Nothing to do.\",\"tools\":[{\"name\":\"look\",\"description\":\"Look.\",\"input\":{\"type\":\"object\",\"properties\":{}}}]}]}\n"),
+        String::from("{\"type\":\"skills\",\"skills\":[{\"id\":\"easel\",\"name\":\"Easel\",\"description\":\"Shows an image.\",\"instructions\":\"Nothing to do.\",\"tools\":[{\"name\":\"look\",\"description\":\"Look.\",\"input\":{\"type\":\"object\",\"properties\":{}}}]}]}\n"),
         line(AppMessage::Tabs(Tabs {
-            tabs: vec![TabEntry { id: String::from("r1"), label: String::from("Picture"), dirty: false, close_waits: false, path: None, saves: false }],
+            tabs: vec![TabEntry { id: String::from("r1"), label: String::from("Image"), dirty: false, close_waits: false, path: None, saves: false }],
             active: String::from("r1"),
             new_tab: None,
             new_tab_tip: String::new(),
@@ -490,7 +490,7 @@ fn raster(window: &Window) -> &crate::process::RasterDisplay {
     &window.app.apps[0].running.declared.rasters["r1"]
 }
 
-/// Where a picture point is on screen, through the host's camera.
+/// Where an image point is on screen, through the host's camera.
 fn screen(window: &Window, point: [f64; 2]) -> Pos2 {
     let rect = window.app.raster.shown;
     let camera = raster(window).camera.expect("the tab has a camera");
@@ -511,7 +511,7 @@ fn press(window: &mut Window, at: Pos2, pressed: bool) {
     window.events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
 }
 
-/// A drag through picture points: pressed at the first, moved through the
+/// A drag through image points: pressed at the first, moved through the
 /// rest, released at the last. `during` runs on the frame before release.
 fn drag(window: &mut Window, points: &[[f64; 2]], during: impl FnOnce(&Window)) {
     let screens: Vec<Pos2> = points.iter().map(|point| screen(window, *point)).collect();
@@ -612,23 +612,23 @@ fn close(window: Window, dir: PathBuf) {
 }
 
 /// Catches a raster tab that is not drawn, or drawn somewhere its camera
-/// does not put it: the stand-in's raw picture becomes a texture of its own
+/// does not put it: the stand-in's raw image becomes a texture of its own
 /// size, at the place the view's camera says, over squares for its clear
 /// pixel, with its size under it; the selection's outline is a white edge
 /// with black dashes along it; and the crop box dims what lies outside it
 /// and is divided in thirds.
 #[test]
-fn the_picture_its_selection_and_its_crop_box_are_drawn_where_the_camera_puts_them() {
+fn the_image_its_selection_and_its_crop_box_are_drawn_where_the_camera_puts_them() {
     let (mut window, dir, _stand_in) = easel("drawn");
-    let name = format!("raster:{}", dir.join("picture.rgba").display());
-    assert_eq!(texture_size(&window, &name), Some([W as usize, H as usize]), "the picture was not read whole");
+    let name = format!("raster:{}", dir.join("image.rgba").display());
+    assert_eq!(texture_size(&window, &name), Some([W as usize, H as usize]), "the image was not read whole");
     let rect = window.app.raster.shown;
     let expected = Rect::from_min_size(rect.min + egui::vec2(50.0, 50.0), egui::vec2(400.0, 200.0));
     let drawn = textured(&window, &name);
-    assert!(drawn.iter().any(|at| (at.min - expected.min).length() < 0.01 && (at.max - expected.max).length() < 0.01), "the picture is not where the camera puts it: {drawn:?}, not {expected:?}");
+    assert!(drawn.iter().any(|at| (at.min - expected.min).length() < 0.01 && (at.max - expected.max).length() < 0.01), "the image is not where the camera puts it: {drawn:?}, not {expected:?}");
     assert!(textured(&window, "raster-checker").iter().any(|at| *at == expected), "no squares under the clear pixel");
-    // No size caption under the picture, as the owner set on 2026-10-30.
-    assert!(window.texts.iter().all(|(text, _)| text != "40 × 20"), "the picture's size is drawn under it");
+    // No size caption under the image, as the owner set on 2026-10-30.
+    assert!(window.texts.iter().all(|(text, _)| text != "40 × 20"), "the image's size is drawn under it");
 
     // The selection: a white edge along its outline, and black dashes on it.
     let outline = Rect::from_two_pos(screen(&window, [10.0, 0.0]), screen(&window, [30.0, 20.0]));
@@ -673,12 +673,12 @@ fn the_picture_its_selection_and_its_crop_box_are_drawn_where_the_camera_puts_th
 }
 
 /// Catches gestures that are not sent, sent more than once, or sent in
-/// screen points: each tool's drag or click on the stand-in's picture is
-/// one `raster_gesture` in picture pixels, through the camera. The brush
+/// screen points: each tool's drag or click on the stand-in's image is
+/// one `raster_gesture` in image pixels, through the camera. The brush
 /// sends its points as they come, in order, and then the whole stroke; it
-/// draws no trail of its own, so the stroke seen is the picture's.
+/// draws no trail of its own, so the stroke seen is the image's.
 #[test]
-fn each_tool_sends_one_gesture_in_picture_pixels() {
+fn each_tool_sends_one_gesture_in_image_pixels() {
     let (mut window, dir, _stand_in) = easel("gestures");
 
     // The brush: one paint drag, its points sent as they come.
@@ -686,7 +686,7 @@ fn each_tool_sends_one_gesture_in_picture_pixels() {
     drag(&mut window, &[[5.0, 5.0], [10.0, 6.0], [15.0, 8.0], [25.0, 12.0]], |window| {
         trail += discs(window, Color32::from_rgb(BRUSH[0], BRUSH[1], BRUSH[2]));
     });
-    assert_eq!(trail, 0, "the host drew a trail of its own over the picture");
+    assert_eq!(trail, 0, "the host drew a trail of its own over the image");
     window.until(|_| !gestures(&dir).is_empty());
     let sent = gestures(&dir);
     assert_eq!(sent.len(), 1, "one drag sent {} gestures", sent.len());
@@ -770,7 +770,7 @@ fn each_tool_sends_one_gesture_in_picture_pixels() {
 }
 
 /// Catches toolbar zoom commands that act only on a drawing: Fit frames the
-/// picture, `canvas.zoom` sets a zoom by number, and each change is reported.
+/// image, `canvas.zoom` sets a zoom by number, and each change is reported.
 #[test]
 fn the_toolbar_zooms_and_fits_a_raster_tab() {
     let (mut window, dir, _stand_in) = easel("zoom");
@@ -785,7 +785,7 @@ fn the_toolbar_zooms_and_fits_a_raster_tab() {
     let zoom = ((f64::from(rect.width()) - 80.0) / f64::from(W)).min((f64::from(rect.height()) - 80.0) / f64::from(H));
     assert!(near(fitted.zoom, zoom), "Fit chose {} for {zoom}", fitted.zoom);
     let middle = screen(&window, [f64::from(W) / 2.0, f64::from(H) / 2.0]);
-    assert!((middle - rect.center()).length() < 0.01, "Fit did not center the picture");
+    assert!((middle - rect.center()).length() < 0.01, "Fit did not center the image");
     window.app.run_action(&Action::new("canvas.zoom_in"));
     assert!(near(raster(&window).camera.unwrap().zoom, zoom * 1.25));
     let log = dir.clone();
@@ -874,7 +874,7 @@ fn the_settings_row_and_the_panel_send_their_actions() {
     assert!(commands(&dir, "later").is_empty(), "a button that waits was sent");
 
     // The panel: page tabs, the lock icons, the heading's buttons, and the
-    // layer's picture.
+    // layer's image.
     let at = text_at(&window, "Properties").center();
     click(&mut window, at);
     let at = text_at(&window, "Adjustments").center();
@@ -903,7 +903,7 @@ fn the_settings_row_and_the_panel_send_their_actions() {
     assert!(commands(&dir, "group_layers").is_empty());
     let thumb = format!("raster:{}", dir.join("thumb.rgba").display());
     let drawn = textured(&window, &thumb);
-    assert!(drawn.iter().any(|at| panel.contains_rect(*at) && at.width() > 20.0), "the layer's picture was not drawn: {drawn:?}");
+    assert!(drawn.iter().any(|at| panel.contains_rect(*at) && at.width() > 20.0), "the layer's image was not drawn: {drawn:?}");
     close(window, dir);
 }
 
@@ -963,7 +963,7 @@ fn layers_are_dragged_into_and_out_of_groups() {
 
 /// Where each of the film's thumbnails was drawn, in order.
 fn thumbnails(window: &Window, dir: &Path) -> Vec<Rect> {
-    (0..PICTURES.len())
+    (0..IMAGES.len())
         .map(|index| {
             let name = format!("raster:{}", dir.join(format!("film{index}.rgba")).display());
             textured(window, &name).into_iter().next_back().unwrap_or_else(|| panic!("thumbnail {index} was not drawn"))
@@ -994,15 +994,15 @@ fn press_with(window: &mut Window, at: Pos2, button: egui::PointerButton, presse
 
 const BLUE: Color32 = Color32::from_rgb(37, 99, 235);
 
-/// Catches a filmstrip that is not drawn, is drawn over the picture, or
-/// does not show which picture is shown: a white strip under a hairline
-/// along the bottom of the working area, each thumbnail its own picture 44
+/// Catches a filmstrip that is not drawn, is drawn over the image, or
+/// does not show which image is shown: a white strip under a hairline
+/// along the bottom of the working area, each thumbnail its own image 44
 /// points tall at its proportions, in order, the shown one outlined in blue
-/// and the others not, and a bordered + tile after them. The picture's area
+/// and the others not, and a bordered + tile after them. The image's area
 /// ends where the strip begins, the host's first camera and Fit frame the
-/// picture there, and commands report that area as their viewport.
+/// image there, and commands report that area as their viewport.
 #[test]
-fn the_filmstrip_is_drawn_under_the_picture_with_the_shown_one_outlined() {
+fn the_filmstrip_is_drawn_under_the_image_with_the_shown_one_outlined() {
     let (mut window, dir, _stand_in) = filmed("film-drawn");
     let area = window.app.raster.shown;
     let strip = window
@@ -1012,39 +1012,39 @@ fn the_filmstrip_is_drawn_under_the_picture_with_the_shown_one_outlined() {
             egui::Shape::Rect(shown) if shown.fill == Color32::WHITE && (shown.rect.top() - area.bottom()).abs() < 0.01 && (shown.rect.width() - area.width()).abs() < 0.01 => Some(shown.rect),
             _ => None,
         })
-        .expect("no white strip under the picture's area");
+        .expect("no white strip under the image's area");
     assert!((strip.height() - 68.0).abs() < 0.01, "the strip is {} points tall", strip.height());
     let hairline = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::LineSegment { points, stroke } if stroke.color == crate::widgets::BORDER && (points[0].y - strip.top()).abs() < 1.0 && (points[1].x - points[0].x).abs() >= strip.width() - 0.5));
     assert!(hairline, "the strip has no hairline above it");
 
     let thumbs = thumbnails(&window, &dir);
     for (index, thumb) in thumbs.iter().enumerate() {
-        let (_, width, height) = PICTURES[index];
+        let (_, width, height) = IMAGES[index];
         assert!(strip.contains_rect(*thumb), "thumbnail {index} is off the strip: {thumb:?}");
         assert!((thumb.height() - 44.0).abs() < 0.5, "thumbnail {index} is {} tall", thumb.height());
         let proportions = (thumb.width() / thumb.height(), width as f32 / height as f32);
-        assert!((proportions.0 - proportions.1).abs() < 0.05, "thumbnail {index} is not at its picture's proportions: {proportions:?}");
+        assert!((proportions.0 - proportions.1).abs() < 0.05, "thumbnail {index} is not at its image's proportions: {proportions:?}");
         if index > 0 {
             assert!(thumb.left() > thumbs[index - 1].right(), "the thumbnails are out of order");
         }
     }
     let blue = edged(&window, BLUE);
     let outlined = |thumb: &Rect| blue.iter().any(|edge| edge.contains_rect(*thumb) && edge.width() - thumb.width() <= 6.5);
-    assert!(outlined(&thumbs[1]), "the shown picture is not outlined in blue");
-    assert!(!outlined(&thumbs[0]) && !outlined(&thumbs[2]), "a picture not shown is outlined in blue");
+    assert!(outlined(&thumbs[1]), "the shown image is not outlined in blue");
+    assert!(!outlined(&thumbs[0]) && !outlined(&thumbs[2]), "an image not shown is outlined in blue");
     let add = edged(&window, crate::widgets::BORDER)
         .into_iter()
         .find(|tile| strip.contains_rect(*tile) && tile.left() > thumbs[2].right() && (tile.height() - 44.0).abs() < 0.5)
         .expect("no bordered + tile after the thumbnails");
     assert!(add.left() - thumbs[2].right() < 20.0, "the + tile is not at the end of the thumbnails");
 
-    // The first camera and Fit frame the picture above the strip.
-    let name = format!("raster:{}", dir.join("picture.rgba").display());
+    // The first camera and Fit frame the image above the strip.
+    let name = format!("raster:{}", dir.join("image.rgba").display());
     let fitted = |window: &Window| {
-        let picture = textured(window, &name).into_iter().next_back().expect("the picture was not drawn");
+        let image = textured(window, &name).into_iter().next_back().expect("the image was not drawn");
         let rect = window.app.raster.shown;
-        assert!(picture.bottom() <= strip.top() - 39.0, "the picture reaches the strip: {picture:?}, strip at {}", strip.top());
-        assert!((picture.center() - rect.center()).length() < 0.5, "the picture is not centered above the strip");
+        assert!(image.bottom() <= strip.top() - 39.0, "the image reaches the strip: {image:?}, strip at {}", strip.top());
+        assert!((image.center() - rect.center()).length() < 0.5, "the image is not centered above the strip");
         let zoom = ((f64::from(rect.width()) - 80.0) / f64::from(W)).min((f64::from(rect.height()) - 80.0) / f64::from(H));
         assert!(near(raster(window).camera.unwrap().zoom, zoom), "the camera was not fitted to the area above the strip");
     };
@@ -1063,7 +1063,7 @@ fn the_filmstrip_is_drawn_under_the_picture_with_the_shown_one_outlined() {
 
 /// Catches a filmstrip that draws and does nothing, or sends the wrong
 /// thing: a click on a thumbnail sends `focus` and then `select` with its
-/// index, and paints nothing on the picture; a right-click opens that
+/// index, and paints nothing on the image; a right-click opens that
 /// thumbnail's rows above it, on the menus' card, and a row sends its own
 /// action; the + tile opens its rows above it; a thumbnail dragged along
 /// the strip shows where it will land and sends `reorder` with `to` counted
@@ -1083,7 +1083,7 @@ fn the_filmstrip_sends_focus_select_its_menus_and_reorder() {
     assert!(focus < select, "focus was not sent before select: {ids:?}");
     assert_eq!(commands(&dir, "show_item")[0]["arg"], json!({ "value": 2 }));
     assert_eq!(commands(&dir, "show_item")[0]["tab"], json!("r1"));
-    assert!(gestures(&dir).is_empty(), "a click on the strip painted the picture");
+    assert!(gestures(&dir).is_empty(), "a click on the strip painted the image");
 
     // Resting on a thumbnail shows its name. A pointer moved just after a
     // click shows none, so the move waits a moment as a person's would.
@@ -1111,7 +1111,7 @@ fn the_filmstrip_sends_focus_select_its_menus_and_reorder() {
     window.until(|_| !commands(&dir, "rename_item").is_empty());
     assert_eq!(commands(&dir, "rename_item")[0]["arg"], json!({ "item": 0 }));
     assert!(commands(&dir, "copy_item").is_empty() && commands(&dir, "remove_item").is_empty());
-    assert_eq!(commands(&dir, "show_item").len(), 1, "the right-click or its row selected a picture");
+    assert_eq!(commands(&dir, "show_item").len(), 1, "the right-click or its row selected an image");
 
     // The + tile opens its rows above it.
     let add = edged(&window, crate::widgets::BORDER)
@@ -1120,7 +1120,7 @@ fn the_filmstrip_sends_focus_select_its_menus_and_reorder() {
         .expect("no + tile");
     click(&mut window, add.center());
     settle(&mut window);
-    let new = text_at(&window, "New picture");
+    let new = text_at(&window, "New image");
     let open = text_at(&window, "Open PNG or JPEG…");
     assert!(new.bottom() < add.top() && open.bottom() < add.top(), "the + tile's rows are not above it");
     click(&mut window, open.center());
@@ -1155,8 +1155,8 @@ fn the_filmstrip_sends_focus_select_its_menus_and_reorder() {
         window.step();
     }
     assert_eq!(commands(&dir, "order_items").len(), 2, "a drag that ended where it began was sent");
-    assert_eq!(commands(&dir, "show_item").len(), 1, "a drag selected a picture");
-    assert!(gestures(&dir).is_empty(), "the strip's pointer reached the picture");
+    assert_eq!(commands(&dir, "show_item").len(), 1, "a drag selected an image");
+    assert!(gestures(&dir).is_empty(), "the strip's pointer reached the image");
     close(window, dir);
 }
 
@@ -1253,7 +1253,7 @@ fn a_sampler_shows_its_source_and_alt_click_sets_it() {
     assert!(crossed(&window, screen(&window, SOURCE)), "the cross is not at the source: {:?}", segments(&window, CROSS_DARK));
     let ring = window.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Circle(ring) if (ring.center - pointer).length() < 0.01 && (ring.radius - 20.0).abs() < 0.01));
     assert!(ring, "the brush's ring is not at the pointer");
-    // Over the workspace's bar, which lies on the picture's view, the
+    // Over the workspace's bar, which lies on the image's view, the
     // pointer is the bar's, so no ring is drawn.
     let bar = window.app.bar_rect.center();
     window.events.push(egui::Event::PointerMoved(bar));
@@ -1423,7 +1423,7 @@ fn a_text_typed_in_takes_the_keyboard_and_the_pointer_in_its_box() {
     close(window, dir);
 }
 
-/// Catches a move of selected pixels that the picture cannot follow: the
+/// Catches a move of selected pixels that the image cannot follow: the
 /// move sends `drag_part` from the press to the pointer each time it moves,
 /// in order, and then the finished `drag`.
 #[test]
@@ -1552,8 +1552,8 @@ fn a_free_curve_falls_as_well_as_rises() {
 }
 
 /// Catches layer rows that hide what kind they are: a mask's row draws its
-/// mark muted at the row's right, and a text's row, with no picture, draws
-/// its icon in the picture's frame.
+/// mark muted at the row's right, and a text's row, with no image, draws
+/// its icon in the image's frame.
 #[test]
 fn a_layer_row_draws_its_mark_and_its_icon_in_the_frame() {
     let (window, dir, _stand_in) = easel_with("marks", |dir| {
@@ -1572,12 +1572,12 @@ fn a_layer_row_draws_its_mark_and_its_icon_in_the_frame() {
     assert!((mark.center().y - name.center().y).abs() < 2.0 && mark.left() > name.right() && panel.right() - mark.right() < 30.0, "the mask's mark is not at its row's right: {mark:?}");
     let text = text_at(&window, "Golden hour");
     let icon = text_at(&window, &glyph("text"));
-    let frame = edged(&window, crate::widgets::BORDER).into_iter().find(|frame| frame.contains_rect(icon) && frame.right() < text.left()).expect("the text's icon is not in a picture's frame");
+    let frame = edged(&window, crate::widgets::BORDER).into_iter().find(|frame| frame.contains_rect(icon) && frame.right() < text.left()).expect("the text's icon is not in an image's frame");
     assert!((frame.center().y - text.center().y).abs() < 2.0, "the frame is not on the text's row");
     close(window, dir);
 }
 
-/// What the Image Editor's settings row said in the owner's window, where
+/// What the Image Generator's settings row said in the owner's window, where
 /// the brush cannot paint, at full length.
 const REFUSAL: &str = "Color Grade is an adjustment, with no pixels to paint. Add a mask to paint where it applies, or choose a pixel layer to paint on.";
 
@@ -1795,15 +1795,15 @@ fn a_held_curve_point_moves_on_the_curve_the_drag_made() {
 }
 
 /// Catches changes queued between two frames replayed one by one, each a
-/// read of the whole picture file and an upload of all of it, on the
-/// window's own thread: sixteen views, each changing the whole picture,
+/// read of the whole image file and an upload of all of it, on the
+/// window's own thread: sixteen views, each changing the whole image,
 /// reach the window before a frame draws them; that frame only starts a
-/// reading, and the texture then takes the latest picture in one upload.
+/// reading, and the texture then takes the latest image in one upload.
 #[test]
-fn queued_whole_changes_reach_the_picture_in_one_upload() {
+fn queued_whole_changes_reach_the_image_in_one_upload() {
     let (mut window, dir, _stand_in) = easel("queued");
     let blue = [40u8, 60, 220, 255];
-    std::fs::write(dir.join("picture.rgba"), blue.repeat((W * H) as usize)).unwrap();
+    std::fs::write(dir.join("image.rgba"), blue.repeat((W * H) as usize)).unwrap();
     let views: Vec<String> = (2..=17u64)
         .map(|revision| {
             let mut changed = view(&dir, brush());
@@ -1822,14 +1822,14 @@ fn queued_whole_changes_reach_the_picture_in_one_upload() {
         window.app.apps[0].running.poll();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let name = format!("raster:{}", dir.join("picture.rgba").display());
-    let texture = |window: &Window| window.ctx.tex_manager().read().allocated().find(|(_, meta)| meta.name == name).map(|(id, _)| *id).expect("the picture has no texture");
-    let picture = texture(&window);
-    let uploaded = |window: &Window| window.uploads.iter().filter(|upload| upload.0 == picture).cloned().collect::<Vec<_>>();
+    let name = format!("raster:{}", dir.join("image.rgba").display());
+    let texture = |window: &Window| window.ctx.tex_manager().read().allocated().find(|(_, meta)| meta.name == name).map(|(id, _)| *id).expect("the image has no texture");
+    let image = texture(&window);
+    let uploaded = |window: &Window| window.uploads.iter().filter(|upload| upload.0 == image).cloned().collect::<Vec<_>>();
     // The frame that sees them only starts the reading, and draws what it
     // showed before.
     window.step();
-    assert!(uploaded(&window).is_empty(), "the frame read the picture itself");
+    assert!(uploaded(&window).is_empty(), "the frame read the image itself");
     for _ in 0..50 {
         window.step();
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1837,6 +1837,6 @@ fn queued_whole_changes_reach_the_picture_in_one_upload() {
     let uploads = uploaded(&window);
     assert_eq!(uploads.len(), 1, "the queued changes were uploaded {} times", uploads.len());
     let (_, _, size, first) = uploads[0];
-    assert_eq!((size, first), ([W as usize, H as usize], Color32::from_rgb(40, 60, 220)), "the upload is not the latest picture, whole");
+    assert_eq!((size, first), ([W as usize, H as usize], Color32::from_rgb(40, 60, 220)), "the upload is not the latest image, whole");
     close(window, dir);
 }

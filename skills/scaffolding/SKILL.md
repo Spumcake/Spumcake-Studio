@@ -1,6 +1,6 @@
 ---
 name: scaffolding
-description: Set up a new Spumcake Studio sub-application the conventional way by copying apps/template — its own program and crate, a manifest the host finds, declarations through the protocol, and no dependency on the host. Use when a task needs a new sub-application, or brings an existing program into Inpainter as one. Sets up the skeleton only; the features come after.
+description: Set up a new Spumcake Studio sub-application the conventional way by copying apps/template — its own program and crate, a manifest the host finds, declarations through the protocol, and no dependency on the host. Use when a task needs a new sub-application, or brings an existing program into Spumcake Studio as one. Sets up the skeleton only; the features come after.
 ---
 
 # Scaffold a sub-application
@@ -11,8 +11,11 @@ Copy the template. Do not write a sub-application from scratch or from a descrip
 
 ## Choose the names
 
-- **Id:** lowercase letters, digits, and hyphens, such as `simple-sketch`. The folder `apps/<id>`, the crate name, the program name, and the manifest's `id` are all this value.
-- **Name:** what people see, such as `Simple Sketch`. It is the label of a tab that has no file.
+Names come from Studio's conventions guide, in the team repository at `.project/projects/spumcake-studio/documents/guides/conventions-guide.md`: a workspace is named for what it makes, and the one word for what it makes names its items and actions. A new workspace's names go into the guide, with the owner's yes, before it is scaffolded.
+
+- **Id:** the name in lowercase, with hyphens between words, such as `storyboard-generator`. The folder `apps/<id>`, the crate name, the program name, and the manifest's `id` are all this value.
+- **Name:** what people see, such as `Storyboard Generator`.
+- **Word:** what it makes, such as storyboard. A new item is `protocol::free_name(&protocol::untitled("Storyboard"), taken)`: "Untitled Storyboard", then "Untitled Storyboard 2", free among its open tabs and the files in the project's folder.
 
 Check that `apps/<id>` does not exist yet.
 
@@ -20,8 +23,8 @@ Check that `apps/<id>` does not exist yet.
 
 1. Copy the folder `apps/template` to `apps/<id>`, with every file in it.
 2. In `apps/<id>/Cargo.toml`, set the package `name` to the id. Leave the dependencies as they are: `protocol`, and `serde_json` for a skill's input schema and results.
-3. In `apps/<id>/manifest.json`, set `id` and `executable` to the id and `name` to the name. Leave `protocol` as it is.
-4. In `apps/<id>/src/main.rs`, set `TAB` to the id and the starting `label` to the name. A scaffold keeps the contents message and the panel message, because the template declares the shared grid and the properties panel on the right. Remove one of those messages only when the task says this sub-application does not use it. Keep the template's skill, which renames the tab, until the task gives the sub-application skills of its own; change its `name`, `description`, and `instructions` only to name the new sub-application's tab. Add no other messages.
+3. In `apps/<id>/manifest.json`, set `id` and `executable` to the id and `name` to the name, and remove `hidden`: the template is hidden, and a new sub-application is not. Leave `protocol` as it is. When a sub-application is renamed later, its manifest's `formerly` lists its earlier ids, so the host gives it what was kept under them.
+4. In `apps/<id>/src/main.rs`, set `TAB` to the id and the starting `label` to the new item's name. A scaffold keeps the contents message and the panel message, because the template declares the shared grid and the properties panel on the right. Remove one of those messages only when the task says this sub-application does not use it. Keep the template's skill, which renames the tab, until the task gives the sub-application skills of its own; change its `name`, `description`, and `instructions` only to name the new sub-application's tab. Add no other messages.
 5. In `apps/<id>/AGENTS.md`, change the heading to the name and replace the first paragraph with one sentence. If the task states what the sub-application is for, use that as the one sentence. If it does not, use: This sub-application is a scaffold copied from the template. Keep the rules unchanged.
 6. Add `"apps/<id>"` to `members` in the workspace `Cargo.toml`.
 
@@ -40,12 +43,12 @@ No tools, commands, menu rows, properties, documents, or saving, and no skill be
 
 ## What a sub-application can declare later
 
-After `end`, a sub-application can send these at any time; each replaces the one sent before. The types are in `protocol/src/declare.rs`, and Simple Sketch's `src/session/declare.rs` is a complete example.
+After `end`, a sub-application can send these at any time; each replaces the one sent before. The types are in `protocol/src/declare.rs`, and the Storyboard Generator's `src/session/declare.rs` is a complete example.
 
 - `tabs` — the tab list, the active tab, and the action the plus runs. A tab reported here and not in the greeting shows the contents and panel the greeting declared for the first tab.
 - `keys`, `toolbar`, `menu`, `properties` — shortcuts, toolbar items, menu rows, and panel rows. Every control carries an `action`; when it is used the host sends `command {id, tab, arg}` with that action's id and argument, adding `value` to the argument when the control has one (a typed name, a slider's number, a sort position). A panel row's edit is `property {prop, value, preview}`. The Layers list's drag sends its `reorder` action with `{node, value}`, the position counted from the top among the row's siblings; a list that declares `nest` lets rows be dragged into and out of groups, and its `reorder` also carries `parent`, the group's id or null for the top level. The host never reads an action's id, except the drawing surface's own `canvas.zoom_in`, `canvas.zoom_out`, `canvas.fit`, and `canvas.zoom_to_selection`, and the window's `window.maximize`.
 - `contents {kind: "canvas"}`, `document`, and `canvas` — the drawing surface. The host previews each gesture from the declared tool and sends `gesture`, `select`, and `camera`; the sub-application commits and sends the whole `document` back.
-- `contents {kind: "cells"}` and `cells {tab, cells, selected}` — a list of cells. The host draws every cell and runs every cell. The sub-application stores them. `run_cell {tab, cell}` and `stop_cell {tab, cell}` ask the host to run or stop one. The host sends `edit_cell` when a prompt is committed, `cell_result` when a run finishes, fails, or is stopped, `insert_cell` for a cell dragged in, and `select_cell` when one is selected. A cell's `kind` is a string. `text` and `image` are the kinds this version runs; an `image` cell's output is a picture, a part `{path, media_type}` whose path is relative to the project. Any other kind is kept and drawn, and Run stays disabled. `running` is not a stored state. A run's `cell_result` names the `endpoint` and `model` it ran on, and its `effort` when one was set; keep all three with the run, so Run again repeats it.
+- `contents {kind: "cells"}` and `cells {tab, cells, selected}` — a list of cells. The host draws every cell and runs every cell. The sub-application stores them. `run_cell {tab, cell}` and `stop_cell {tab, cell}` ask the host to run or stop one. The host sends `edit_cell` when a prompt is committed, `cell_result` when a run finishes, fails, or is stopped, `insert_cell` for a cell dragged in, and `select_cell` when one is selected. A cell's `kind` is a string. `text` and `image` are the kinds this version runs; an `image` cell's output is an image, a part `{path, media_type}` whose path is relative to the project. Any other kind is kept and drawn, and Run stays disabled. `running` is not a stored state. A run's `cell_result` names the `endpoint` and `model` it ran on, and its `effort` when one was set; keep all three with the run, so Run again repeats it.
 - `ask` and `file` — a question or a file dialog. The host answers with `answer` or `file_result`.
 - `quit_ready` after `quit`, and `pong` after `ping`.
 - `skills` — what the assistant can do here, replacing the skills sent before. Send it with the declaration, before `end`, and again whenever the skills change. Each skill has an `id`, a `name`, a `description`, `instructions` the assistant reads before using it (units, coordinates, what to read first, how ids work), and `tools`, each with a `name`, a `description`, and `input`, a JSON Schema for an object. The host and the assistant know no skill by name: write these for a model that knows nothing else about the sub-application. The types are in `protocol/src/skills.rs`.
@@ -54,15 +57,15 @@ After `end`, a sub-application can send these at any time; each replaces the one
 
 The host sends these; a sub-application that declares no skills never receives `invoke`.
 
-- `invoke {call, tab, tool, input, group}` — run one tool on that tab. `tool` is `<application id>__<skill id>__<tool name>`, made by `protocol::tool_key`. Carry it out through the same path the person's hand action takes, so undo, saving, and what the host shows are the same as for hand work. Send any `document`, `tabs`, or other message the call caused first, then `result {call, ok, output, images?}`: `output` is JSON for the model to read, such as what was made and its ids; with `ok: false` nothing changed and `output` says why; `images` holds PNG pictures in standard base64. Every change made under one `group`, the assistant's request, is one undo step, until another group or a change by hand. Undo and redo stay with the person, so they are never tools.
+- `invoke {call, tab, tool, input, group}` — run one tool on that tab. `tool` is `<application id>__<skill id>__<tool name>`, made by `protocol::tool_key`. Carry it out through the same path the person's hand action takes, so undo, saving, and what the host shows are the same as for hand work. Send any `document`, `tabs`, or other message the call caused first, then `result {call, ok, output, images?}`: `output` is JSON for the model to read, such as what was made and its ids; with `ok: false` nothing changed and `output` says why; `images` holds PNG images in standard base64. Every change made under one `group`, the assistant's request, is one undo step, until another group or a change by hand. Undo and redo stay with the person, so they are never tools.
 - `open {path?}` — open that file in a new tab or, with no path, the tab the sub-application opens of its own at start. A tab opened this way is declared as the greeting declares tabs: send its `contents` and, when it uses the panel, its `panel`, before the `tabs` that lists it.
 - `claim {id, path}` — say whether this file is the application's own work. Answer `claimed {id, yours}`. The host asks the application that opened the dialog first, then the others. The first that claims it receives `open`. A file nobody claims goes to the application that asked, which reports its own error. The host never reads the file to decide.
 - `keep {tab}` — make sure that tab's file is written. Answer `kept {tab, path?, error?}`: `path` with no `error` when written, no `path` and no `error` when clean or untouched, and `error` when writing failed.
 - Each `tabs` entry carries `path`, the file the tab shows once it has one, and `saves`, whether the tab is a document that can be saved to a file. The template's tab does not save.
 - Started with `--restore` (`protocol::RESTORE_FLAG`), a sub-application opens no document of its own: its greeting has no `tab`, `contents`, or `panel`, and it waits for `open`. The host uses this to reopen a workspace.
 - `project {folder}` — the current project's folder as an absolute path, sent before any `open`. Inside a project a sub-application that saves documents:
-  - writes each document into that folder by itself, about a second after it changes, with no Save, Save As, or save question; Simple Sketch and Mission Control show how, with a loop that also wakes with no message;
-  - names a new document's file after its tab, adding " 2", " 3", and on when a file of that name exists in the folder, and never replaces another file;
+  - writes each document into that folder by itself, about a second after it changes, with no Save, Save As, or save question; the Storyboard Generator and Recipe Creation show how, with a loop that also wakes with no message;
+  - names a new document's file after its tab, which is named by the conventions guide's rule, free among the folder's files, and never replaces another file;
   - writes everything before a tab closes, before `kept`, and before `quit_ready`, so closing and quitting ask nothing;
   - refuses every path outside the folder, from `open`, `file_result`, `claim`, and its own recent files, and opens nothing in its place.
 
@@ -76,7 +79,7 @@ The protocol in `protocol/` is the only way the host and a sub-application talk,
 
 ## Bringing an existing program in
 
-Scaffold first, so the host already shows the new sub-application's tab. Then, before writing code, map what carries over from the existing program: each file, function, constant, and asset it needs, and where it lands. Carry code over unchanged, or with named edits that the new structure requires. Live drawing, which the host does with its shared drawing code, is separated from the document, saving, and undo, which stay with the sub-application. Do not rewrite what the existing program already does.
+Scaffold first, so the host already shows the new sub-application's tab. Then, before writing code, map what carries over from the existing program: each file, function, constant, and resource it needs, and where it lands. Carry code over unchanged, or with named edits that the new structure requires. Live drawing, which the host does with its shared drawing code, is separated from the document, saving, and undo, which stay with the sub-application. Do not rewrite what the existing program already does.
 
 ## Finish
 

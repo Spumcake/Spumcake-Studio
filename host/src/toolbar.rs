@@ -1061,7 +1061,7 @@ fn context_menu(
     chosen: &mut Vec<Action>,
 ) {
     // A menu with no icon shows its label as text in a bordered box, a
-    // dropdown such as a notebook's cell kind.
+    // dropdown such as a recipe's cell kind.
     if icon.is_empty() {
         let font = egui::FontId::proportional(13.0);
         let text_w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), widgets::TEXT).size().x;

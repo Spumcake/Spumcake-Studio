@@ -241,7 +241,7 @@ pub struct Toolbar {
     #[serde(default)]
     pub trailing: Vec<ToolItem>,
     /// A second row under the toolbar: the chosen tool's settings, as the
-    /// image-editor views show. None of it is drawn when both are empty.
+    /// image-generator views show. None of it is drawn when both are empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ToolItem>,
     /// Pinned to that row's right, laid out from its right edge.
@@ -419,7 +419,7 @@ pub struct LayerRow {
     pub menu: Vec<MenuEntry>,
     #[serde(default)]
     pub colors: Vec<ColorRow>,
-    /// A small picture of the layer, drawn in place of its icon.
+    /// A small image of the layer, drawn in place of its icon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<crate::Thumbnail>,
     /// An icon drawn muted at the row's right, such as `link` for a mask.
@@ -502,7 +502,7 @@ pub struct Properties {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layers: Option<Layers>,
     pub sections: Vec<Section>,
-    /// Page tabs across the panel's top, as the asset-editor mockup shows.
+    /// Page tabs across the panel's top, as the Image Generator's mockup shows.
     /// With pages, the panel draws the tabs, then the sections, then the
     /// layers, so a layer's settings sit above the list of layers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

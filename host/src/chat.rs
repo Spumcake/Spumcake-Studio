@@ -48,8 +48,8 @@ const SEND: Color32 = Color32::from_rgb(24, 24, 27);
 /// The model picker's pill.
 const PILL: Color32 = Color32::from_rgb(249, 250, 251);
 
-/// The extensions the plus offers: pictures, then text files.
-pub(crate) const PICTURES: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
+/// The extensions the plus offers: images, then text files.
+pub(crate) const IMAGES: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
 pub(crate) const TEXTS: &[&str] = &["txt", "md", "markdown", "csv", "json", "xml", "html", "svg"];
 
 /// What the panel shows and holds between frames.
@@ -578,7 +578,7 @@ pub(crate) fn level_picker(
     if levels.is_empty() {
         ui.add(egui::Label::new(egui::RichText::new("No levels are set. Add one in Settings, under Discussion.").color(MUTED).size(ts::body_size())).wrap());
         let (row, row_response) = ui.allocate_exact_size(vec2(288.0, 30.0), Sense::click());
-        ui.painter().text(row.left_center(), Align2::LEFT_CENTER, "Open Settings", ts::body(), TEXT);
+        ui.painter().text(row.left_center(), Align2::LEFT_CENTER, "Open settings", ts::body(), TEXT);
         if row_response.clicked() {
             pick = Some(LevelPick::Settings);
         }
@@ -936,10 +936,24 @@ fn tool_row(ui: &mut egui::Ui, entry: &Entry, width: f32) {
     );
 }
 
-/// A tool's key, `<application>__<skill>__<tool>`, as words.
+/// A tool's key, `<application>__<skill>__<tool>`, as words: the tool in
+/// lowercase and the application by name. An application's id is its name
+/// in lowercase with hyphens, as the conventions guide sets, so each word
+/// takes its capital back; the host's own tools are Spumcake Studio's.
 fn step_words(key: &str) -> String {
     let mut parts = key.split("__");
-    let app = parts.next().unwrap_or(key).replace('-', " ");
+    let id = parts.next().unwrap_or(key);
+    let app = if id == crate::route::HOST_ID {
+        String::from("Spumcake Studio")
+    } else {
+        id.split('-')
+            .map(|word| {
+                let mut letters = word.chars();
+                letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect())
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     let tool = parts.last().unwrap_or("").replace('_', " ");
     if tool.is_empty() { app } else { format!("{tool} · {app}") }
 }
@@ -1107,7 +1121,7 @@ fn utc_hour_minute(seconds: u64) -> (u32, u32) {
     ((day / 3600) as u32, ((day % 3600) / 60) as u32)
 }
 
-/// Reads a chosen file for the model: a picture by its extension, or text.
+/// Reads a chosen file for the model: an image by its extension, or text.
 /// None when it cannot be read.
 pub(crate) fn load_attachment(path: &Path) -> Option<Attachment> {
     let extension = path
@@ -1137,6 +1151,14 @@ pub(crate) fn load_attachment(path: &Path) -> Option<Attachment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a step line that shows a workspace by its id: a tool is named
+    /// with its workspace's name, as the person reads it elsewhere.
+    #[test]
+    fn a_step_names_its_workspace_as_people_read_it() {
+        assert_eq!(step_words("lantern-room__light__add_beam"), "add beam · Lantern Room");
+        assert_eq!(step_words(&format!("{}__prompt__edit_image", crate::route::HOST_ID)), "edit image · Spumcake Studio");
+    }
 
     /// Catches a turn split or merged wrongly: everything the assistant did
     /// for a message belongs to that message's turn, in order.

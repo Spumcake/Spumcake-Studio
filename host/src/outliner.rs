@@ -39,9 +39,9 @@ pub(crate) fn show(ui: &mut egui::Ui, layers: &Layers, paged: bool, sent: &mut V
         heading(ui, &layers.actions, sent);
     }
     let rows = &layers.rows;
-    // Rows with pictures are drawn as the asset-editor mockup draws them, and
-    // then every row is, so a group sits among its layers' pictures.
-    let pictures = rows.iter().any(|row| row.thumbnail.is_some());
+    // Rows with images are drawn as the gallery mockup draws them, and
+    // then every row is, so a group sits among its layers' images.
+    let images = rows.iter().any(|row| row.thumbnail.is_some());
     let toggled = toggled_set(ui);
     let mut toggle: Option<u64> = None;
     let drag_id = ui.id().with("object-drag");
@@ -69,8 +69,8 @@ pub(crate) fn show(ui: &mut egui::Ui, layers: &Layers, paged: bool, sent: &mut V
             } else {
                 toggled_here
             };
-        if pictures {
-            picture_row(ui, node, flags, open, &mut toggle, &mut dragging, sent);
+        if images {
+            image_row(ui, node, flags, open, &mut toggle, &mut dragging, sent);
         } else {
             object_row(ui, node, flags, open, &mut toggle, &mut dragging, sent);
         }
@@ -83,7 +83,7 @@ pub(crate) fn show(ui: &mut egui::Ui, layers: &Layers, paged: bool, sent: &mut V
             hidden_at = Some(node.depth);
             continue;
         }
-        if node.group || pictures {
+        if node.group || images {
             continue;
         }
         for color in &node.colors {
@@ -252,7 +252,7 @@ fn name_area(
 }
 
 /// The "Layers" heading over the list, with its icon buttons at the right,
-/// as the asset-editor mockup shows add, group, and delete.
+/// as the gallery mockup shows add, group, and delete.
 fn heading(ui: &mut egui::Ui, actions: &[HeadingAction], sent: &mut Vec<Sent>) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, HEADING_H), Sense::hover());
@@ -289,23 +289,23 @@ fn heading(ui: &mut egui::Ui, actions: &[HeadingAction], sent: &mut Vec<Sent>) {
 /// The heading's height and each of its buttons' width.
 const HEADING_H: f32 = 40.0;
 const HEADING_BUTTON: f32 = 34.0;
-/// A row with a picture, as tall as the mockup's.
-const PICTURE_ROW: f32 = 52.0;
-/// The picture's box in a row.
+/// A row with an image, as tall as the mockup's.
+const IMAGE_ROW: f32 = 52.0;
+/// The image's box in a row.
 const THUMB: egui::Vec2 = vec2(56.0, 38.0);
 /// The hairline between rows.
 const ROW_RULE: Color32 = Color32::from_rgb(238, 240, 243);
-/// A chosen row with a picture, pale blue as the mockup's Background Photo.
+/// A chosen row with an image, pale blue as the mockup's Background Photo.
 const PICKED: Color32 = Color32::from_rgb(226, 236, 252);
 const PICKED_EDGE: Color32 = Color32::from_rgb(37, 99, 235);
 
-/// A row as the asset-editor mockup draws it: the eye, the layer's picture
+/// A row as the gallery mockup draws it: the eye, the layer's image
 /// in a small box, its name, its mark muted at the right, and its lock when
 /// it is locked or the pointer is over the row, before the mark. A group, or
-/// a layer with no picture, shows its icon in the box; a group also shows a
+/// a layer with no image, shows its icon in the box; a group also shows a
 /// disclosure arrow.
 #[allow(clippy::too_many_arguments)]
-fn picture_row(
+fn image_row(
     ui: &mut egui::Ui,
     node: &LayerRow,
     flags: &FlagIcons,
@@ -314,7 +314,7 @@ fn picture_row(
     dragging: &mut Option<u64>,
     sent: &mut Vec<Sent>,
 ) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), PICTURE_ROW), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), IMAGE_ROW), Sense::hover());
     ui.data_mut(|data| data.insert_temp(row_rect_id(ui, node.id), rect));
     let hovered = ui.rect_contains_pointer(rect);
     if node.selected {
@@ -329,10 +329,10 @@ fn picture_row(
     flag_button(ui, Flag::Eye, flags, node.visible, &node.toggle_visible, rect.left() + 2.0, rect, sent);
     // Every row keeps room for a group's disclosure triangle, and each level
     // indents further than that room, so a group's layers sit clearly
-    // inside it rather than level with its picture.
+    // inside it rather than level with its image.
     let x0 = rect.left() + 34.0 + node.depth as f32 * 20.0;
     if node.group {
-        let spot = Rect::from_min_size(pos2(x0 - 2.0, rect.top()), vec2(14.0, PICTURE_ROW));
+        let spot = Rect::from_min_size(pos2(x0 - 2.0, rect.top()), vec2(14.0, IMAGE_ROW));
         let response = ui.interact(spot, ui.id().with(("disclose", node.id)), Sense::click_and_drag());
         disclosure(ui.painter(), spot.center(), open, if response.hovered() { TEXT } else { MUTED });
         if response.clicked() {
@@ -348,9 +348,9 @@ fn picture_row(
             let inside = frame.shrink(1.0);
             let size = vec2(thumbnail.width.max(1) as f32, thumbnail.height.max(1) as f32);
             let scale = (inside.width() / size.x).min(inside.height() / size.y);
-            let picture = Rect::from_center_size(inside.center(), size * scale);
+            let image = Rect::from_center_size(inside.center(), size * scale);
             let painter = ui.painter().with_clip_rect(inside);
-            match crate::raster::raw_picture(
+            match crate::raster::raw_image(
                 ui.ctx(),
                 &thumbnail.path,
                 thumbnail.width,
@@ -361,11 +361,11 @@ fn picture_row(
             ) {
                 Some((texture, opaque)) => {
                     if !opaque {
-                        crate::raster::checker(ui.ctx(), &painter, picture);
+                        crate::raster::checker(ui.ctx(), &painter, image);
                     }
-                    painter.image(texture, picture, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    painter.image(texture, image, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
-                None => crate::raster::checker(ui.ctx(), &painter, picture),
+                None => crate::raster::checker(ui.ctx(), &painter, image),
             }
         }
         None => toolbar::paint_icon(ui.painter(), frame.center(), &node.icon, 18.0, TEXT),
@@ -388,7 +388,7 @@ fn picture_row(
     };
     let name_rect = Rect::from_min_max(pos2(frame.right() + 12.0, rect.top()), pos2(name_right, rect.bottom()));
     // The whole row between the eye and the lock takes the pointer, so the
-    // picture is clicked and dragged as the name is.
+    // image is clicked and dragged as the name is.
     let area = Rect::from_min_max(pos2(frame.left(), rect.top()), name_rect.max);
     name_area(ui, node, name_rect, area, dragging, sent);
     if node.locked || hovered {

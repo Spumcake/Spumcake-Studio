@@ -836,7 +836,7 @@ fn endpoints(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choice
     } else {
         "Where Studio sends prompts. Keys are kept in your system keyring."
     };
-    if header(ui, panel, "Endpoints", line, Some("Add Endpoint")) {
+    if header(ui, panel, "Endpoints", line, Some("Add endpoint")) {
         panel.add_endpoint();
         return;
     }
@@ -883,7 +883,7 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
         return;
     }
     let editing = panel.endpoint_form.editing.is_some();
-    header(ui, panel, if editing { "Edit Endpoint" } else { "Add Endpoint" }, "", None);
+    header(ui, panel, if editing { "Edit endpoint" } else { "Add endpoint" }, "", None);
     let rows = card(ui, 4);
     let form = &mut panel.endpoint_form;
     // Type
@@ -923,7 +923,7 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
     }
     gap(ui, 16.0);
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), CONTROL_H), Sense::hover());
-    let save_label = if editing { "Save" } else { "Add Endpoint" };
+    let save_label = if editing { "Save" } else { "Add endpoint" };
     let save_w = sessions::label_width(ui, save_label);
     let save = Rect::from_min_size(pos2(bar.right() - save_w, bar.top()), vec2(save_w, CONTROL_H));
     let cancel_w = sessions::label_width(ui, "Cancel");
@@ -975,7 +975,7 @@ fn endpoint_options(settings: &Settings, current: Option<&str>, chats_only: bool
 }
 
 fn skills(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: &mut Vec<SettingsChoice>) {
-    if header(ui, panel, "Skills", "Each skill sends its prompts to the endpoint you choose for it.", Some("New Skill")) {
+    if header(ui, panel, "Skills", "Each skill sends its prompts to the endpoint you choose for it.", Some("New skill")) {
         let skill = SkillSetting {
             id: protocol::cell_id(),
             name: String::from("New Skill"),
@@ -1134,11 +1134,11 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
         skill.endpoint = Some(ids[picked].clone());
     }
     if !built_in {
-        // What the skill makes: text, or a picture as an Image cell.
+        // What the skill makes: text, or an image as an Image cell.
         let makes_rect = control(rows[3], CONTROL_W, 0.0);
-        row_text(ui, rows[3], rows[3].left() + PAD, makes_rect.left() - 8.0, "Makes", "Text, or a picture shown as an Image cell");
+        row_text(ui, rows[3], rows[3].left() + PAD, makes_rect.left() - 8.0, "Makes", "Text, or an image shown as an Image cell");
         let kinds = [Makes::Text, Makes::Images];
-        let labels: Vec<String> = ["Text", "Pictures"].iter().map(|label| label.to_string()).collect();
+        let labels: Vec<String> = ["Text", "Images"].iter().map(|label| label.to_string()).collect();
         let chosen = kinds.iter().position(|kind| *kind == skill.makes);
         let shown = chosen.map_or("Text", |index| labels[index].as_str()).to_string();
         if let Some(picked) = select(ui, makes_rect, &format!("skill-makes-{id}"), &shown, &labels, chosen) {
@@ -1149,7 +1149,7 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
         let line = match &endpoint {
             Some(endpoint) if !endpoint.kind.chats() => "ComfyUI skills run from a later version",
             Some(endpoint) if skill.makes == Makes::Images && endpoint.kind != EndpointKind::Openrouter => {
-                "Pictures are made only through OpenRouter for now"
+                "Images are made only through OpenRouter for now"
             }
             _ if skill.makes == Makes::Images => "From the endpoint's image models",
             _ => "From the endpoint's models",
@@ -1191,7 +1191,7 @@ fn discussion(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choic
     let settings = env.settings;
     let source = settings.discussion_endpoint().map_or("no endpoint yet", |endpoint| endpoint.name.as_str());
     let line = format!("The assistant's levels, lowest first. Models come from {source}, the endpoint the Discussion skill uses.");
-    if header(ui, panel, "Discussion", &line, Some("Add Level")) {
+    if header(ui, panel, "Discussion", &line, Some("Add level")) {
         panel.add_level(settings);
         return;
     }
@@ -1267,7 +1267,7 @@ fn level_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choic
     }
     let settings = env.settings;
     let editing = panel.level_form.editing.is_some();
-    header(ui, panel, if editing { "Edit Level" } else { "Add Level" }, "A model at a reasoning effort.", None);
+    header(ui, panel, if editing { "Edit level" } else { "Add level" }, "A model at a reasoning effort.", None);
     // Levels follow the Discussion skill's endpoint, as the owner set on
     // 2026-10-29: the form has no endpoint of its own.
     let rows = card(ui, 3);
@@ -1310,7 +1310,7 @@ fn level_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choic
     }
     gap(ui, 16.0);
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), CONTROL_H), Sense::hover());
-    let save_label = if editing { "Save" } else { "Add Level" };
+    let save_label = if editing { "Save" } else { "Add level" };
     let save_w = sessions::label_width(ui, save_label);
     let save = Rect::from_min_size(pos2(bar.right() - save_w, bar.top()), vec2(save_w, CONTROL_H));
     let cancel_w = sessions::label_width(ui, "Cancel");

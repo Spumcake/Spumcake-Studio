@@ -310,7 +310,7 @@ impl Agent {
             if calls.is_empty() {
                 return text.trim().is_empty().then(|| String::from(NO_REPLY));
             }
-            let mut pictures: Vec<Value> = Vec::new();
+            let mut image_parts: Vec<Value> = Vec::new();
             for (id, name, arguments) in &calls {
                 let content = if busy.stopped {
                     tool_error(NOT_RUN_STOPPED)
@@ -323,11 +323,11 @@ impl Agent {
                     match self.call(busy, name, arguments) {
                         Some((content, images)) => {
                             if !images.is_empty() {
-                                pictures.push(json!({
+                                image_parts.push(json!({
                                     "type": "text",
-                                    "text": format!("{PICTURES_LEAD}`{name}` returned:"),
+                                    "text": format!("{IMAGES_LEAD}`{name}` returned:"),
                                 }));
-                                pictures.extend(images.iter().map(|png| image_part("image/png", png)));
+                                image_parts.extend(images.iter().map(|png| image_part("image/png", png)));
                             }
                             content
                         }
@@ -340,8 +340,8 @@ impl Agent {
                     "content": content,
                 }));
             }
-            if !pictures.is_empty() {
-                self.history.push(json!({"role": "user", "content": pictures}));
+            if !image_parts.is_empty() {
+                self.history.push(json!({"role": "user", "content": image_parts}));
             }
             if busy.stopped {
                 return Some(String::from(STOPPED));
@@ -400,7 +400,7 @@ impl Agent {
 
     /// One tool call: checked against the tools offered, then routed through
     /// the host. Returns the tool message's content and the result's
-    /// pictures, or `None` when the host is gone.
+    /// images, or `None` when the host is gone.
     fn call(&mut self, busy: &mut Busy, name: &str, arguments: &str) -> Option<(String, Vec<String>)> {
         let routed = route(&busy.targets, name, arguments);
         let (app, tab, input) = match routed {
@@ -431,8 +431,8 @@ impl Agent {
         self.tool_entry(name, Some(result.ok));
         let mut content = json!({"ok": result.ok, "output": result.output});
         if !result.images.is_empty() {
-            content["pictures"] = json!(format!(
-                "{} picture(s), in the next message.",
+            content["images"] = json!(format!(
+                "{} image(s), in the next message.",
                 result.images.len()
             ));
         }
@@ -674,7 +674,7 @@ fn reread(path: &Path) -> Value {
     }
 }
 
-/// Before a new request, earlier requests' tool outputs and pictures are cut
+/// Before a new request, earlier requests' tool outputs and images are cut
 /// to a stub. They may be stale, and kept whole they would make every later
 /// model turn larger and costlier. The calls themselves, and every message
 /// of the person and the assistant, stay.
@@ -691,20 +691,20 @@ fn compact(history: &mut [Value]) {
                 message["content"] = Value::String(stub);
             }
             Some("user") => {
-                // The message that carries tools' pictures, as `converse`
+                // The message that carries tools' images, as `converse`
                 // builds it, not one the person sent.
-                let tool_pictures = message
+                let tool_images = message
                     .get("content")
                     .and_then(Value::as_array)
                     .is_some_and(|parts| {
                         parts.iter().any(|part| {
                             part.get("text")
                                 .and_then(Value::as_str)
-                                .is_some_and(|text| text.starts_with(PICTURES_LEAD))
+                                .is_some_and(|text| text.starts_with(IMAGES_LEAD))
                         })
                     });
-                if tool_pictures {
-                    message["content"] = Value::String(String::from(EARLIER_PICTURES));
+                if tool_images {
+                    message["content"] = Value::String(String::from(EARLIER_IMAGES));
                 }
             }
             _ => {}
@@ -714,8 +714,8 @@ fn compact(history: &mut [Value]) {
 
 // Each stub says the earlier reply did see what it stands for, so a model
 // that reads the history, whichever level it is, never takes a removed
-// picture for one that was never looked at and retracts a true answer, as
+// image for one that was never looked at and retracts a true answer, as
 // the owner saw on 2026-10-30.
 const EARLIER: &str = "This tool's output was seen when an earlier request ran and is no longer kept here. The replies after it were based on it. To know what is there now, read or look again.";
-const PICTURES_LEAD: &str = "The pictures ";
-const EARLIER_PICTURES: &str = "[The pictures the tools returned here were seen when an earlier request ran; they are no longer kept, to save space. The replies after them were based on them. To see what is there now, look again.]";
+const IMAGES_LEAD: &str = "The images ";
+const EARLIER_IMAGES: &str = "[The images the tools returned here were seen when an earlier request ran; they are no longer kept, to save space. The replies after them were based on them. To see what is there now, look again.]";

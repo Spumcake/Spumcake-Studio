@@ -160,10 +160,10 @@ struct HostWindow {
     model_menu: Option<(String, Rect)>,
     /// A conversation cell the person is dragging.
     dragging: Option<protocol::Cell>,
-    /// A notebook cell's "…" menu, open under that rect.
+    /// A recipe cell's "…" menu, open under that rect.
     cell_menu: Option<(String, Rect)>,
-    /// The notebook has the keyboard: its keys act on the active cell.
-    notebook_focus: bool,
+    /// The recipe has the keyboard: its keys act on the active cell.
+    recipe_focus: bool,
     /// The active cell is selected and shows its border: a click on it,
     /// or the active cell changing, selects it; any other click clears it.
     /// The bar stays either way.
@@ -185,6 +185,9 @@ struct HostWindow {
     settings: Settings,
     /// Where projects are kept. None in frame tests, which never write one.
     data: Option<PathBuf>,
+    /// Where installed sub-applications' programs are, when not beside the
+    /// host's own, as in checks.
+    programs: Option<PathBuf>,
     project: Option<Project>,
     /// Where Studio makes a project by itself, and where the New Project
     /// form starts: `~/Inpainter`. A frame test leaves it unset, and its
@@ -274,7 +277,7 @@ impl HostWindow {
             model_menu: None,
             dragging: None,
             cell_menu: None,
-            notebook_focus: false,
+            recipe_focus: false,
             cell_selected: false,
             shown_active: None,
             cell_menu_rect: None,
@@ -285,6 +288,7 @@ impl HostWindow {
             claim_seq: 0,
             settings: Settings::load(None),
             data: None,
+            programs: None,
             project: None,
             projects_root: None,
             sessions: crate::sessions::SessionMenu::default(),
@@ -674,7 +678,7 @@ impl eframe::App for HostWindow {
             .map(|model| (model.id.clone(), chat::short_name(&model.name).to_string()))
             .collect();
         crate::cells::set_model_names(&ctx, &names);
-        crate::cells::set_picture_root(&ctx, self.project.as_ref().map(|project| project.folder.clone()));
+        crate::cells::set_image_root(&ctx, self.project.as_ref().map(|project| project.folder.clone()));
         self.show_levels(&known);
         self.configure_assistant();
         let mut pending = false;
@@ -694,7 +698,7 @@ impl eframe::App for HostWindow {
         self.note_kinds();
         self.pump_assistant();
         self.take_cell_requests();
-        // An Image cell's picture shows Edit when an application edits it,
+        // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
         let editable = if self.locked() { Vec::new() } else { self.edited_types() };
         crate::cells::set_editable(&ctx, editable);
@@ -765,10 +769,10 @@ impl eframe::App for HostWindow {
                 if workspace_open {
                     self.drag_panel_edge(ui, edge, full);
                 }
-                // Beside a picture, the bar is black.
-                let picture = workspace_open
+                // Beside an image, the bar is black.
+                let image = workspace_open
                     && tab.as_deref().is_some_and(|tab| self.apps.get(app).is_some_and(|started| started.running.declared.rasters.contains_key(tab)));
-                let (rect, pressed) = workspace_bar(ui, edge, workspace_open, full, if picture { crate::raster::BAR } else { BAR_GRAY });
+                let (rect, pressed) = workspace_bar(ui, edge, workspace_open, full, if image { crate::raster::BAR } else { BAR_GRAY });
                 self.bar_rect = rect;
                 bar_pressed = pressed;
             });
@@ -1054,34 +1058,34 @@ impl HostWindow {
     /// The host's own tool was called: a prompt, or one of the person's
     /// skills, runs as a cell in the conversation.
     fn begin_host_cell(&mut self, call: String, tool: &str, input: serde_json::Value) {
-        // Editing a cell's picture opens it; it makes no cell.
-        if protocol::split_tool_key(tool).is_some_and(|(_, skill, name)| skill == route::PROMPT_SKILL && name == route::EDIT_PICTURE) {
+        // Editing a cell's image opens it; it makes no cell.
+        if protocol::split_tool_key(tool).is_some_and(|(_, skill, name)| skill == route::PROMPT_SKILL && name == route::EDIT_IMAGE) {
             let cell = input.get("cell").and_then(|value| value.as_str()).filter(|cell| !cell.trim().is_empty());
-            let (ok, output) = match self.edit_picture(cell) {
-                Ok(name) => (true, serde_json::json!(format!("Opened the picture as new work, \"{name}\", in its own tab."))),
+            let (ok, output) = match self.edit_image(cell) {
+                Ok(name) => (true, serde_json::json!(format!("Opened the image as new work, \"{name}\", in its own tab."))),
                 Err(reason) => (false, serde_json::json!({ "error": reason })),
             };
             self.assistant.send(Command::Result(protocol::ToolResult { call, ok, output, images: Vec::new() }));
             return;
         }
         let text = |key: &str| input.get(key).and_then(|value| value.as_str()).unwrap_or("").to_string();
-        let (prompt, run_on, picture) = match route::skill_for_tool(&self.settings, tool) {
+        let (prompt, run_on, image) = match route::skill_for_tool(&self.settings, tool) {
             Some(skill) => {
-                // An image skill's tool is asked with the picture's prompt.
-                let picture = skill.makes == workspace::Makes::Images;
-                let asked = text(if picture { "prompt" } else { "input" });
+                // An image skill's tool is asked with the image's prompt.
+                let image = skill.makes == workspace::Makes::Images;
+                let asked = text(if image { "prompt" } else { "input" });
                 let prompt = if skill.prompt.trim().is_empty() {
                     asked
                 } else {
                     format!("{}\n\n{asked}", skill.prompt.trim_end())
                 };
                 let keys = &mut self.keys;
-                (prompt, crate::endpoints::skill_route(&self.settings, &skill, |id| keys.get(id)), picture)
+                (prompt, crate::endpoints::skill_route(&self.settings, &skill, |id| keys.get(id)), image)
             }
             None => (text("prompt"), self.level_route(), false),
         };
         let mut cell = protocol::Cell::text(protocol::cell_id(), &prompt);
-        if picture {
+        if image {
             cell.kind = protocol::IMAGE_KIND.to_string();
         }
         if let Ok(route) = &run_on {
@@ -1095,14 +1099,14 @@ impl HostWindow {
             entry.cell = Some(cell.clone());
         }
         self.board.drafts.insert(cell.id.clone(), prompt.clone());
-        self.launch_run(crate::cells::Place::Conversation, cell.id, Some(call), run_on, prompt, picture);
+        self.launch_run(crate::cells::Place::Conversation, cell.id, Some(call), run_on, prompt, image);
     }
 
     fn note_cell_actions(&mut self, actions: Vec<crate::cells::CardAction>) {
         for action in actions {
             match action {
-                // Only a conversation cell is dragged, into a notebook; a
-                // notebook's own cells move from their menu.
+                // Only a conversation cell is dragged, into a recipe; a
+                // recipe's own cells move from their menu.
                 crate::cells::CardAction::Drag(cell) => {
                     if self.cell_home(&cell.id).is_none() {
                         self.dragging = Some(cell);
@@ -1112,7 +1116,7 @@ impl HostWindow {
                 crate::cells::CardAction::Run(id) => self.run_from_card(&id),
                 crate::cells::CardAction::Stop(id) => self.stop_one(&id),
                 crate::cells::CardAction::Select(id) => self.select_one(&id),
-                // The "…" opens the cell's own menu, in a notebook only.
+                // The "…" opens the cell's own menu, in a recipe only.
                 crate::cells::CardAction::More(id, at) => {
                     if self.cell_home(&id).is_some() {
                         self.cell_menu = Some((id, at));
@@ -1120,9 +1124,9 @@ impl HostWindow {
                 }
                 crate::cells::CardAction::ShowSource(id) => self.show_source(&id),
                 crate::cells::CardAction::ShowVersion(id, index) => self.show_version(&id, index),
-                crate::cells::CardAction::EditPicture(id) => {
-                    if let Err(reason) = self.edit_picture(Some(&id)) {
-                        self.tell(format!("The picture could not be opened: {reason}"));
+                crate::cells::CardAction::EditImage(id) => {
+                    if let Err(reason) = self.edit_image(Some(&id)) {
+                        self.tell(format!("The image could not be opened: {reason}"));
                     }
                 }
                 crate::cells::CardAction::Models(id, at) => {
@@ -1163,14 +1167,14 @@ impl HostWindow {
         if let Some(cell) = recorded {
             self.edit_prompt(id, vec![protocol::CellPart::Text { text: prompt.clone() }]);
             let run_on = self.cell_route(&cell);
-            let picture = cell.kind == protocol::IMAGE_KIND;
-            self.launch_run(crate::cells::Place::Conversation, id.to_string(), None, run_on, prompt, picture);
+            let image = cell.kind == protocol::IMAGE_KIND;
+            self.launch_run(crate::cells::Place::Conversation, id.to_string(), None, run_on, prompt, image);
             return;
         }
         let Some((app, tab)) = self.cell_home(id) else {
             return;
         };
-        self.start_book_run(app, &tab, id);
+        self.start_recipe_run(app, &tab, id);
     }
 
     /// A rendered Markdown cell shows its source, and its prompt takes the
@@ -1210,24 +1214,24 @@ impl HostWindow {
         types
     }
 
-    /// Opens the picture an Image cell shows as new work, in the first
+    /// Opens the image an Image cell shows as new work, in the first
     /// application that edits its media type: the conversation's cell or a
-    /// notebook's, or with no id the conversation's latest Image cell. The
+    /// recipe's, or with no id the conversation's latest Image cell. The
     /// cell is unchanged. Returns the name asked for, or why nothing was
     /// sent.
-    pub(crate) fn edit_picture(&mut self, id: Option<&str>) -> Result<String, String> {
-        // With no id, the latest Image cell that shows a picture.
+    pub(crate) fn edit_image(&mut self, id: Option<&str>) -> Result<String, String> {
+        // With no id, the latest Image cell that shows an image.
         let in_conversation = |cell: &&protocol::Cell| {
             cell.kind == protocol::IMAGE_KIND
                 && match id {
                     Some(id) => cell.id == id,
-                    None => crate::cells::picture_part(&cell.output).is_some(),
+                    None => crate::cells::image_part(&cell.output).is_some(),
                 }
         };
         let conversation = self.chat.conversation.iter().rev().filter_map(|entry| entry.cell.as_ref()).find(in_conversation).cloned();
-        // Where the cell lives: the conversation, or a notebook, named by its
+        // Where the cell lives: the conversation, or a recipe, named by its
         // file once it has one.
-        let (cell, notebook) = match (conversation, id) {
+        let (cell, recipe) = match (conversation, id) {
             (Some(cell), _) => (cell, None),
             (None, Some(id)) => {
                 let (app, tab) = self.cell_home(id).ok_or("There is no Image cell with that id.")?;
@@ -1249,27 +1253,27 @@ impl HostWindow {
             }
             None => (cell.output.clone(), cell.prompt()),
         };
-        let (picture, media) = crate::cells::picture_part(&output).ok_or("The cell shows no picture.")?;
+        let (image, media) = crate::cells::image_part(&output).ok_or("The cell shows no image.")?;
         let folder = self.project.as_ref().map(|project| project.folder.clone()).ok_or("No project is open.")?;
-        let path = folder.join(picture);
+        let path = folder.join(image);
         if std::fs::File::open(&path).is_err() {
-            return Err(format!("The picture's file, {picture}, cannot be read."));
+            return Err(format!("The image's file, {image}, cannot be read."));
         }
         let app = self
             .apps
             .iter()
             .position(|started| !started.running.exited() && started.running.declared.edits.iter().any(|known| known == media))
-            .ok_or("No application here edits this picture.")?;
-        let name = crate::cells::picture_name(&made_by);
+            .ok_or("No application here edits this image.")?;
+        let name = crate::cells::image_name(&made_by);
         let relative = |file: String| {
             let file = std::path::PathBuf::from(file);
             file.strip_prefix(&folder).map(|inside| inside.display().to_string()).unwrap_or_else(|_| file.display().to_string())
         };
         let from = protocol::OpenedFrom {
             cell: cell.id.clone(),
-            picture: picture.to_string(),
-            session: notebook.is_none().then(|| self.project.as_ref().map(|project| project.session.clone())).flatten(),
-            notebook: notebook.flatten().map(relative),
+            image: image.to_string(),
+            session: recipe.is_none().then(|| self.project.as_ref().map(|project| project.session.clone())).flatten(),
+            recipe: recipe.flatten().map(relative),
         };
         if !self.workspace_shown() {
             self.toggle_workspace();
@@ -1297,14 +1301,14 @@ impl HostWindow {
         call: Option<String>,
         run_on: Result<crate::endpoints::Route, String>,
         prompt: String,
-        picture: bool,
+        image: bool,
     ) {
         self.board.runs.retain(|run| run.id != id);
         let (endpoint, model, effort) = match &run_on {
             Ok(route) => (route.endpoint.clone(), route.model.clone(), route.effort.map(|effort| effort.word().to_string())),
             Err(_) => (String::new(), String::new(), None),
         };
-        let rx = crate::cells::start_run(run_on, &prompt, picture);
+        let rx = crate::cells::start_run(run_on, &prompt, image);
         self.board.runs.push(crate::cells::Run {
             place,
             id,
@@ -1312,7 +1316,7 @@ impl HostWindow {
             endpoint,
             model,
             effort,
-            picture: None,
+            image: None,
             prompt,
             text: String::new(),
             rx,
@@ -1342,7 +1346,7 @@ impl HostWindow {
             );
         }
         for (app, tab, cell) in runs {
-            self.start_book_run(app, &tab, &cell);
+            self.start_recipe_run(app, &tab, &cell);
         }
         for (app, tab, cell) in stops {
             self.stop_one(&cell);
@@ -1350,7 +1354,7 @@ impl HostWindow {
         }
     }
 
-    fn start_book_run(&mut self, app: usize, tab: &str, id: &str) {
+    fn start_recipe_run(&mut self, app: usize, tab: &str, id: &str) {
         let Some(cell) = self.apps.get(app).and_then(|started| {
             started.running.declared.cells.get(tab).and_then(|(cells, _)| {
                 cells.iter().find(|cell| cell.id == id).cloned()
@@ -1404,7 +1408,7 @@ impl HostWindow {
             return;
         }
         self.launch_run(
-            crate::cells::Place::Book {
+            crate::cells::Place::Recipe {
                 app,
                 tab: tab.to_string(),
             },
@@ -1444,7 +1448,7 @@ impl HostWindow {
         };
         match piece {
             crate::cells::Piece::Text(_) => self.mirror_live(index),
-            crate::cells::Piece::Picture(png) => self.keep_picture(index, png),
+            crate::cells::Piece::Image(png) => self.keep_image(index, png),
             crate::cells::Piece::End => self.finish_run(index, protocol::CellState::Done, None),
             crate::cells::Piece::Failed(reason) => {
                 self.finish_run(index, protocol::CellState::Failed, Some(reason))
@@ -1480,18 +1484,18 @@ impl HostWindow {
         let model = run.model.clone();
         let endpoint = run.endpoint.clone();
         let effort = run.effort.clone();
-        let picture = run.picture.clone();
+        let image = run.image.clone();
         let ran = vec![protocol::CellPart::Text { text: run.prompt.clone() }];
         let call = run.call.clone();
         let place = match &run.place {
             crate::cells::Place::Conversation => None,
-            crate::cells::Place::Book { app, tab } => Some((*app, tab.clone())),
+            crate::cells::Place::Recipe { app, tab } => Some((*app, tab.clone())),
         };
         self.board.runs.remove(index);
         // The run's result records the model a chevron chose.
         self.board.chosen.remove(&id);
-        // An Image cell's output is its picture, named relative to the project.
-        let output = match &picture {
+        // An Image cell's output is its image, named relative to the project.
+        let output = match &image {
             Some((path, _)) => vec![protocol::CellPart::Path { path: path.clone(), media_type: String::from("image/png") }],
             None => vec![protocol::CellPart::Text { text: text.clone() }],
         };
@@ -1501,7 +1505,7 @@ impl HostWindow {
                     entry.cell.as_mut().filter(|cell| cell.id == id)
                 }) {
                     // A conversation cell keeps every run as a version, as a
-                    // notebook's cell does, for the Image cell's filmstrip.
+                    // recipe's cell does, for the Image cell's filmstrip.
                     cell.versions.push(protocol::CellVersion {
                         id: protocol::cell_id(),
                         input: ran.clone(),
@@ -1520,10 +1524,10 @@ impl HostWindow {
                     let ok = state != protocol::CellState::Failed;
                     let (output, images) = if let Some(reason) = &error {
                         (serde_json::json!({ "error": reason }), Vec::new())
-                    } else if let Some((_, png)) = &picture {
-                        // The assistant sees the picture it asked for, as the
+                    } else if let Some((_, png)) = &image {
+                        // The assistant sees the image it asked for, as the
                         // owner set on 2026-10-30.
-                        (serde_json::json!(format!("Made the picture in cell {id}.")), vec![assistant::picture_base64(png)])
+                        (serde_json::json!(format!("Made the image in cell {id}.")), vec![assistant::image_base64(png)])
                     } else {
                         (serde_json::json!(text), Vec::new())
                     };
@@ -1563,7 +1567,7 @@ impl HostWindow {
         })
     }
 
-    /// A tab that keeps cells, drawn as a notebook: a white column at most
+    /// A tab that keeps cells, drawn as a recipe: a white column at most
     /// 880 wide on gray, each cell with its "[n]" in the margin, the active
     /// cell marked by a blue bar its full height and, until a click away
     /// from it, a blue border. Cells are the conversation's cards; a
@@ -1583,8 +1587,8 @@ impl HostWindow {
             }
         }
         let painter = ui.painter().with_clip_rect(rect);
-        painter.rect_filled(rect, 0.0, NOTEBOOK_GRAY);
-        let width = (rect.width() - 2.0 * crate::typescale::GUTTER).min(NOTEBOOK_COLUMN).max(200.0);
+        painter.rect_filled(rect, 0.0, RECIPE_GRAY);
+        let width = (rect.width() - 2.0 * crate::typescale::GUTTER).min(RECIPE_COLUMN).max(200.0);
         let column = Rect::from_min_max(
             egui::pos2(rect.center().x - width / 2.0, rect.top() + 16.0),
             egui::pos2(rect.center().x + width / 2.0, rect.bottom()),
@@ -1596,19 +1600,19 @@ impl HostWindow {
         {
             self.drop_target = Some((app, tab.to_string()));
         }
-        // A press inside the notebook gives it the keyboard; one elsewhere
+        // A press inside the recipe gives it the keyboard; one elsewhere
         // takes it away.
         if let Some(pos) = ui.input(|input| input.pointer.press_origin()).filter(|_| ui.input(|input| input.pointer.any_pressed())) {
-            self.notebook_focus = rect.contains(pos);
+            self.recipe_focus = rect.contains(pos);
         }
         let active = selected.as_deref().and_then(|id| listed.iter().position(|cell| cell.id == id));
         let editing = listed
             .iter()
             .any(|cell| ui.memory(|memory| memory.has_focus(egui::Id::new(("cell-prompt", &cell.id)))));
-        self.notebook_keys(ui, app, tab, &listed, active, editing);
+        self.recipe_keys(ui, app, tab, &listed, active, editing);
         if let Some(id) = self.focus_prompt.take() {
             ui.memory_mut(|memory| memory.request_focus(egui::Id::new(("cell-prompt", &id))));
-            self.notebook_focus = true;
+            self.recipe_focus = true;
         }
         // A new active cell, by a click, a key, or adding one, is selected.
         if selected != self.shown_active {
@@ -1629,11 +1633,11 @@ impl HostWindow {
             .auto_shrink([false, false])
             .show(&mut child, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add_space(NOTEBOOK_GAP);
+                ui.add_space(RECIPE_GAP);
                 let inner = ui.available_width();
                 for (index, cell) in listed.iter().enumerate() {
                     if index > 0 {
-                        ui.add_space(NOTEBOOK_GAP);
+                        ui.add_space(RECIPE_GAP);
                     }
                     let focused = ui.memory(|memory| memory.has_focus(egui::Id::new(("cell-prompt", &cell.id))));
                     let prompt = cell.prompt();
@@ -1649,7 +1653,7 @@ impl HostWindow {
                         self.board.committed.insert(cell.id.clone(), prompt);
                     }
                     let live = self.board.running(&cell.id).map(|run| run.text.clone());
-                    let card_width = inner - NOTEBOOK_MARGIN - NOTEBOOK_RIGHT;
+                    let card_width = inner - RECIPE_MARGIN - RECIPE_RIGHT;
                     let rendered = crate::cells::rendered(cell) && !focused;
                     let height = if rendered {
                         crate::cells::rendered_height(ui, cell, card_width)
@@ -1661,7 +1665,7 @@ impl HostWindow {
                         pressed_cell = true;
                     }
                     let card_row = Rect::from_min_size(
-                        egui::pos2(row.left() + NOTEBOOK_MARGIN, row.top()),
+                        egui::pos2(row.left() + RECIPE_MARGIN, row.top()),
                         egui::vec2(card_width, height),
                     );
                     let card = if rendered {
@@ -1685,14 +1689,14 @@ impl HostWindow {
                         painter.rect_filled(
                             Rect::from_min_size(egui::pos2(row.left() + 6.0, card.top()), egui::vec2(4.0, card.height())),
                             2.0,
-                            NOTEBOOK_BLUE,
+                            RECIPE_BLUE,
                         );
                         if self.cell_selected || focused {
                             self.board.bordered = Some(cell.id.clone());
                             painter.rect_stroke(
                                 card,
                                 12.0,
-                                egui::Stroke::new(1.0, NOTEBOOK_BLUE),
+                                egui::Stroke::new(1.0, RECIPE_BLUE),
                                 egui::StrokeKind::Inside,
                             );
                         }
@@ -1705,9 +1709,9 @@ impl HostWindow {
                         actions.push(crate::cells::CardAction::Select(cell.id.clone()));
                     }
                 }
-                ui.add_space(NOTEBOOK_GAP);
+                ui.add_space(RECIPE_GAP);
             });
-        // A click on a cell selects it; one anywhere else, in the notebook
+        // A click on a cell selects it; one anywhere else, in the recipe
         // or out of it, clears the border, except in the open "…" menu.
         if let Some(pos) = press {
             let in_menu = self.cell_menu.is_some() && self.cell_menu_rect.is_some_and(|menu| menu.contains(pos));
@@ -1721,12 +1725,12 @@ impl HostWindow {
         self.cell_menu_popup(ui, app, tab, &listed);
     }
 
-    /// The notebook's own keys, as Jupyter has them, acting on any tab that
+    /// The recipe's own keys, as Jupyter has them, acting on any tab that
     /// keeps cells through the protocol alone. While a prompt is edited,
     /// Escape stops editing and Shift+Enter or Ctrl+Enter runs; otherwise
     /// Enter edits, Up and Down change the active cell, and Shift+Enter and
     /// Ctrl+Enter run.
-    fn notebook_keys(
+    fn recipe_keys(
         &mut self,
         ui: &egui::Ui,
         app: usize,
@@ -1735,8 +1739,8 @@ impl HostWindow {
         active: Option<usize>,
         editing: bool,
     ) {
-        // While a cell's level picker is open, keys are not the notebook's.
-        if (!self.notebook_focus && !editing) || self.model_menu.is_some() {
+        // While a cell's level picker is open, keys are not the recipe's.
+        if (!self.recipe_focus && !editing) || self.model_menu.is_some() {
             return;
         }
         let Some(index) = active else {
@@ -1752,7 +1756,7 @@ impl HostWindow {
                 ui.memory_mut(|memory| memory.surrender_focus(egui::Id::new(("cell-prompt", &id))));
                 self.commit_draft(app, tab, &listed[index]);
             }
-            self.start_book_run(app, tab, &id);
+            self.start_recipe_run(app, tab, &id);
             if run_down {
                 match listed.get(index + 1) {
                     Some(next) => self.send(app, HostMessage::SelectCell { tab: tab.to_string(), cell: next.id.clone() }),
@@ -1806,7 +1810,7 @@ impl HostWindow {
         }
     }
 
-    /// The "…" menu of a notebook cell: back, "n/N", forward, up, down, and
+    /// The "…" menu of a recipe cell: back, "n/N", forward, up, down, and
     /// delete, each a protocol message to the cell's owner.
     fn cell_menu_popup(&mut self, ui: &mut egui::Ui, app: usize, tab: &str, listed: &[protocol::Cell]) {
         let Some((id, at)) = self.cell_menu.clone() else {
@@ -1912,14 +1916,14 @@ impl HostWindow {
 const WORKSPACE_CHROME: f32 = TAB_STRIP + crate::toolbar::HEIGHT;
 /// The tab strip's height.
 const TAB_STRIP: f32 = 40.0;
-/// A notebook: gray around a white column at most this wide, a margin for
+/// A recipe: gray around a white column at most this wide, a margin for
 /// the bar and the "[n]", the gap between cells, and the active cell's blue.
-const NOTEBOOK_COLUMN: f32 = 880.0;
-const NOTEBOOK_MARGIN: f32 = 52.0;
-const NOTEBOOK_RIGHT: f32 = 20.0;
-const NOTEBOOK_GAP: f32 = 16.0;
-const NOTEBOOK_GRAY: Color32 = Color32::from_rgb(0xF3, 0xF4, 0xF6);
-const NOTEBOOK_BLUE: Color32 = Color32::from_rgb(0x25, 0x63, 0xEB);
+const RECIPE_COLUMN: f32 = 880.0;
+const RECIPE_MARGIN: f32 = 52.0;
+const RECIPE_RIGHT: f32 = 20.0;
+const RECIPE_GAP: f32 = 16.0;
+const RECIPE_GRAY: Color32 = Color32::from_rgb(0xF3, 0xF4, 0xF6);
+const RECIPE_BLUE: Color32 = Color32::from_rgb(0x25, 0x63, 0xEB);
 const CELL_MENU_W: f32 = 236.0;
 /// The short gray bar that shows or hides the workspace.
 const BAR_GRAY: Color32 = Color32::from_rgb(186, 188, 192);
@@ -2162,7 +2166,7 @@ impl HostWindow {
             Some(ContentsKind::Grid) => {
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.rect_filled(rect, 0.0, CANVAS);
-                // As `Camera::centered` sets a new sketch: origin in
+                // As `Camera::centered` sets a new drawing: origin in
                 // the middle of the area, zoom 1.
                 let origin = [-self.viewport[0] / 2.0, -self.viewport[1] / 2.0];
                 grid::paint_grid(&painter, rect, origin, 1.0);
@@ -2293,8 +2297,8 @@ impl HostWindow {
             }
             ChatEvent::Attach => {
                 let filter = protocol::FileFilter {
-                    name: "Pictures and text files".to_string(),
-                    extensions: chat::PICTURES
+                    name: "Images and text files".to_string(),
+                    extensions: chat::IMAGES
                         .iter()
                         .chain(chat::TEXTS)
                         .map(|ext| ext.to_string())
@@ -2488,7 +2492,7 @@ impl HostWindow {
         }
     }
 
-    /// A raster tab: its picture through the host's camera, its filmstrip
+    /// A raster tab: its image through the host's camera, its filmstrip
     /// when it has one, and the pointer's gestures and the strip's actions
     /// sent to the sub-application.
     fn show_raster(&mut self, ui: &mut egui::Ui, app: usize, tab: &str, rect: Rect, dismissing: bool) {
@@ -2506,8 +2510,8 @@ impl HostWindow {
                 self.live.moved = true;
             }
         }
-        // The picture's camera works in the area above the filmstrip: Fit
-        // and the zoom buttons frame the picture there, and a command reports
+        // The image's camera works in the area above the filmstrip: Fit
+        // and the zoom buttons frame the image there, and a command reports
         // that area as its viewport.
         let shown = self.raster.shown;
         self.viewport = [f64::from(shown.width()), f64::from(shown.height())];
@@ -2926,7 +2930,7 @@ mod tests {
             }),
             AppMessage::Document {
                 tab: "7".into(),
-                sketch: serde_json::json!({
+                drawing: serde_json::json!({
                     "format_version": 1,
                     "id": 41,
                     "name": "Private Words Of The Work",

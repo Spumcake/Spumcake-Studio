@@ -1030,7 +1030,7 @@ impl HostWindow {
                 id: "empty-trash".to_string(),
                 title: "Empty Trash?".to_string(),
                 lines: vec![EMPTY_TRASH_LINE.to_string()],
-                buttons: vec![button("empty", "Empty Trash"), button("cancel", "Cancel")],
+                buttons: vec![button("empty", "Empty trash"), button("cancel", "Cancel")],
                 dismiss: Some("cancel".to_string()),
             },
         };
@@ -1169,13 +1169,22 @@ impl HostWindow {
     fn open_loaded(&mut self, opening: Opening) {
         let Opening { id, name, folder, session } = opening;
         let file = workspace::session_as_file(&folder, &name, &session);
-        let installed = crate::apps::discover();
+        let installed = match &self.programs {
+            Some(folder) => crate::apps::discover_beside(folder),
+            None => crate::apps::discover(),
+        };
+        if let Some(data) = &self.data {
+            crate::apps::move_former_data(data, &installed);
+        }
         let mut notes = Vec::new();
         let mut specs: Vec<AppSpec> = Vec::new();
         let mut restoring: Vec<bool> = Vec::new();
         let mut apps: Vec<RestoreApp> = Vec::new();
         let mut selected = None;
         for (index, tab) in file.tabs.iter().enumerate() {
+            // A tab kept under an id its sub-application had before is its own.
+            let current = crate::apps::current_id(&installed, &tab.app);
+            let tab = &workspace::ProjectTab { app: current, ..tab.clone() };
             let known = self
                 .launch
                 .iter()
@@ -1275,6 +1284,12 @@ impl HostWindow {
         self.failed_signature = None;
         self.chat.conversation.clear();
         let mut conversation = file.conversation;
+        for entry in &mut conversation {
+            if let Some(key) = &entry.tool {
+                let key = crate::apps::current_tool_key(&installed, key);
+                entry.tool = Some(crate::route::current_host_tool_key(&key));
+            }
+        }
         conversation.extend(notes);
         self.assistant.send(Command::Restore(conversation));
         self.flows.restore = Some(Restore {

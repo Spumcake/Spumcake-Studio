@@ -1,11 +1,11 @@
-//! The versioned JSON of one sketch: its id, saved name, camera, and object
+//! The versioned JSON of one drawing: its id, saved name, camera, and object
 //! tree. History, selection, the clipboard, tool settings, and the panel are
 //! not in it.
 
 use super::{
     Allocator, Camera, Cap, ColorId, ColorLayer, ColorRole, CurvePoint, Dash, Dynamics, ErasePath,
     ListKind, MAX_ZOOM, MIN_ZOOM, Node, NodeId, NodeKind, PaletteColor, Point, Sample, ShapeGeom,
-    ShapeNode, Sketch, SketchId, Stroke, StrokeId, TextAlign, TextFamily, TextNode, TextStyle,
+    ShapeNode, Drawing, DrawingId, Stroke, StrokeId, TextAlign, TextFamily, TextNode, TextStyle,
     VAlign,
 };
 use kurbo::Affine;
@@ -13,19 +13,19 @@ use serde_json::{Map, Value, json};
 use std::cell::{Cell, OnceCell};
 use std::collections::HashSet;
 
-/// Id and name from a `.smx` file, for Simple Sketch's record to store.
-pub struct SnapshotSketch {
-    pub id: SketchId,
+/// Id and name from a `.smx` file, for the Storyboard Generator's record to store.
+pub struct SnapshotDrawing {
+    pub id: DrawingId,
     pub name: String,
-    pub sketch: Sketch,
+    pub drawing: Drawing,
 }
 
-impl Sketch {
-    pub fn snapshot_bytes(&self, id: SketchId, name: &str) -> Option<Vec<u8>> {
+impl Drawing {
+    pub fn snapshot_bytes(&self, id: DrawingId, name: &str) -> Option<Vec<u8>> {
         serde_json::to_vec_pretty(&self.snapshot_value(id, name)).ok()
     }
 
-    pub fn snapshot_value(&self, id: SketchId, name: &str) -> Value {
+    pub fn snapshot_value(&self, id: DrawingId, name: &str) -> Value {
         json!({
             "format_version": 1,
             "id": id.get(),
@@ -38,7 +38,7 @@ impl Sketch {
         })
     }
 
-    /// Reserves every id this sketch holds, including a layer's source color,
+    /// Reserves every id this drawing holds, including a layer's source color,
     /// so later allocations sit above them.
     pub fn reserve_ids(&self, ids: &mut Allocator) {
         for node in &self.nodes {
@@ -47,13 +47,13 @@ impl Sketch {
     }
 }
 
-pub fn sketch_from_text(text: &str) -> Option<SnapshotSketch> {
+pub fn drawing_from_text(text: &str) -> Option<SnapshotDrawing> {
     let value: Value = serde_json::from_str(text).ok()?;
-    sketch_from_value(&value)
+    drawing_from_value(&value)
 }
 
 /// A document as it crosses the protocol: the `.smx` value.
-pub fn sketch_from_value(value: &Value) -> Option<SnapshotSketch> {
+pub fn drawing_from_value(value: &Value) -> Option<SnapshotDrawing> {
     let object = value.as_object()?;
     if object.get("format_version")?.as_u64()? != 1 {
         return None;
@@ -72,10 +72,10 @@ pub fn sketch_from_value(value: &Value) -> Option<SnapshotSketch> {
         .find(|node| node.id == origin_canvas)
         .map(super::layer_looks)
         .unwrap_or_default();
-    Some(SnapshotSketch {
-        id: SketchId::new(id),
+    Some(SnapshotDrawing {
+        id: DrawingId::new(id),
         name: name.to_string(),
-        sketch: Sketch {
+        drawing: Drawing {
             origin_canvas,
             born,
             nodes,

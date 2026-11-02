@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use draw::document::{Camera, NodeId, Sketch};
+use draw::document::{Camera, NodeId, Drawing};
 use protocol::{
     Accept, AppMessage, Ask, Canvas, Declaration, FileFilter, FileKind, HostMessage, Keys,
     MenuEntry, Properties, RasterView, Skill, TabEntry, Tabs, Toolbar, ToolResult,
@@ -36,7 +36,7 @@ enum PipeEvent {
 /// A document as the host shows it: the copy it replaces whole on each
 /// `document`, and the camera the host keeps while the tab is shown.
 pub struct Display {
-    pub sketch: Sketch,
+    pub drawing: Drawing,
     pub camera: Camera,
     /// Counts the documents this tab has received, so a preview held for a
     /// sent gesture ends when the answer arrives.
@@ -47,18 +47,18 @@ pub struct Display {
 /// host keeps while the tab is shown.
 pub struct RasterDisplay {
     pub view: RasterView,
-    /// None until the tab is first drawn, which fits the picture to it.
+    /// None until the tab is first drawn, which fits the image to it.
     pub camera: Option<Camera>,
     /// Counts the views this tab has received, so a preview held for a sent
     /// gesture ends when the answer arrives.
     pub version: u64,
     /// The changes the latest views brought, oldest first, each with its
-    /// picture file and revision, so none is lost when several views come
+    /// image file and revision, so none is lost when several views come
     /// between two frames.
     pub patches: Vec<(String, u64, protocol::RasterPatch)>,
 }
 
-/// How many of a tab's latest changes are kept for its picture.
+/// How many of a tab's latest changes are kept for its image.
 const KEPT_PATCHES: usize = 64;
 
 /// A file dialog a sub-application asked for.
@@ -75,7 +75,7 @@ pub struct FileRequest {
 pub struct Declared {
     pub tabs: Option<Tabs>,
     pub documents: HashMap<String, Display>,
-    /// The raster tabs' pictures, by tab.
+    /// The raster tabs' images, by tab.
     pub rasters: HashMap<String, RasterDisplay>,
     pub keys: Keys,
     pub toolbar: Option<Toolbar>,
@@ -429,15 +429,15 @@ impl Running {
         match message {
             AppMessage::Document {
                 tab,
-                sketch,
+                drawing,
                 selection,
                 active_canvas,
                 camera,
             } => {
-                let Some(snapshot) = draw::document::snapshot::sketch_from_value(&sketch) else {
+                let Some(snapshot) = draw::document::snapshot::drawing_from_value(&drawing) else {
                     return;
                 };
-                let mut shown = snapshot.sketch;
+                let mut shown = snapshot.drawing;
                 let ids = |ids: &[u64]| -> Vec<NodeId> {
                     ids.iter()
                         .filter(|id| **id != 0)
@@ -461,7 +461,7 @@ impl Running {
                 declared.documents.insert(
                     tab,
                     Display {
-                        sketch: shown,
+                        drawing: shown,
                         camera,
                         version,
                     },
@@ -502,14 +502,14 @@ impl Running {
                 declared.tabs = Some(tabs);
             }
             AppMessage::Canvas(canvas) => declared.canvas = Some(canvas),
-            // The camera a view carries is taken only when a picture is
+            // The camera a view carries is taken only when an image is
             // opened or made; otherwise the host's own camera stays.
             AppMessage::Raster(view) => {
                 let mut previous = declared.rasters.remove(&view.tab);
                 let version = previous.as_ref().map_or(1, |previous| previous.version + 1);
                 let mut patches = previous.as_mut().map(|previous| std::mem::take(&mut previous.patches)).unwrap_or_default();
                 if let Some(patch) = &view.patch {
-                    patches.push((view.picture.clone(), view.revision, patch.clone()));
+                    patches.push((view.image.clone(), view.revision, patch.clone()));
                     let over = patches.len().saturating_sub(KEPT_PATCHES);
                     patches.drain(..over);
                 }

@@ -1,0 +1,7 @@
+{
+  "id": "image-generator",
+  "name": "Image Generator",
+  "executable": "image-generator",
+  "protocol": 1,
+  "formerly": ["image-editor"]
+}

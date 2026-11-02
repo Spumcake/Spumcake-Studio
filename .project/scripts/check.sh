@@ -24,7 +24,7 @@ passed=$(echo "$out" | awk '/^test result/ {n += $4} END {print n}')
 echo "$passed tests passed"
 
 echo "== no-host check"
-target/debug/sketch-client >/dev/null 2>&1 || fail "target/debug/sketch-client"
+target/debug/storyboard-client >/dev/null 2>&1 || fail "target/debug/storyboard-client"
 
 echo "== reformatted files"
 # A changed Rust file that equals the last commit's version run through

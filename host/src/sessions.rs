@@ -324,7 +324,7 @@ fn nav(ui: &mut egui::Ui, column: Rect, menu: &mut SessionMenu, events: &mut Vec
     };
     let rows: [(&str, &str, Page); 4] = [
         ("clock", "Recent", Page::Recent),
-        ("plus", "New Project", Page::NewProject),
+        ("plus", "New project", Page::NewProject),
         ("folder", "All Projects", Page::AllProjects),
         ("trash", "Trash", Page::Trash),
     ];
@@ -407,7 +407,7 @@ fn nav(ui: &mut egui::Ui, column: Rect, menu: &mut SessionMenu, events: &mut Vec
 }
 
 /// A project's "…" in the left column, as the owner's project-row-menu
-/// picture shows: Rename, Pin, and Lock, then Share, then Archive. Share
+/// image shows: Rename, Pin, and Lock, then Share, then Archive. Share
 /// waits for a later version and is drawn lighter; a locked project's
 /// Rename and Archive are too.
 fn project_menu(more: &egui::Response, project: &ProjectRow, menu: &mut SessionMenu, events: &mut Vec<SessionChoice>) {
@@ -435,7 +435,7 @@ fn list_top(ui: &mut egui::Ui, right: Rect, page: &Page, menu: &mut SessionMenu,
     // column's rows, as the owner set on 2026-10-29.
     let row = Rect::from_min_size(right.min + vec2(PAD, PAD), vec2(right.width() - 2.0 * PAD, NAV_ROW));
     let trash = *page == Page::Trash;
-    let label = if trash { "Empty Trash" } else { "New Session" };
+    let label = if trash { "Empty trash" } else { "New session" };
     let font = ts::body();
     let label_w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), TEXT).size().x;
     let button_w = label_w + if trash { 2.0 * INSET } else { 42.0 + INSET };
@@ -770,10 +770,10 @@ fn new_project(ui: &mut egui::Ui, right: Rect, menu: &mut SessionMenu, events: &
         y += 22.0;
         ui.painter().text(pos2(inner.left() + 2.0, y + 8.0), Align2::LEFT_CENTER, error, ts::small(), ts::FAILED);
     }
-    let create_w = label_width(ui, "Create Project");
+    let create_w = label_width(ui, "Create project");
     let create = Rect::from_min_size(pos2(inner.right() - create_w, inner.bottom() - CONTROL_H), vec2(create_w, CONTROL_H));
     ui.painter().rect_filled(create, 8.0, DARK);
-    ui.painter().text(create.center(), Align2::CENTER_CENTER, "Create Project", ts::body(), Color32::WHITE);
+    ui.painter().text(create.center(), Align2::CENTER_CENTER, "Create project", ts::body(), Color32::WHITE);
     let cancel_w = label_width(ui, "Cancel");
     let cancel = Rect::from_min_size(pos2(create.left() - 8.0 - cancel_w, create.top()), vec2(cancel_w, CONTROL_H));
     if plain_button(ui, cancel, "Cancel", "new-project-cancel") {

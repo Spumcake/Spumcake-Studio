@@ -38,11 +38,11 @@ pub enum AppMessage {
     Edits { media_types: Vec<String> },
     /// That tab uses the host's properties panel, on this side.
     Panel { tab: String, side: PanelSide },
-    /// The whole document after a change. `camera` is present when a sketch
+    /// The whole drawing after a change. `camera` is present when a drawing
     /// is opened or created.
     Document {
         tab: String,
-        sketch: serde_json::Value,
+        drawing: serde_json::Value,
         selection: Vec<u64>,
         active_canvas: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,7 +73,7 @@ pub enum AppMessage {
     Tabs(Tabs),
     /// The drawing surface's current tool and the text being typed.
     Canvas(Canvas),
-    /// A raster tab's picture, tool, selection, crop box, and layer box.
+    /// A raster tab's image, tool, selection, crop box, and layer box.
     Raster(RasterView),
     /// A question for the host to show. The host answers once.
     Ask(Ask),
@@ -111,17 +111,19 @@ pub enum AppMessage {
     Claimed { id: String, yours: bool },
 }
 
-/// The cell, and its picture's path relative to the project, that new work
+/// The cell, and its image's path relative to the project, that new work
 /// was opened from, and where the cell lives: a conversation session, or a
-/// notebook's file relative to the project.
+/// recipe's file relative to the project. Files written before 0.14 call
+/// these by their stored spelling, `picture` and `notebook`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenedFrom {
     pub cell: String,
-    pub picture: String,
+    #[serde(alias = "picture")]
+    pub image: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notebook: Option<String>,
+    #[serde(default, alias = "notebook", skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
 }
 
 /// What the host writes to a sub-application, on its standard input.
@@ -129,7 +131,7 @@ pub struct OpenedFrom {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostMessage {
     /// A menu row, toolbar button, shortcut, the plus, a tab's close mark,
-    /// selecting a tab, or an outliner action. `new_sketch` creates a sketch.
+    /// selecting a tab, or an outliner action. `new_storyboard` creates a storyboard.
     Command {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,7 +280,7 @@ pub enum SelectOp {
     Replace { nodes: Vec<u64> },
 }
 
-/// The camera sent with a document when a sketch is opened or created.
+/// The camera sent with a document when a drawing is opened or created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocumentCamera {
     pub origin: [f64; 2],
@@ -302,7 +304,7 @@ pub enum ContentsKind {
     Canvas,
     /// A list of cells. The host draws them; the sub-application keeps them.
     Cells,
-    /// A picture of pixels the sub-application composites: see `RasterView`.
+    /// An image of pixels the sub-application composites: see `RasterView`.
     Raster,
 }
 
@@ -479,6 +481,36 @@ pub fn encode_host_message(message: &HostMessage) -> String {
 /// in its own folder under `apps/`: `apps/<id>/manifest.json`.
 pub const MANIFEST_FILE: &str = "manifest.json";
 
+/// A new item's name, as Studio's conventions guide sets it: "Untitled" and
+/// the item's word, such as "Untitled Image".
+pub fn untitled(word: &str) -> String {
+    format!("Untitled {word}")
+}
+
+/// `name`, then the names after it: "Untitled Image" gives "Untitled Image",
+/// "Untitled Image 2", and on; "Beach 3" gives "Beach 3", "Beach 4". The
+/// first is never numbered.
+pub fn free_names(name: &str) -> impl Iterator<Item = String> {
+    let (stem, first) = match name.rsplit_once(' ') {
+        Some((stem, number)) if !stem.is_empty() => match number.parse::<u32>() {
+            Ok(number) => (stem.to_string(), Some(number)),
+            Err(_) => (name.to_string(), None),
+        },
+        _ => (name.to_string(), None),
+    };
+    let start = first.unwrap_or(1);
+    (start..start + 10_000).map(move |number| match first {
+        None if number == 1 => stem.clone(),
+        _ => format!("{stem} {number}"),
+    })
+}
+
+/// The first of `free_names(name)` that `taken` does not hold, such as among
+/// a workspace's open tabs and the files in the project's folder.
+pub fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    free_names(name).find(|candidate| !taken(candidate)).unwrap_or_else(|| name.to_string())
+}
+
 /// What the host reads about a sub-application before it starts the program.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -492,6 +524,15 @@ pub struct Manifest {
     pub executable: String,
     /// The protocol version the program speaks. Must be `PROTOCOL_VERSION`.
     pub protocol: u32,
+    /// Left out of the new-tab menu and not started with the others; only
+    /// `--app` or a session's tab of it starts it. A workspace copied from
+    /// the template drops it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// The ids this sub-application had before, so what was stored under
+    /// them, such as a session's tabs or its data folder, is its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formerly: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,6 +565,9 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, ManifestError> {
             manifest.executable
         )));
     }
+    if manifest.formerly.iter().any(|old| *old == manifest.id) {
+        return Err(ManifestError(format!("formerly {:?} is its own id", manifest.id)));
+    }
     if manifest.protocol != PROTOCOL_VERSION {
         return Err(ManifestError(format!(
             "protocol {} is not this host's version {PROTOCOL_VERSION}",
@@ -537,10 +581,22 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, ManifestError> {
 mod tests {
     use super::*;
 
+    /// Catches a naming rule that numbers the first item, or skips a number:
+    /// the conventions guide's "Untitled Image", then "Untitled Image 2".
+    #[test]
+    fn the_first_new_item_is_not_numbered_and_the_next_are() {
+        let names: Vec<String> = free_names(&untitled("Image")).take(3).collect();
+        assert_eq!(names, ["Untitled Image", "Untitled Image 2", "Untitled Image 3"]);
+        let names: Vec<String> = free_names("Beach 3").take(2).collect();
+        assert_eq!(names, ["Beach 3", "Beach 4"]);
+        let taken = ["Untitled Recipe", "Untitled Recipe 2"];
+        assert_eq!(free_name(&untitled("Recipe"), |name| taken.contains(&name)), "Untitled Recipe 3");
+    }
+
     fn manifest_text(id: &str, executable: &str, protocol: u32) -> String {
         serde_json::json!({
             "id": id,
-            "name": "Sketch",
+            "name": "Storyboard",
             "executable": executable,
             "protocol": protocol,
         })
@@ -593,15 +649,15 @@ mod tests {
     /// Catches an id that is not lowercase letters, digits, and hyphens.
     #[test]
     fn manifest_refuses_id_outside_lowercase_digits_and_hyphens() {
-        let text = manifest_text("Sketch", "sketch", 1);
+        let text = manifest_text("Storyboard", "storyboard", 1);
         assert!(parse_manifest(&text).is_err(), "uppercase id was accepted");
     }
 
     /// Catches an executable that is a path.
     #[test]
     fn manifest_refuses_executable_path() {
-        for executable in ["bin/sketch", "bin\\sketch"] {
-            let text = manifest_text("sketch", executable, 1);
+        for executable in ["bin/storyboard", "bin\\storyboard"] {
+            let text = manifest_text("storyboard", executable, 1);
             assert!(
                 parse_manifest(&text).is_err(),
                 "path executable {executable:?} was accepted"
@@ -612,7 +668,7 @@ mod tests {
     /// Catches a protocol version other than 1.
     #[test]
     fn manifest_refuses_protocol_other_than_1() {
-        let text = manifest_text("sketch", "sketch", 2);
+        let text = manifest_text("storyboard", "storyboard", 2);
         assert!(parse_manifest(&text).is_err(), "protocol 2 was accepted");
     }
 
@@ -620,9 +676,9 @@ mod tests {
     /// tool key that splits wrongly at an application id's hyphen.
     #[test]
     fn invoke_and_result_round_trip() {
-        let key = tool_key("simple-sketch", "make", "add_shape");
-        assert_eq!(split_tool_key(&key), Some(("simple-sketch", "make", "add_shape")));
-        assert_eq!(split_tool_key("simple-sketch__make"), None);
+        let key = tool_key("storyboard-generator", "make", "add_shape");
+        assert_eq!(split_tool_key(&key), Some(("storyboard-generator", "make", "add_shape")));
+        assert_eq!(split_tool_key("storyboard-generator__make"), None);
 
         let invoke = HostMessage::Invoke {
             call: "c1".to_string(),
@@ -684,7 +740,7 @@ mod tests {
     /// and a state this build does not know are kept, and the rest reads.
     #[test]
     fn a_later_part_and_state_still_read() {
-        let line = r#"{"type":"cells","tab":"book","cells":[{"id":"x","kind":"text","input":[{"text":"north"},{"image_ref":3}],"state":"queued"}]}"#;
+        let line = r#"{"type":"cells","tab":"recipe","cells":[{"id":"x","kind":"text","input":[{"text":"north"},{"image_ref":3}],"state":"queued"}]}"#;
         let AppMessage::Cells { cells, .. } = parse_app_message(line).expect("a later cell was refused") else {
             panic!("not a cells message");
         };
@@ -744,22 +800,22 @@ mod tests {
             current: None,
         };
         round_trip_app(AppMessage::Cells {
-            tab: "book".into(),
+            tab: "recipe".into(),
             cells: vec![path.clone(), unknown.clone()],
             selected: Some(unknown.id.clone()),
         });
         round_trip_host(HostMessage::InsertCell {
-            tab: "book".into(),
+            tab: "recipe".into(),
             index: 1,
             cell: Some(unknown),
         });
-        round_trip_host(HostMessage::InsertCell { tab: "book".into(), index: 2, cell: None });
-        round_trip_host(HostMessage::SetVersion { tab: "book".into(), cell: path.id.clone(), index: 0 });
-        round_trip_host(HostMessage::MoveCell { tab: "book".into(), cell: path.id.clone(), to: 1 });
-        round_trip_host(HostMessage::DeleteCell { tab: "book".into(), cell: path.id.clone() });
-        round_trip_host(HostMessage::ShowSource { tab: "book".into(), cell: path.id.clone() });
+        round_trip_host(HostMessage::InsertCell { tab: "recipe".into(), index: 2, cell: None });
+        round_trip_host(HostMessage::SetVersion { tab: "recipe".into(), cell: path.id.clone(), index: 0 });
+        round_trip_host(HostMessage::MoveCell { tab: "recipe".into(), cell: path.id.clone(), to: 1 });
+        round_trip_host(HostMessage::DeleteCell { tab: "recipe".into(), cell: path.id.clone() });
+        round_trip_host(HostMessage::ShowSource { tab: "recipe".into(), cell: path.id.clone() });
         round_trip_host(HostMessage::CellResult {
-            tab: "book".into(),
+            tab: "recipe".into(),
             cell: path.id.clone(),
             input: path.input.clone(),
             endpoint: "openrouter".into(),
@@ -769,18 +825,18 @@ mod tests {
             output: path.output.clone(),
             error: Some("The model failed.".into()),
         });
-        assert!(parse_app_message(r#"{"type":"cells","tab":"book","cells":[{"id":"x","kind":"plot","state":"running"}]}"#).is_err());
+        assert!(parse_app_message(r#"{"type":"cells","tab":"recipe","cells":[{"id":"x","kind":"plot","state":"running"}]}"#).is_err());
     }
 
     /// Every cell message round-trips, so a field cannot be dropped quietly.
     #[test]
     fn cell_messages_round_trip() {
         round_trip_app(AppMessage::RunCell {
-            tab: "book".into(),
+            tab: "recipe".into(),
             cell: "c1".into(),
         });
         round_trip_app(AppMessage::StopCell {
-            tab: "book".into(),
+            tab: "recipe".into(),
             cell: "c1".into(),
         });
         round_trip_app(AppMessage::Edits { media_types: vec!["image/png".into(), "image/jpeg".into()] });
@@ -791,24 +847,24 @@ mod tests {
         round_trip_host(HostMessage::OpenAsNew {
             path: "/p/images/a.png".into(),
             name: "A girl on a beach".into(),
-            from: Some(OpenedFrom { cell: "c1".into(), picture: "images/a.png".into(), session: Some("s1".into()), notebook: None }),
+            from: Some(OpenedFrom { cell: "c1".into(), image: "images/a.png".into(), session: Some("s1".into()), recipe: None }),
         });
         round_trip_app(AppMessage::Claimed {
             id: "claim-1".into(),
             yours: true,
         });
         round_trip_host(HostMessage::EditCell {
-            tab: "book".into(),
+            tab: "recipe".into(),
             cell: "c1".into(),
             input: vec![CellPart::Text { text: "A lighthouse.".into() }],
         });
         round_trip_host(HostMessage::SelectCell {
-            tab: "book".into(),
+            tab: "recipe".into(),
             cell: "c1".into(),
         });
         round_trip_host(HostMessage::Claim {
             id: "claim-1".into(),
-            path: "/tmp/book.smx".into(),
+            path: "/tmp/recipe.smx".into(),
         });
     }
 

@@ -1,0 +1,7 @@
+{
+  "id": "recipe-creation",
+  "name": "Recipe Creation",
+  "executable": "recipe-creation",
+  "protocol": 1,
+  "formerly": ["mission-control"]
+}

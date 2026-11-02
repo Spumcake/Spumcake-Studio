@@ -1,4 +1,4 @@
-//! A raster tab's filmstrip: the pictures a sub-application lists, along the
+//! A raster tab's filmstrip: the images a sub-application lists, along the
 //! bottom of the working area, as the owner's mockup and 0.11's gallery views
 //! show. The host draws the thumbnails and the + tile, and sends what the
 //! pointer does on them: `focus` at any press, `select` for a click, a
@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 
 /// The strip's height, its hairline included, in points.
 pub(crate) const HEIGHT: f32 = 68.0;
-/// A thumbnail's height. Its width follows its picture's proportions, within
-/// these, so a very long or very tall picture still makes a tile to click.
+/// A thumbnail's height. Its width follows its image's proportions, within
+/// these, so a very long or very tall image still makes a tile to click.
 const THUMB_H: f32 = 44.0;
 const THUMB_MIN_W: f32 = 24.0;
 const THUMB_MAX_W: f32 = 3.0 * THUMB_H;
@@ -26,7 +26,7 @@ const ADD_W: f32 = 68.0;
 const GAP: f32 = 10.0;
 const INSET: f32 = 18.0;
 const RADIUS: f32 = 4.0;
-/// The shown picture's outline, as an Image cell's filmstrip draws it.
+/// The shown image's outline, as an Image cell's filmstrip draws it.
 const SHOWN: Color32 = Color32::from_rgb(37, 99, 235);
 /// The + tile's sign, lighter than text, as gallery.png shows it.
 const SIGN: Color32 = Color32::from_rgb(160, 164, 172);
@@ -35,11 +35,11 @@ const MENU_GAP: f32 = 8.0;
 /// A drag this near an end of the strip scrolls it, this far each frame.
 const EDGE: f32 = 28.0;
 const EDGE_STEP: f32 = 8.0;
-/// A wheel notch, as on the picture.
+/// A wheel notch, as on the image.
 const NOTCH_POINTS: f32 = 50.0;
 
-/// The area a raster tab gives its picture, and the strip under it when the
-/// view has a filmstrip. An area too short for both keeps the picture.
+/// The area a raster tab gives its image, and the strip under it when the
+/// view has a filmstrip. An area too short for both keeps the image.
 pub(crate) fn split(rect: Rect, film: Option<&Film>) -> (Rect, Option<Rect>) {
     match film {
         Some(_) if rect.height() > 2.0 * HEIGHT => {
@@ -139,7 +139,7 @@ fn layout(film: &Film) -> Layout {
     Layout { lefts, widths, add: x, total: x + ADD_W + INSET }
 }
 
-/// A thumbnail's width at the strip's height, at its picture's proportions.
+/// A thumbnail's width at the strip's height, at its image's proportions.
 fn thumb_width(item: &FilmItem) -> f32 {
     let (width, height) = (item.thumbnail.width.max(1) as f32, item.thumbnail.height.max(1) as f32);
     (THUMB_H * width / height).clamp(THUMB_MIN_W, THUMB_MAX_W)
@@ -336,12 +336,12 @@ impl Strip {
     }
 }
 
-/// One thumbnail: its picture at its proportions, with rounded corners, over
+/// One thumbnail: its image at its proportions, with rounded corners, over
 /// squares where it is clear, outlined in blue when it is the one shown and
 /// with a hairline otherwise.
 fn paint_thumb(ui: &egui::Ui, painter: &egui::Painter, place: Rect, item: &FilmItem, shown: bool) {
     let thumbnail = &item.thumbnail;
-    match crate::raster::raw_picture(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false) {
+    match crate::raster::raw_image(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false) {
         Some((texture, opaque)) => {
             if !opaque {
                 crate::raster::checker(ui.ctx(), painter, place);

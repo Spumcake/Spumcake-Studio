@@ -1,4 +1,4 @@
-//! The document model both the host and Simple Sketch draw from.
+//! The document model both the host and the Storyboard Generator draw from.
 //! It has no session, registry, schema of sections and pages, store, or preferences.
 
 pub mod camera;

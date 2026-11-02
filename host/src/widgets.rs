@@ -600,7 +600,7 @@ const MENU_ICON_GAP: f32 = 8.0;
 const MENU_CHEVRON: f32 = 14.0;
 const MENU_CHEVRON_ICON: &str = "nav-arrow-right";
 
-/// The rows of every small menu: the sketch menu, the select tool's action
+/// The rows of every small menu: the drawing menu, the select tool's action
 /// menus, the panel heading's menu, and the outliner's right-click menus. Menus
 /// are drawn at full size wherever they open, because their rows act like
 /// buttons. The rows are as wide as the longest label plus the same space on
@@ -837,7 +837,7 @@ pub(crate) fn menu_card(style: &mut egui::Style) {
     style.spacing.menu_margin = egui::Margin::same(8);
 }
 
-/// A small button floating on the menus' card, such as a picture's Edit:
+/// A small button floating on the menus' card, such as an image's Edit:
 /// white, a faint hairline, and the menus' shadow; grey while pointed at.
 pub(crate) fn card_pill(painter: &egui::Painter, rect: Rect, hovered: bool) {
     let radius = 8;

@@ -1,12 +1,12 @@
 //! The assistant's side of the protocol, with no host and no model: every
-//! tool of Simple Sketch's skills through `invoke`, one undo per request,
+//! tool of Storyboard Generator's skills through `invoke`, one undo per request,
 //! and a workspace's `--restore`, `open`, `keep`, and `kept`. Each reply is
 //! compared with an in-process `Server` given the same messages.
 
 use crate::{Link, VIEWPORT, brush_gesture, canvas_and_source, command, document_of, exchange, gesture};
 use protocol::{AppMessage, FileKind, HostMessage, Skill};
 use serde_json::{Value, json};
-use simple_sketch::serve::Server;
+use storyboard_generator::serve::Server;
 use std::path::{Path, PathBuf};
 
 /// One process, its in-process twin, and the tab being worked on.
@@ -22,23 +22,23 @@ struct Pair {
 impl Pair {
     fn exchange(&mut self, message: HostMessage) -> Result<Vec<AppMessage>, String> {
         let replies = exchange(&mut self.link, &mut self.oracle, message)?;
-        if let Some((tab, sketch, _)) = document_of(&replies)
+        if let Some((tab, storyboard, _)) = document_of(&replies)
             && tab == self.tab
         {
-            self.shown = sketch;
+            self.shown = storyboard;
         }
         Ok(replies)
     }
 
     /// One tool, as the host sends it for the assistant. Returns the
-    /// result's `ok`, `output`, the number of pictures, and every reply.
+    /// result's `ok`, `output`, the number of images, and every reply.
     fn invoke(&mut self, tool: &str, input: Value, group: &str) -> Result<(bool, Value, usize, Vec<AppMessage>), String> {
         self.calls += 1;
         let call = format!("call-{}", self.calls);
         let replies = self.exchange(HostMessage::Invoke {
             call: call.clone(),
             tab: self.tab.clone(),
-            tool: protocol::tool_key("simple-sketch", tool.split_once("__").map_or("", |(skill, _)| skill), tool.split_once("__").map_or(tool, |(_, name)| name)),
+            tool: protocol::tool_key("storyboard-generator", tool.split_once("__").map_or("", |(skill, _)| skill), tool.split_once("__").map_or(tool, |(_, name)| name)),
             input,
             group: group.to_string(),
         })?;
@@ -136,7 +136,7 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
             AppMessage::Skills { skills } => Some(skills.clone()),
             _ => None,
         })
-        .ok_or("simple-sketch declared no skills")?;
+        .ok_or("storyboard-generator declared no skills")?;
     let end = greeting.iter().position(|message| matches!(message, AppMessage::End));
     let declared = greeting.iter().position(|message| matches!(message, AppMessage::Skills { .. }));
     if declared > end {
@@ -154,8 +154,8 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
 
     // One request, every tool.
     let r1 = "request-1";
-    let read = pair.ok("look__read_sketch", json!({}), r1)?;
-    note("look__read_sketch");
+    let read = pair.ok("look__read_storyboard", json!({}), r1)?;
+    note("look__read_storyboard");
     let canvas = read.get("active_canvas").and_then(Value::as_u64).ok_or("no active canvas")?;
     let pink = read
         .get("brush_colors")
@@ -317,17 +317,17 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
     note("edit__delete_layer");
     let _ = canvas_two;
 
-    let (ok, picture, images, _) = pair.invoke("look__look_at", json!({}), r1)?;
-    if !ok || images != 1 || picture["width"].as_u64().is_none() {
-        return Err(format!("look_at gave no picture: {picture}"));
+    let (ok, image, images, _) = pair.invoke("look__look_at", json!({}), r1)?;
+    if !ok || images != 1 || image["width"].as_u64().is_none() {
+        return Err(format!("look_at gave no image: {image}"));
     }
     let (ok, _, images, _) = pair.invoke("look__look_at", json!({"object": ellipse, "size": 256}), r1)?;
     if !ok || images != 1 {
-        return Err("look_at could not picture one object".into());
+        return Err("look_at could not show one object".into());
     }
     let (ok, _, images, _) = pair.invoke("look__look_at", json!({"visible_area": true, "size": 320}), r1)?;
     if !ok || images != 1 {
-        return Err("look_at could not picture the visible area".into());
+        return Err("look_at could not show the visible area".into());
     }
     note("look__look_at");
     pair.refused("look__nothing_here", json!({}), r1)?;
@@ -383,7 +383,7 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
     Ok(saved)
 }
 
-/// Saves the shown sketch through Simple Sketch's own Save, in the process
+/// Saves the shown storyboard through Storyboard Generator's own Save, in the process
 /// and the session, and checks the two files are the same.
 fn save(pair: &mut Pair, dir: &Path, folder: &str) -> Result<PathBuf, String> {
     let replies = pair.exchange(command("save", Some(&pair.tab.clone()), None))?;
@@ -393,7 +393,7 @@ fn save(pair: &mut Pair, dir: &Path, folder: &str) -> Result<PathBuf, String> {
     let process = dir.join(folder).join("process").join(&name);
     let oracle = dir.join(folder).join("oracle").join(&name);
     answer_file(pair, dir, folder, id, Some((&process, &oracle)))?;
-    let written = std::fs::read(&process).map_err(|_| "simple-sketch wrote no file")?;
+    let written = std::fs::read(&process).map_err(|_| "storyboard-generator wrote no file")?;
     let reference = std::fs::read(&oracle).map_err(|_| "the session wrote no file")?;
     if written != reference {
         return Err("the file saved after the skills does not match the session's".into());
@@ -445,8 +445,8 @@ fn answer_file(
     Ok(replies)
 }
 
-/// A workspace reopened: started with `--restore`, Simple Sketch opens no
-/// sketch until `open`; reopens a saved file and a new untitled sketch; and
+/// A workspace reopened: started with `--restore`, Storyboard Generator opens no
+/// storyboard until `open`; reopens a saved file and a new untitled storyboard; and
 /// gives the untitled one a file through its own Save when `keep` asks.
 pub(crate) fn workspace(dir: &Path, saved: &Path) -> Result<(), String> {
     let mut pair = Pair {
@@ -462,7 +462,7 @@ pub(crate) fn workspace(dir: &Path, saved: &Path) -> Result<(), String> {
         return Err("the restoring declaration does not match the session".into());
     }
     if greeting.iter().any(|message| matches!(message, AppMessage::Tab { .. } | AppMessage::Document { .. } | AppMessage::Tabs(_))) {
-        return Err("with --restore, simple-sketch opened a sketch of its own".into());
+        return Err("with --restore, storyboard-generator opened a storyboard of its own".into());
     }
     pair.exchange(HostMessage::Viewport { viewport: VIEWPORT })?;
 
@@ -478,14 +478,14 @@ pub(crate) fn workspace(dir: &Path, saved: &Path) -> Result<(), String> {
     declared_before_tabs(&replies, &opened.id)?;
     let (_, document, camera) = document_of(&replies).ok_or("open sent no document")?;
     if !camera || crate::stroke_counts(&document).0 == 0 {
-        return Err("the opened sketch is not the saved one".into());
+        return Err("the opened storyboard is not the saved one".into());
     }
 
     let replies = pair.exchange(HostMessage::Open { path: None })?;
     let tabs = tabs_of(&replies).ok_or("open {} sent no tabs")?;
     let untitled = tabs.tabs.iter().find(|tab| tab.path.is_none()).ok_or("open {} made no untitled tab")?.id.clone();
     if tabs.tabs.len() != 2 || tabs.active != untitled {
-        return Err("open {} did not add a new untitled sketch".into());
+        return Err("open {} did not add a new untitled storyboard".into());
     }
     declared_before_tabs(&replies, &untitled)?;
     pair.tab = untitled.clone();
@@ -499,7 +499,7 @@ pub(crate) fn workspace(dir: &Path, saved: &Path) -> Result<(), String> {
     // A cancelled Save keeps no file.
     let replies = pair.exchange(HostMessage::Keep { tab: untitled.clone() })?;
     let Some(AppMessage::File { id, kind: FileKind::Save, name: Some(name), .. }) = replies.first().cloned() else {
-        return Err("keep of an untitled sketch did not run its Save".into());
+        return Err("keep of an untitled storyboard did not run its Save".into());
     };
     let replies = answer_file(&mut pair, dir, "keep", id, None)?;
     if !matches!(replies.last(), Some(AppMessage::Kept { tab, path: None, .. }) if *tab == untitled) {
