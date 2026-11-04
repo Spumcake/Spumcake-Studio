@@ -24,6 +24,7 @@ The stack is Rust, egui through eframe, and Iconoir icons.
 - The host and the assistant know sub-applications only through their manifests and the protocol. Do not put a sub-application's name, label, tool, skill, or rule in either.
 - Every sub-application runs with no host, driven only through the protocol.
 - A change to the protocol updates the **scaffolding** skill in the same commit.
+- A skill is an agent skill, a `SKILL.md`. A workspace's tools are tools, never skills. The protocol still calls the groups of tools a sub-application declares `skills`, which predates the conventions guide's hierarchy of 2026-11-04; renaming them to tools is planned. Do not add new uses of the old sense.
 
 ## Working rules for agents
 

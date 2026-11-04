@@ -14,7 +14,7 @@ const WORKSPACES: &[(&str, &str, bool)] = &[
 ];
 
 /// Words the guide retires, as a word or part of an identifier.
-const RETIRED_WORDS: &[&str] = &["notebook", "book", "sketch", "picture", "asset"];
+const RETIRED_WORDS: &[&str] = &["notebook", "book", "sketch", "picture", "asset", "strategy", "strategies"];
 
 /// Names the guide retires, matched with spaces, hyphens, and underscores
 /// left out, so "image-editor", "ImageEditor", and "mission_control" count.
@@ -142,7 +142,7 @@ fn only_the_protocol_names_new_items() {
 #[test]
 fn no_retired_word_is_left() {
     let mut all = Vec::new();
-    for dir in ["apps", "host", "protocol", "draw", "assistant", "client", "docs", "skills", "strategies"] {
+    for dir in ["apps", "host", "protocol", "draw", "assistant", "client", "docs", "skills"] {
         files(&root().join(dir), &mut all);
     }
     all.push(root().join("AGENTS.md"));
