@@ -6,7 +6,7 @@ Studio is one host window that runs separate sub-applications, each its own prog
 
 ## Where it is going
 
-Spumcake Studio is for professional animation studios that want the benefits of AI without handing creative control to a machine, in place of tools such as Adobe Animate or Moho. Its sub-applications will grow into workflows that handle the low-level jobs that make animation tedious, such as inbetweening, line art, secondary animation, and colouring, so artists can focus on being creative. AI in Studio solves targeted problems, and Studio is open about where it is used, so the art stays an intentional choice.
+Spumcake Studio is for professional animation studios that want the benefits of AI without handing creative control to a machine, in place of tools such as Adobe Animate or Moho. Its sub-applications will grow into workflows across a production. In pre-production they assist the artist with concept artwork, prop and background design, continuity (character sheets, style guides, and height charts), and layout design, while the artist makes the creative calls. In production they handle the low-level jobs that make animation tedious, such as animation tests, inbetweening, line art, cleanup, colouring, secondary animation, and lip-sync, so artists can focus on being creative. AI in Studio solves targeted problems, and Studio is open about where it is used, so the art stays an intentional choice.
 
 ## What is always true
 
