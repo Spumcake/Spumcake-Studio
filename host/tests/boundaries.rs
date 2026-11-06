@@ -69,6 +69,28 @@ fn the_new_host_parts_name_no_sub_application_skill_or_tool() {
     assert!(found.is_empty(), "named:\n{}", found.join("\n"));
 }
 
+/// Catches the timeline or the stage learning one workspace's work: they
+/// draw rows, items, and drawings, never clips, shots, sheets, or genga
+/// paper. Words are whole identifiers, so `clip_rect` is not a clip.
+#[test]
+fn the_timeline_and_the_stage_name_no_workspace_work() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let words = ["clip", "clips", "shot", "shots", "sheet", "sheets", "genga"];
+    let mut found = Vec::new();
+    for file in ["src/timeline.rs", "src/canvas.rs"] {
+        let text = std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| panic!("{file}: {error}"));
+        for (number, line) in text.lines().enumerate() {
+            for token in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                let token = token.to_lowercase();
+                if words.contains(&token.as_str()) {
+                    found.push(format!("{file}:{}: {token:?} in {}", number + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "named:\n{}", found.join("\n"));
+}
+
 /// Catches the host depending on a sub-application's crate.
 #[test]
 fn the_host_depends_on_no_sub_application() {

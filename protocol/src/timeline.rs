@@ -346,13 +346,21 @@ pub struct Stage {
     pub overlays: Vec<Overlay>,
 }
 
-/// Another drawing under the active one, never edited.
+/// Another drawing shown with the active one, never edited: under it, or,
+/// with `above`, over it, each list drawn in order. A clip's other layers,
+/// onion skin, the light table, and the paper are all such drawings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Underlay {
     /// A drawing, as `document` carries one.
     pub drawing: serde_json::Value,
-    pub tint: [u8; 3],
+    /// Drawn in one colour, such as onion skin's red and green; none draws
+    /// it in its own colours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<[u8; 3]>,
     pub opacity: f32,
+    /// Drawn over the active drawing rather than under it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub above: bool,
     #[serde(default)]
     pub offset: [f64; 2],
     /// Degrees.

@@ -1081,7 +1081,10 @@ mod tests {
             fill: None,
             field: Some([0.0, 0.0, 1920.0, 1080.0]),
             veil: true,
-            underlays: vec![Underlay { drawing: serde_json::json!({"nodes": []}), tint: [220, 60, 60], opacity: 0.3, offset: [12.0, 0.0], rotation: 5.0, tag: Some("Key 3".into()) }],
+            underlays: vec![
+                Underlay { drawing: serde_json::json!({"nodes": []}), tint: Some([220, 60, 60]), opacity: 0.3, above: false, offset: [12.0, 0.0], rotation: 5.0, tag: Some("Key 3".into()) },
+                Underlay { drawing: serde_json::json!({"nodes": []}), tint: None, opacity: 1.0, above: true, offset: [0.0, 0.0], rotation: 0.0, tag: None },
+            ],
             overlays: vec![
                 Overlay::Rect { min: [0.0, 0.0], max: [10.0, 10.0], dashed: true },
                 Overlay::Path { points: vec![[0.0, 0.0], [5.0, 5.0]] },
