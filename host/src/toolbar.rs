@@ -672,6 +672,7 @@ fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>, squee
         | ToolItem::Swatches { .. }
         | ToolItem::Button { .. }
         | ToolItem::Menu { .. }
+        | ToolItem::Popover { .. }
         | ToolItem::Maximize { .. } => item_ui(ui, item, chosen),
     }
 }
@@ -832,6 +833,51 @@ fn slider_actions(edit: BarEdit, set: &Action, finish: Option<&Action>, chosen: 
     }
 }
 
+/// Where a popover's row edits wait until the window takes them.
+fn popover_edits_id() -> egui::Id {
+    egui::Id::new("toolbar-popover-edits")
+}
+
+/// An icon button that opens panel rows under it, drawn as the panel
+/// draws them. Their edits wait for `take_popover_edits`.
+fn popover(ui: &mut egui::Ui, icon: &str, tip: &str, rows: &[protocol::Row]) {
+    let response = icon_button(ui, icon, Some(tip), true, false);
+    let id = response.id.with("popover");
+    let mut open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    if response.clicked() {
+        open = !open;
+    }
+    if open {
+        let mut edits: Vec<crate::panel::Sent> = Vec::new();
+        let area = egui::Area::new(id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(response.rect.left_bottom() + vec2(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(crate::panel::WIDTH - 32.0);
+                    // A popover has no release action of its own.
+                    let none = Action::new("");
+                    for row in rows {
+                        crate::panel::draw_row(ui, row, &none, &mut edits);
+                    }
+                });
+            });
+        if area.response.clicked_elsewhere() && !response.clicked() {
+            open = false;
+        }
+        edits.retain(|sent| !matches!(sent, crate::panel::Sent::Run(action) if action.id.is_empty()));
+        if !edits.is_empty() {
+            ui.data_mut(|data| data.get_temp_mut_or_default::<Vec<crate::panel::Sent>>(popover_edits_id()).extend(edits));
+        }
+    }
+    ui.data_mut(|data| data.insert_temp(id, open));
+}
+
+/// The edits made in popovers since the last call.
+pub(crate) fn take_popover_edits(ctx: &egui::Context) -> Vec<crate::panel::Sent> {
+    ctx.data_mut(|data| data.remove_temp::<Vec<crate::panel::Sent>>(popover_edits_id()).unwrap_or_default())
+}
+
 /// One declared item, drawn with the reference's widget for its kind.
 fn item_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
     match item {
@@ -867,6 +913,7 @@ fn item_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
             enabled,
             rows,
         } => context_menu(ui, icon, label, *enabled, rows, chosen),
+        ToolItem::Popover { icon, tip, rows } => popover(ui, icon, tip, rows),
         ToolItem::Slider {
             caption,
             width,

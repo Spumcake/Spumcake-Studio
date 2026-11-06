@@ -466,6 +466,9 @@ impl HostWindow {
                 tab,
                 origin: camera.origin,
                 zoom: camera.zoom,
+                // The view turns with the storyboard's sheet, in canvas.rs.
+                rotation: 0.0,
+                flip: false,
             },
         );
         self.flows.moved = true;
@@ -2122,8 +2125,10 @@ impl HostWindow {
                 toolbar::show(ui, toolbar.as_ref(), panel_inset)
             })
             .inner;
+        let popover_edits = toolbar::take_popover_edits(ui.ctx());
         if !locked {
             chosen.extend(picked);
+            sent.extend(popover_edits);
         }
 
         // The contents and the panel stay inside the window, whatever the
@@ -2164,7 +2169,19 @@ impl HostWindow {
         } else {
             (full.right() - panel_w).max(full.left())
         };
-        let rect = Rect::from_min_max(full.min, egui::pos2(right, full.bottom()));
+        let whole = Rect::from_min_max(full.min, egui::pos2(right, full.bottom()));
+        // A declared timeline docks under the contents, whatever their kind.
+        let timeline = self
+            .apps
+            .get(app)
+            .and_then(|started| started.running.declared.timelines.get(&tab).cloned());
+        let rect = match &timeline {
+            Some(_) => {
+                let height = crate::timeline::HEIGHT.min(whole.height() / 2.0);
+                Rect::from_min_max(whole.min, egui::pos2(whole.right(), whole.bottom() - height))
+            }
+            None => whole,
+        };
         self.viewport = [f64::from(rect.width()), f64::from(rect.height())];
 
         match self.contents(app, &tab) {
@@ -2185,6 +2202,29 @@ impl HostWindow {
                     .rect_filled(rect, 0.0, CANVAS);
             }
         }
+        if let Some(timeline) = &timeline {
+            let below = Rect::from_min_max(egui::pos2(whole.left(), rect.bottom()), whole.max);
+            for out in crate::timeline::show(ui, timeline, below, locked) {
+                if locked {
+                    continue;
+                }
+                match out {
+                    crate::timeline::Out::Run(action) => chosen.push(action),
+                    crate::timeline::Out::Gesture(gesture) => {
+                        self.send(app, HostMessage::TimelineGesture { tab: tab.clone(), gesture });
+                    }
+                    crate::timeline::Out::Seek { frame, live } => {
+                        self.send(app, HostMessage::Seek { tab: tab.clone(), frame, live });
+                    }
+                }
+            }
+        }
+        let notices = self
+            .apps
+            .get(app)
+            .and_then(|started| started.running.declared.notices.get(&tab).cloned())
+            .unwrap_or_default();
+        chosen.extend(crate::notices::show(ui, &notices, rect, locked));
         self.paint_status(ui, app, rect);
 
         // A menu's Properties can open the panel after this frame was
@@ -2950,6 +2990,8 @@ mod tests {
                 camera: Some(DocumentCamera {
                     origin: [-30.0, 12.5],
                     zoom: 2.0,
+                    rotation: 0.0,
+                    flip: false,
                 }),
             },
         ]
@@ -3092,6 +3134,8 @@ mod tests {
             tab: "7".into(),
             origin: [0.0, 0.0],
             zoom: 1.0,
+            rotation: 0.0,
+            flip: false,
         }));
         assert!(!super::waits_while_locked(&HostMessage::Invoke {
             call: "c".into(),

@@ -10,11 +10,13 @@ mod cell;
 mod declare;
 mod items;
 mod raster;
+mod timeline;
 mod tools;
 pub use cell::*;
 pub use declare::*;
 pub use items::*;
 pub use raster::*;
+pub use timeline::*;
 pub use tools::*;
 
 /// The version this crate speaks. A sub-application's first message says
@@ -147,6 +149,12 @@ pub enum AppMessage {
     /// Asks the host to let the person choose an item of one of these media
     /// types. The host answers `picked`.
     Pick { id: String, media_types: Vec<String> },
+    /// That tab's timeline, docked under its contents, replaced whole.
+    Timeline(Timeline),
+    /// What a canvas tab's stage shows besides its drawing, replaced whole.
+    Stage(Stage),
+    /// That tab's notice cards, replaced whole.
+    Notices { tab: String, notices: Vec<Notice> },
 }
 
 /// The cell, and its image's path relative to the project, that new work
@@ -191,12 +199,24 @@ pub enum HostMessage {
     /// A click, a marquee, or a cancelled drag on the drawing surface. The
     /// host shows the selection the next `document` states.
     Select { tab: String, op: SelectOp },
-    /// The tab's camera after a pan, zoom, or fit. Not a history step.
+    /// The tab's camera after a pan, zoom, fit, rotation, or flip. Not a
+    /// history step.
     Camera {
         tab: String,
         origin: [f64; 2],
         zoom: f64,
+        /// The view's rotation, in degrees.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
+        /// The view mirrored left to right.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        flip: bool,
     },
+    /// One finished gesture on a tab's timeline.
+    TimelineGesture { tab: String, gesture: TimelineGesture },
+    /// Show that frame. `live` while the playhead is held, as a slider's
+    /// `preview`, and false once more when it is let go.
+    Seek { tab: String, frame: u32, live: bool },
     /// The contents area's size, once it is first known.
     Viewport { viewport: [f64; 2] },
     /// The button the person chose on an `ask`.
@@ -366,6 +386,16 @@ pub enum SelectOp {
 pub struct DocumentCamera {
     pub origin: [f64; 2],
     pub zoom: f64,
+    /// The view's rotation, in degrees.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
+    /// The view mirrored left to right.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip: bool,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// Which file dialog the host should open.
@@ -515,6 +545,9 @@ impl Declaration {
             | AppMessage::Rendered { .. }
             | AppMessage::Need { .. }
             | AppMessage::Pick { .. }
+            | AppMessage::Timeline(_)
+            | AppMessage::Stage(_)
+            | AppMessage::Notices { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -979,6 +1012,117 @@ mod tests {
         // An item part reads as an item, not as a path or an unknown part.
         let part: CellPart = serde_json::from_str(r#"{"item":{"path":"Pilot.smx","item":"b3"},"media_type":"image/png","use":"result"}"#).unwrap();
         assert_eq!(part, CellPart::Item { item: board, media_type: "image/png".into(), part: Some(CellUse::Result) });
+    }
+
+    /// Every timeline, stage, and notice message round-trips, so a field
+    /// cannot be dropped quietly, and a camera without rotation reads as
+    /// one that never turned.
+    #[test]
+    fn timeline_stage_and_notice_messages_round_trip() {
+        let film = TimelineRow {
+            id: "v1".into(),
+            name: "Video 1".into(),
+            color: [120, 140, 220],
+            icon: None,
+            indent: 0,
+            open: None,
+            disclose: None,
+            selected: false,
+            toggles: vec![RowToggle { icon: "lock".into(), tip: "Lock".into(), on: false, action: Action::new("lock") }],
+            read_only: false,
+            menu: Vec::new(),
+            drop: DropRule::Push,
+            content: RowContent::Items {
+                items: vec![TimelineItem {
+                    id: "c1".into(),
+                    start: 0,
+                    length: 48,
+                    fill: [200, 210, 240],
+                    border: Some(Border { rgb: [40, 60, 120], width: 1.0 }),
+                    style: ItemStyle::Dashed,
+                    label: "Shot 1".into(),
+                    icon: None,
+                    selected: true,
+                    thumbnail: Some(Thumbnail { path: "/run/t.rgba".into(), width: 4, height: 3, revision: 2 }),
+                    waveform: vec![0.1, 0.8],
+                    progress: Some(0.5),
+                    end_mark: Some(EndMark { icon: "warning".into(), tip: "Out of date".into() }),
+                    tip: String::new(),
+                    menu: Vec::new(),
+                    open: Some(Action::new("edit_clip")),
+                    movable: true,
+                }],
+            },
+        };
+        let mut layer = film.clone();
+        layer.id = "l1".into();
+        layer.content = RowContent::Cells {
+            marks: vec![
+                CellMark { frame: 0, kind: MarkKind::Key, selected: false },
+                CellMark { frame: 12, kind: MarkKind::Label { text: "Turn".into() }, selected: true },
+            ],
+            spans: vec![CellSpan { start: 0, length: 12, kind: SpanKind::Tween }],
+        };
+        round_trip_app(AppMessage::Timeline(Timeline {
+            tab: "1".into(),
+            header: vec![ToolItem::Popover { icon: "onion".into(), tip: "Onion skin".into(), rows: Vec::new() }],
+            pages: vec![TimelinePage { label: "Timeline".into(), selected: true, action: Action::new("page") }],
+            back: Some(TimelineBack { path: vec!["Film".into(), "Shot 1".into()], action: Action::new("back") }),
+            ruler: Ruler { fps: 24.0, length: 240, unit: RulerUnit::Timecode },
+            rows: vec![film, layer],
+            playhead: 6,
+            ranges: vec![TimelineRange { id: "onion".into(), kind: RangeKind::OnionSkin, start: 4, end: 8 }],
+            add_row: Some(Action::new("add_track")),
+            empty_hint: String::new(),
+        }));
+        round_trip_app(AppMessage::Stage(Stage {
+            tab: "1".into(),
+            image: Some(Thumbnail { path: "/run/f.rgba".into(), width: 1920, height: 1080, revision: 9 }),
+            fill: None,
+            field: Some([0.0, 0.0, 1920.0, 1080.0]),
+            veil: true,
+            underlays: vec![Underlay { drawing: serde_json::json!({"nodes": []}), tint: [220, 60, 60], opacity: 0.3, offset: [12.0, 0.0], rotation: 5.0, tag: Some("Key 3".into()) }],
+            overlays: vec![
+                Overlay::Rect { min: [0.0, 0.0], max: [10.0, 10.0], dashed: true },
+                Overlay::Path { points: vec![[0.0, 0.0], [5.0, 5.0]] },
+                Overlay::Label { at: [1.0, 1.0], text: "Start".into() },
+                Overlay::Dim { min: [0.0, 0.0], max: [5.0, 5.0] },
+            ],
+        }));
+        round_trip_app(AppMessage::Notices {
+            tab: "1".into(),
+            notices: vec![Notice {
+                id: "export".into(),
+                text: "Exporting the film".into(),
+                detail: "Frame 120 of 480".into(),
+                progress: Some(0.25),
+                state: NoticeState::Working,
+                actions: vec![NoticeAction { label: "Cancel".into(), action: Action::new("cancel_export") }],
+                close: None,
+            }],
+        });
+        round_trip_host(HostMessage::TimelineGesture {
+            tab: "1".into(),
+            gesture: TimelineGesture::Move {
+                picks: vec![TimelinePick { row: "v1".into(), item: Some("c1".into()), frame: None }],
+                frames: 8,
+                row: Some("v2".into()),
+                push: true,
+            },
+        });
+        round_trip_host(HostMessage::TimelineGesture {
+            tab: "1".into(),
+            gesture: TimelineGesture::Resize { pick: TimelinePick { row: "v1".into(), item: Some("c1".into()), frame: None }, edge: Edge::End, frames: -4 },
+        });
+        round_trip_host(HostMessage::Seek { tab: "1".into(), frame: 30, live: true });
+        round_trip_host(HostMessage::Camera { tab: "1".into(), origin: [0.0, 0.0], zoom: 1.0, rotation: 15.0, flip: true });
+        let Ok(HostMessage::Camera { rotation, flip, .. }) = parse_host_message(r#"{"type":"camera","tab":"1","origin":[0,0],"zoom":1}"#) else {
+            panic!("a camera without rotation did not read");
+        };
+        assert_eq!((rotation, flip), (0.0, false));
+        let paragraph = Row { prop: serde_json::json!("notes"), label: "Action".into(), kind: RowKind::Paragraph { lines: 4 }, value: PropValue::Text("She turns.".into()) };
+        let text: Row = serde_json::from_str(&serde_json::to_string(&paragraph).unwrap()).unwrap();
+        assert_eq!(text, paragraph);
     }
 
     /// Every cell message round-trips, so a field cannot be dropped quietly.

@@ -407,6 +407,39 @@ pub(crate) fn text_field(
     None
 }
 
+/// A field of several lines, as `text_field` is of one: what is typed is
+/// kept while it has the keyboard, and returned when it lets go.
+pub(crate) fn text_area(ui: &mut egui::Ui, rect: Rect, id: egui::Id, current: &str, s: Scale) -> Option<String> {
+    let pad = s.of(FIELD_PAD);
+    let focused = ui.memory(|memory| memory.has_focus(id));
+    let mut text = if focused {
+        ui.data(|data| data.get_temp::<String>(id.with("buffer")))
+            .unwrap_or_else(|| current.to_string())
+    } else {
+        current.to_string()
+    };
+    let hovered = ui.rect_contains_pointer(rect);
+    field(ui.painter(), rect, hovered || focused, s);
+    let mut inner = ui.new_child(UiBuilder::new().max_rect(rect.shrink(pad)).layout(Layout::top_down(Align::Min)));
+    let response = inner.add(
+        egui::TextEdit::multiline(&mut text)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .font(body(s))
+            .text_color(TEXT)
+            .desired_width(rect.width() - 2.0 * pad)
+            .desired_rows(1),
+    );
+    if response.changed() {
+        ui.data_mut(|data| data.insert_temp(id.with("buffer"), text.clone()));
+    }
+    if response.lost_focus() {
+        ui.data_mut(|data| data.remove::<String>(id.with("buffer")));
+        return Some(text);
+    }
+    None
+}
+
 /// Draws a sample of option `usize` in a rectangle, before its label.
 pub(crate) type OptionPreview<'a> = &'a dyn Fn(&Painter, Rect, usize);
 

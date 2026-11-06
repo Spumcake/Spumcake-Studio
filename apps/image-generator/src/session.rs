@@ -521,10 +521,10 @@ impl Session {
                 self.gesture(gesture);
                 out.extend(self.emit());
             }
-            HostMessage::Camera { tab, origin, zoom } => {
+            HostMessage::Camera { tab, origin, zoom, .. } => {
                 if let Some(image) = self.images.iter_mut().find(|image| image.id == tab) {
                     let frame = image.frame_mut();
-                    frame.camera = Some(DocumentCamera { origin, zoom });
+                    frame.camera = Some(DocumentCamera { origin, zoom, rotation: 0.0, flip: false });
                     frame.host_camera = true;
                     // The zoom menu shows the new percent.
                     out.push(AppMessage::Toolbar(declare::toolbar(self)));
@@ -2362,6 +2362,8 @@ pub fn fit(width: u32, height: u32, viewport: [f64; 2]) -> DocumentCamera {
     DocumentCamera {
         origin: [w / 2.0 - viewport[0] / (2.0 * zoom), h / 2.0 - viewport[1] / (2.0 * zoom)],
         zoom,
+        rotation: 0.0,
+        flip: false,
     }
 }
 
@@ -3159,7 +3161,7 @@ mod tests {
         };
         part(&mut session, 0, vec![[100.0, 100.0, 1.0], [200.0, 100.0, 1.0]]);
         session.handle(HostMessage::Ping);
-        session.handle(HostMessage::Camera { tab: tab.clone(), origin: [0.0, 0.0], zoom: 0.5 });
+        session.handle(HostMessage::Camera { tab: tab.clone(), origin: [0.0, 0.0], zoom: 0.5, rotation: 0.0, flip: false });
         session.handle(HostMessage::Viewport { viewport: [900.0, 600.0] });
         part(&mut session, 2, vec![[300.0, 100.0, 1.0], [400.0, 100.0, 1.0]]);
         assert_eq!(at(&mut session, 150, 100)[..3], [0, 0, 0], "the stroke's first part was taken off");

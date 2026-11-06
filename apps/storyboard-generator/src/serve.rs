@@ -290,7 +290,8 @@ impl Server {
                 activate(&mut self.session, Some(&tab));
                 select(&mut self.session, op);
             }
-            HostMessage::Camera { tab, origin, zoom } => {
+            // Rotation and flip come with the storyboard's sheet.
+            HostMessage::Camera { tab, origin, zoom, .. } => {
                 activate(&mut self.session, Some(&tab));
                 self.session.set_view(origin, zoom);
             }
@@ -336,6 +337,8 @@ impl Server {
             // Items come with the lifecycle's storyboard work.
             HostMessage::Render { id, .. } => replies.push(protocol::no_items(id)),
             HostMessage::Provided { .. } | HostMessage::Stale { .. } | HostMessage::Picked { .. } => {}
+            // The timeline comes with the storyboard's film and clips.
+            HostMessage::TimelineGesture { .. } | HostMessage::Seek { .. } => {}
             HostMessage::EditCell { .. }
             | HostMessage::CellResult { .. }
             | HostMessage::InsertCell { .. }
@@ -728,6 +731,8 @@ impl Server {
                 camera: camera.then_some(DocumentCamera {
                     origin: view.origin,
                     zoom: view.zoom,
+                    rotation: 0.0,
+                    flip: false,
                 }),
             });
             self.sent.document = Some(seen);

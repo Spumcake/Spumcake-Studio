@@ -268,7 +268,7 @@ mod tests {
             selection: vec![vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]],
             crop: Some([1.0, 2.0, 3.0, 4.0]),
             bounds: Some([0.0, 0.0, 1920.0, 1080.0]),
-            camera: Some(DocumentCamera { origin: [0.0, 0.0], zoom: 0.5 }),
+            camera: Some(DocumentCamera { origin: [0.0, 0.0], zoom: 0.5, rotation: 0.0, flip: false }),
             film: Some(Film {
                 items: vec![FilmItem {
                     name: "Beach".into(),

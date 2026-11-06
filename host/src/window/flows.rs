@@ -1542,6 +1542,8 @@ impl HostWindow {
                             tab,
                             origin: view.origin,
                             zoom: view.zoom,
+                            rotation: 0.0,
+                            flip: false,
                         });
                     }
                     None if job.started.elapsed() < 2 * RESTORE_WAIT => {

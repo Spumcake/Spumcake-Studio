@@ -211,6 +211,9 @@ pub enum ToolItem {
         enabled: bool,
         action: Action,
     },
+    /// An icon button that opens panel rows under it. Each row edits as a
+    /// panel row does, with `property`.
+    Popover { icon: String, tip: String, rows: Vec<Row> },
     /// The host window's maximize toggle.
     Maximize {
         icon: String,
@@ -296,6 +299,8 @@ pub enum RowKind {
         centered: bool,
     },
     Text,
+    /// Text of several lines, `lines` tall.
+    Paragraph { lines: u8 },
     Choice {
         options: Vec<String>,
         segmented: bool,

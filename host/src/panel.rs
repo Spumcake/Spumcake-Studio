@@ -15,6 +15,7 @@ use protocol::{Action, ChoicePreview, PresetSample, PropValue, Properties, Row, 
 use serde_json::Value;
 
 /// What the panel and the outliner send.
+#[derive(Clone)]
 pub(crate) enum Sent {
     Run(Action),
     Property {
@@ -399,7 +400,9 @@ fn preview(sent: &mut Vec<Sent>, prop: &Value, value: PropValue) {
     });
 }
 
-fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>) {
+/// One declared row, as the panel draws it; the toolbar's popovers draw
+/// theirs with it too.
+pub(crate) fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>) {
     let value = desc.value.clone();
     let width = ui.available_width();
     if let RowKind::Palette {
@@ -423,6 +426,10 @@ fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mut Vec<Sent>
         }
         RowKind::Note => {
             note_row(ui, &desc.label);
+            return;
+        }
+        RowKind::Paragraph { lines } => {
+            paragraph_row(ui, &desc.prop, &desc.label, *lines, &desc.value, sent);
             return;
         }
         _ => {}
@@ -699,6 +706,26 @@ fn note_row(ui: &mut egui::Ui, label: &str) {
     let words = ui.painter().layout_job(job);
     let (rect, _) = ui.allocate_exact_size(vec2(width, words.size().y), Sense::hover());
     ui.painter().galley(rect.min, words, MUTED);
+}
+
+/// A label above text of several lines, such as a clip's notes, sent when
+/// the field lets go of the keyboard.
+fn paragraph_row(ui: &mut egui::Ui, prop: &Value, label: &str, lines: u8, value: &PropValue, sent: &mut Vec<Sent>) {
+    let width = ui.available_width();
+    let (top, _) = ui.allocate_exact_size(vec2(width, S.of(20.0)), Sense::hover());
+    ui.painter().text(top.left_center(), Align2::LEFT_CENTER, label, widgets::body(S), MUTED);
+    let line = S.of(20.0);
+    let height = line * f32::from(lines.max(1)) + 2.0 * S.of(8.0);
+    let (field, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let current = match value {
+        PropValue::Text(text) => text.as_str(),
+        _ => "",
+    };
+    if let Some(next) = widgets::text_area(ui, field, row_id(ui, prop), current, S)
+        && next != current
+    {
+        set(sent, prop, PropValue::Text(next));
+    }
 }
 
 /// A choice cell's content: a cap sample or a line sample.

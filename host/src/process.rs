@@ -97,6 +97,12 @@ pub struct Declared {
     pub kept: VecDeque<(String, Option<String>, Option<String>)>,
     /// The cells a tab reported, and which one is selected.
     pub cells: HashMap<String, (Vec<protocol::Cell>, Option<String>)>,
+    /// Each tab's timeline, as last declared.
+    pub timelines: HashMap<String, protocol::Timeline>,
+    /// What each canvas tab's stage shows besides its drawing.
+    pub stages: HashMap<String, protocol::Stage>,
+    /// Each tab's notice cards.
+    pub notices: HashMap<String, Vec<protocol::Notice>>,
     /// Cells the toolbar asked the host to run.
     pub run_cells: VecDeque<(String, String)>,
     /// Cells the toolbar asked the host to stop.
@@ -563,6 +569,19 @@ impl Running {
             // The items index, rendering, and the picker come with the host's
             // lifecycle work.
             AppMessage::Items { .. } | AppMessage::Rendered { .. } | AppMessage::Need { .. } | AppMessage::Pick { .. } => {}
+            AppMessage::Timeline(timeline) => {
+                declared.timelines.insert(timeline.tab.clone(), timeline);
+            }
+            AppMessage::Stage(stage) => {
+                declared.stages.insert(stage.tab.clone(), stage);
+            }
+            AppMessage::Notices { tab, notices } => {
+                if notices.is_empty() {
+                    declared.notices.remove(&tab);
+                } else {
+                    declared.notices.insert(tab, notices);
+                }
+            }
         }
     }
 
