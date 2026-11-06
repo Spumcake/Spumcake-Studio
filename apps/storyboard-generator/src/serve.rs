@@ -61,6 +61,12 @@ struct Sent {
     menu: Option<Vec<MenuEntry>>,
     properties: Option<Properties>,
     canvas: Option<Canvas>,
+    timeline: Option<protocol::Timeline>,
+    stage: Option<protocol::Stage>,
+    /// The level shown last: the film's, or a clip's. A change brings the camera.
+    level: Option<(DrawingId, Option<u64>)>,
+    /// Each file's items as last declared, by its path in the project.
+    items: HashMap<String, Vec<protocol::Item>>,
     ask: Option<Ask>,
 }
 
@@ -76,6 +82,14 @@ pub struct Server {
     sent: Sent,
     /// Draws the looking tool's images.
     looker: Looker,
+    /// Each clip's images' fingerprints, drawn again only on a change.
+    boards: crate::board::Boards,
+    /// The levels whose view was fitted to the window this run: the film's
+    /// and each clip's, by storyboard.
+    /// With the window size it was fitted for and the view it was given, so
+    /// a level fitted before the window settled is fitted again, unless the
+    /// person moved the view since.
+    fitted: HashMap<(DrawingId, Option<u64>), ([f64; 2], draw::document::Camera)>,
     /// Started with `--restore` and no `open` yet: the session's opening
     /// blank is not a tab, and its recovery offers wait for a tab to show.
     hidden: bool,
@@ -123,6 +137,8 @@ impl Server {
             viewport: None,
             sent: Sent::default(),
             looker: Looker::new(),
+            boards: crate::board::Boards::default(),
+            fitted: HashMap::new(),
             hidden: restore,
             deferred,
             keeping: None,
@@ -277,12 +293,24 @@ impl Server {
             }
             // A raster tab's gesture is another application's.
             HostMessage::RasterGesture { .. } => {}
+            HostMessage::TimelineGesture { tab, gesture } => {
+                activate(&mut self.session, Some(&tab));
+                crate::timeline::gesture(&mut self.session, gesture);
+            }
+            HostMessage::Seek { tab, frame, .. } => {
+                activate(&mut self.session, Some(&tab));
+                crate::timeline::seek(&mut self.session, frame);
+            }
             HostMessage::Gesture { tab, gesture } => {
                 // A gesture is always answered with the document, even when
                 // it changed nothing, so the host's preview of it can end.
                 self.sent.document = None;
                 activate(&mut self.session, Some(&tab));
-                if let Some(gesture) = Gesture::from_value(&gesture) {
+                // Drawing happens inside a clip, on a layer that shows and
+                // is not locked; anywhere else the tools are greyed out.
+                if self.session.can_draw()
+                    && let Some(gesture) = Gesture::from_value(&gesture)
+                {
                     replay(&mut self.session, gesture);
                 }
             }
@@ -300,7 +328,9 @@ impl Server {
                 value,
                 preview,
             } => {
-                if let (Some(id), Some(value)) =
+                if crate::timeline::property(&mut self.session, &prop, &value, preview) {
+                    // A row of the film's pages or the onion skin's settings.
+                } else if let (Some(id), Some(value)) =
                     (prop.as_str().and_then(PropId::from_key), prop_value(&value))
                 {
                     if preview {
@@ -334,11 +364,8 @@ impl Server {
                 yours: crate::store::readable_smx(std::path::Path::new(&path))
                     && self.allowed_project_path(std::path::Path::new(&path)),
             }),
-            // Items come with the lifecycle's storyboard work.
-            HostMessage::Render { id, .. } => replies.push(protocol::no_items(id)),
+            HostMessage::Render { id, item, .. } => replies.push(self.render(id, &item)),
             HostMessage::Provided { .. } | HostMessage::Stale { .. } | HostMessage::Picked { .. } => {}
-            // The timeline comes with the storyboard's film and clips.
-            HostMessage::TimelineGesture { .. } | HostMessage::Seek { .. } => {}
             HostMessage::EditCell { .. }
             | HostMessage::CellResult { .. }
             | HostMessage::InsertCell { .. }
@@ -578,9 +605,86 @@ impl Server {
             }
             _ => {
                 activate(&mut self.session, tab);
-                run_action(&mut self.session, id, arg, node, viewport);
+                if !crate::timeline::command(&mut self.session, id, arg) {
+                    run_action(&mut self.session, id, arg, node, viewport);
+                }
             }
         }
+    }
+
+    /// A clip's frame as a file, for another workspace's cell.
+    fn render(&mut self, id: String, item: &protocol::ItemRef) -> AppMessage {
+        let failed = |id: String, error: &str| AppMessage::Rendered {
+            id,
+            path: None,
+            fingerprint: None,
+            error: Some(error.to_string()),
+        };
+        let Some(project) = self.project.clone() else {
+            return failed(id, "The storyboard is not in a project.");
+        };
+        let Some((clip, which)) = item.item.as_deref().and_then(crate::board::parse_item) else {
+            return failed(id, "That is not a clip's frame.");
+        };
+        let path = project.join(&item.path);
+        let open = self.session.tabs().into_iter().find(|tab| {
+            self.session.file_path(tab.id).is_some_and(|file| crate::store::same_file(&file, &path))
+        });
+        let result = match open {
+            Some(tab) => {
+                let record = self.session.record(tab.id).expect("an open tab");
+                crate::board::render(&mut self.boards, &mut self.looker, record, &project, clip, which)
+            }
+            None => match crate::store::read_smx(&path) {
+                Ok(stored) => {
+                    let mut ids = draw::document::Allocator::new();
+                    let record = stored.into_record(&mut ids, &[]);
+                    crate::board::render(&mut self.boards, &mut self.looker, &record, &project, clip, which)
+                }
+                Err(error) => Err(error),
+            },
+        };
+        match result {
+            Ok((path, fingerprint)) => AppMessage::Rendered { id, path: Some(path), fingerprint: Some(fingerprint), error: None },
+            Err(error) => failed(id, &error),
+        }
+    }
+
+    /// The camera for the level just shown, when it has none of its own:
+    /// the sheet, or the film's field, fitted to the view.
+    /// Returns whether it fitted one.
+    fn fit_level(&mut self) -> bool {
+        let Some(viewport) = self.viewport.filter(|viewport| viewport[0] > 1.0 && viewport[1] > 1.0) else {
+            return false;
+        };
+        let record = self.session.active_storyboard();
+        let view = record.view();
+        // A level fits once a run; a file's own view of it stays.
+        let key = (record.id(), view.clip);
+        match self.fitted.get(&key) {
+            // Fitted for this window, or moved by the person since: it stays.
+            Some((size, camera)) if *size == viewport || !same_view(camera, &record.drawing.camera()) => return false,
+            Some(_) => {}
+            // A file's own view of it stays.
+            None if record.keeps_stored_view() && record.has_camera(view.clip) => return false,
+            None => {}
+        }
+        let film = record.film();
+        let (min, max) = match view.clip.and_then(|clip| film.clip(clip)) {
+            Some(clip) => crate::sheet::paper_bounds_in(film, clip),
+            None => {
+                let [x, y, width, height] = crate::sheet::field(film);
+                ([x, y], [x + width, y + height])
+            }
+        };
+        let span = [(max[0] - min[0]).max(1.0), (max[1] - min[1]).max(1.0)];
+        let zoom = (viewport[0] / span[0]).min(viewport[1] / span[1]) * 0.92;
+        let centre = [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0];
+        let origin = [centre[0] - viewport[0] / (2.0 * zoom), centre[1] - viewport[1] / (2.0 * zoom)];
+        self.session.fit_view(origin, zoom);
+        let camera = self.session.active_storyboard().drawing.camera();
+        self.fitted.insert(key, (viewport, camera));
+        true
     }
 
     /// The dialog the session's last command asked for, as a `file` request.
@@ -704,6 +808,12 @@ impl Server {
         }
         let camera = camera || first_view;
 
+        let level = Some((active, self.session.view().clip));
+        let new_level = self.sent.level != level;
+        self.sent.level = level;
+        let fitted = self.fit_level();
+        let camera = camera || new_level || fitted;
+
         let record = self.session.active_storyboard();
         let state = (
             tab_id(record.id()),
@@ -771,6 +881,28 @@ impl Server {
             out.push(AppMessage::Canvas(canvas.clone()));
             self.sent.canvas = Some(canvas);
         }
+        let tab = tab_id(active);
+        let timeline = crate::timeline::declare(&self.session, &mut self.boards, &mut self.looker, tab.clone());
+        if self.sent.timeline.as_ref() != Some(&timeline) {
+            out.push(AppMessage::Timeline(timeline.clone()));
+            self.sent.timeline = Some(timeline);
+        }
+        let stage = crate::sheet::stage(self.session.active_storyboard(), tab);
+        if self.sent.stage.as_ref() != Some(&stage) {
+            out.push(AppMessage::Stage(stage.clone()));
+            self.sent.stage = Some(stage);
+        }
+        if let Some(project) = self.project.clone()
+            && let Some(path) = self.session.file_path(active)
+            && let Ok(relative) = path.strip_prefix(&project)
+        {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let items = self.boards.items(&mut self.looker, self.session.active_storyboard());
+            if self.sent.items.get(&relative) != Some(&items) {
+                out.push(AppMessage::Items { path: relative.clone(), items: items.clone() });
+                self.sent.items.insert(relative, items);
+            }
+        }
         self.chrome_updates(&mut out);
         out
     }
@@ -787,6 +919,11 @@ impl Server {
             out.push(AppMessage::QuitReady);
         }
     }
+}
+
+/// The same view: origin and zoom alike.
+fn same_view(a: &draw::document::Camera, b: &draw::document::Camera) -> bool {
+    a.origin == b.origin && a.zoom == b.zoom
 }
 
 pub fn run() {
@@ -1299,7 +1436,7 @@ mod tests {
         let _ = server.greeting();
         let _ = server.handle(HostMessage::Project { folder: folder.display().to_string() });
         let tab = tab_id(server.session.active_id());
-        let _ = server.handle(command("new_canvas", Some(tab.clone())));
+        let _ = server.handle(command("new_clip", Some(tab.clone())));
         (server, tab)
     }
 
@@ -1337,7 +1474,7 @@ mod tests {
         first.write_due(Instant::now() + WRITE_AFTER * 2);
         let before = std::fs::read(folder.join("Untitled Storyboard.smx")).expect("the first file");
         let (mut second, _) = changed_in(&folder);
-        let _ = second.handle(command("new_canvas", None));
+        let _ = second.handle(command("new_clip", None));
         second.write_due(Instant::now() + WRITE_AFTER * 2);
         assert_eq!(smx_files(&folder), vec!["Untitled Storyboard 2.smx".to_string(), "Untitled Storyboard.smx".to_string()]);
         assert_eq!(std::fs::read(folder.join("Untitled Storyboard.smx")).expect("the first file"), before);
@@ -1436,6 +1573,18 @@ mod tests {
         let replies = server.handle(HostMessage::Open { path: Some(path.display().to_string()) }).expect("replies");
         let labels = tab_labels(&replies).expect("tabs");
         assert_eq!(labels.last().map(String::as_str), Some("Untitled 1"));
+        // It opens as a film of one clip, whose drawing is the old storyboard.
+        let clip = server.session.film().clips[0].id;
+        let tab = tab_id(server.session.active_id());
+        let replies = server
+            .handle(HostMessage::Command {
+                id: "edit_clip".to_string(),
+                tab: Some(tab),
+                arg: Some(serde_json::json!(clip)),
+                node: None,
+                viewport: [800.0, 600.0],
+            })
+            .expect("replies");
         let drawing = replies.iter().find_map(|reply| match reply {
             AppMessage::Document { drawing, .. } => Some(drawing.clone()),
             _ => None,

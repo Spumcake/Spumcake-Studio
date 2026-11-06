@@ -8,7 +8,7 @@
 
 use super::{ColorOwner, Session, Subject};
 use crate::registry::{CommandId, MenuAction, Tool};
-use draw::document::{ColorId, NodeId, Point, Sample, SceneMark, ShapeKind, DrawingId, TextBox};
+use draw::document::{ColorId, NodeId, Point, Sample, ShapeKind, DrawingId, TextBox};
 use draw::{PropId, PropValue};
 use kurbo::Affine;
 
@@ -560,11 +560,6 @@ impl Session {
         }
     }
 
-    /// Every visible mark in paint order, for an image.
-    pub(crate) fn assist_scene(&self) -> Vec<SceneMark> {
-        self.active_storyboard().scene(None)
-    }
-
     /// A text box's frame, for a result.
     pub(crate) fn assist_text_frame(&self, id: NodeId) -> Option<TextBox> {
         self.active_storyboard().text_box(id).map(|fit| fit.frame)
@@ -572,7 +567,7 @@ impl Session {
 }
 
 fn disabled_reason(command: CommandId, nothing_selected: bool) -> String {
-    if nothing_selected && command != CommandId::Paste && command != CommandId::NewCanvas {
+    if nothing_selected && command != CommandId::Paste {
         return "nothing is selected; pass objects, or select them first".into();
     }
     match command {

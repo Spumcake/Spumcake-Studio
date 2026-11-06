@@ -180,6 +180,7 @@ fn names(table: &[(CommandId, &'static str)]) -> Vec<&'static str> {
 /// Every tool group Storyboard Generator offers, as `tools` declares them.
 pub fn tool_groups() -> Vec<ToolGroup> {
     vec![
+        crate::film_tools::group(),
         ToolGroup {
             id: "look".into(),
             name: "Read and look at a storyboard".into(),
@@ -219,7 +220,7 @@ pub fn tool_groups() -> Vec<ToolGroup> {
             name: "Draw by hand".into(),
             description: "Draw as the person draws with the tools: freehand strokes, erasing, rectangles, ellipses, lines, text, and moving, scaling, or rotating objects.".into(),
             instructions: format!(
-                "Each tool is one gesture of the person's own tools, made on the open storyboard. The person's tool settings stay as they were. Freehand strokes go on a canvas, into the layer of their color; a color is a layer id of that canvas or one of the brush's colors from read_storyboard, and a brush color the canvas has no layer for adds that layer. Strokes are smoothed and pressure-shaped like the person's own, so give points a few units apart along the path; to fill an area, draw several strokes side by side. Erasing removes ink along a path without deleting strokes. Shapes and text are drawn with the tools' current colors and sizes; change them afterwards with the Restyle tools, using the palette color ids the result gives. Put new work inside the visible area that read_storyboard gives, unless the request says where. Ink's color belongs to its layer, so to recolor only part of a freehand drawing, such as one part of a figure: find those strokes with read_storyboard and look_at, redraw them from their points in the new brush color, make sure that color's layer is above the old one with edit's move_layer (read_storyboard lists layers top to bottom), then erase the old ink along the same path. Each result names what was made. All the changes of one request are taken back by one undo. {COORDINATES}"
+                "Each tool is one gesture of the person's own tools, made on the open storyboard. The person's tool settings stay as they were. Freehand strokes go on a canvas, into the layer of their color; a color is a layer id of that canvas or one of the brush's colors from read_storyboard, and a brush color the canvas has no layer for adds that layer. Strokes are smoothed and pressure-shaped like the person's own, so give points a few units apart along the path; to fill an area, draw several strokes side by side. Erasing removes ink along a path without deleting strokes. Shapes and text are drawn with the tools' current colors and sizes; change them afterwards with the Restyle tools, using the palette color ids the result gives. You draw on the active layer of the open clip, at the playhead; read_storyboard's film says which. The shot's frame, the field, is the rectangle from [0, 0] to the film's frame size (read_storyboard's film gives frame_size); only what lies inside it is in the clip's first and last frames that other workspaces render from, so put the shot's drawing inside it unless the request says where. look_at shows the sheet as the person sees it: the field, the other layers that show above and below, and the onion skin. Ink's color belongs to its layer, so to recolor only part of a freehand drawing, such as one part of a figure: find those strokes with read_storyboard and look_at, redraw them from their points in the new brush color, make sure that colour is above the old one with edit's move_colour (read_storyboard lists colours top to bottom), then erase the old ink along the same path. Each result names what was made. All the changes of one request are taken back by one undo. {COORDINATES}"
             ),
             tools: vec![
                 tool(
@@ -365,28 +366,27 @@ pub fn tool_groups() -> Vec<ToolGroup> {
                     "Move an object to a position among its siblings, as dragging its row in the layers list does. 0 is the front.",
                     object(json!({"object": {"type": "integer"}, "position": {"type": "integer", "minimum": 0}}), &["object", "position"]),
                 ),
-                tool("new_canvas", "Add a new empty canvas at the front, and make it the one drawn on.", object(json!({}), &[])),
                 tool(
                     "set_active_canvas",
                     "Make a canvas the one strokes and erasing go on, as clicking it does.",
                     object(json!({"canvas": {"type": "integer"}}), &["canvas"]),
                 ),
                 tool(
-                    "duplicate_layer",
-                    "Copy a canvas's color layer, with its strokes, below it.",
-                    object(json!({"canvas": {"type": "integer"}, "layer": {"type": "integer"}}), &["canvas", "layer"]),
+                    "duplicate_colour",
+                    "Copy one of a drawing's colours, with its ink, below it.",
+                    object(json!({"canvas": {"type": "integer"}, "colour": {"type": "integer"}}), &["canvas", "colour"]),
                 ),
                 tool(
-                    "delete_layer",
-                    "Delete a canvas's color layer and its strokes. A canvas keeps at least one layer.",
-                    object(json!({"canvas": {"type": "integer"}, "layer": {"type": "integer"}}), &["canvas", "layer"]),
+                    "delete_colour",
+                    "Delete one of a drawing's colours and its ink. A drawing keeps at least one colour.",
+                    object(json!({"canvas": {"type": "integer"}, "colour": {"type": "integer"}}), &["canvas", "colour"]),
                 ),
                 tool(
-                    "move_layer",
-                    "Move a canvas's color layer to a position; 0 paints on top.",
+                    "move_colour",
+                    "Move one of a drawing's colours to a position; 0 paints on top.",
                     object(
-                        json!({"canvas": {"type": "integer"}, "layer": {"type": "integer"}, "position": {"type": "integer", "minimum": 0}}),
-                        &["canvas", "layer", "position"],
+                        json!({"canvas": {"type": "integer"}, "colour": {"type": "integer"}, "position": {"type": "integer", "minimum": 0}}),
+                        &["canvas", "colour", "position"],
                     ),
                 ),
             ],
@@ -434,6 +434,16 @@ impl Desk<'_> {
     pub fn run(&mut self, group: &str, tool: &str, input: &Value) -> Outcome {
         let before = self.snapshot();
         let selection_before = self.session.selection();
+        if group == "clips" {
+            return crate::film_tools::run(self.session, tool, input);
+        }
+        // Drawing happens inside a clip, on a layer that shows and is not
+        // locked, as by hand: elsewhere the drawing tools are greyed out.
+        if matches!(group, "draw" | "edit" | "style") && !self.session.can_draw() {
+            return failed(
+                "drawing happens inside a clip, on a layer that shows and is not locked: open a clip with clips__edit_clip and choose a layer first",
+            );
+        }
         let done = match (group, tool) {
             ("look", "read_storyboard") => return self.read(input),
             // Its stored spelling in conversations kept before 0.14.
@@ -470,10 +480,6 @@ impl Desk<'_> {
                 let to = count(input, "position")?;
                 self.session.assist_reorder(id, to)
             })(),
-            ("edit", "new_canvas") => {
-                let viewport = self.viewport.unwrap_or([0.0, 0.0]);
-                self.session.assist_command(None, CommandId::NewCanvas, false, viewport)
-            }
             ("edit", "set_active_canvas") => {
                 return match node(input, "canvas").and_then(|id| self.session.assist_highlight(id)) {
                     Ok(()) => Outcome {
@@ -484,11 +490,11 @@ impl Desk<'_> {
                     Err(reason) => failed(reason),
                 };
             }
-            ("edit", "duplicate_layer") => self.layer(input, MenuAction::Duplicate),
-            ("edit", "delete_layer") => self.layer(input, MenuAction::Delete),
-            ("edit", "move_layer") => (|| {
+            ("edit", "duplicate_colour") => self.layer(input, MenuAction::Duplicate),
+            ("edit", "delete_colour") => self.layer(input, MenuAction::Delete),
+            ("edit", "move_colour") => (|| {
                 let canvas = node(input, "canvas")?;
-                let layer = color(input, "layer")?;
+                let layer = color(input, "colour")?;
                 let to = count(input, "position")?;
                 self.session.assist_move_layer(canvas, layer, to)
             })(),
@@ -715,7 +721,7 @@ impl Desk<'_> {
 
     fn layer(&mut self, input: &Value, action: MenuAction) -> Result<(), String> {
         let canvas = node(input, "canvas")?;
-        let layer = color(input, "layer")?;
+        let layer = color(input, "colour")?;
         self.session.assist_layer(canvas, layer, action)
     }
 
@@ -892,6 +898,7 @@ impl Desk<'_> {
             .map(|color| json!({ "id": color.id.get(), "name": color.name, "rgb": hex(color.rgb), "current": color.active }))
             .collect();
         let output = json!({
+            "film": crate::film_tools::describe(self.session),
             "storyboard": record.name(),
             "saved_to": record.path().map(|path| path.display().to_string()),
             "canvases": canvases,
@@ -1132,12 +1139,22 @@ impl Desk<'_> {
                     .filter(|row| row.parent.is_none())
                     .filter_map(|row| self.bounds(row.id)),
             );
-            all.map(margin).or_else(|| self.visible_area())
+            // The sheet, or the film's field, and anything drawn beyond it.
+            let sheet = crate::sheet::stage_bounds(storyboard);
+            Some(match all.map(margin) {
+                Some((min, max)) => (
+                    [min[0].min(sheet.0[0]), min[1].min(sheet.0[1])],
+                    [max[0].max(sheet.1[0]), max[1].max(sheet.1[1])],
+                ),
+                None => sheet,
+            })
         };
         let Some((min, max)) = region else {
             return failed("the storyboard has nothing visible to show");
         };
-        let marks = self.session.assist_scene();
+        // The stage as the person sees it: the sheet, every layer that shows
+        // around the one drawn on, and the onion skin.
+        let marks = crate::sheet::stage_marks(self.session.active_storyboard());
         let Some(image) = self.looker.image(marks, min, max, size) else {
             return failed("the image could not be drawn");
         };

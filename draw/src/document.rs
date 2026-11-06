@@ -2155,6 +2155,30 @@ impl Drawing {
         self.active_canvas = None;
     }
 
+    /// A drawing shown afresh, such as a keyframe the playhead reaches:
+    /// nothing selected, and the canvas it was made with takes the brush.
+    pub fn focus_origin(&mut self) {
+        self.selection.clear();
+        self.active_canvas = self.origin_canvas();
+    }
+
+    /// The canvas it was made with takes the brush again, when no canvas
+    /// does; the selection stays.
+    pub fn activate_origin(&mut self) {
+        if self.active_canvas.is_none() {
+            self.active_canvas = self.origin_canvas();
+        }
+    }
+
+    /// The canvas it was made with, which every stroke goes to; when that one
+    /// was deleted, the first canvas it has.
+    pub fn origin_canvas(&self) -> Option<NodeId> {
+        find_node(&self.nodes, self.origin_canvas)
+            .and_then(Node::canvas)
+            .map(|_| self.origin_canvas)
+            .or_else(|| self.nodes.iter().find(|node| node.canvas().is_some()).map(|node| node.id))
+    }
+
     pub fn collect_held(&self, held: &mut HeldIds) {
         for node in &self.nodes {
             collect_held_node(node, held);

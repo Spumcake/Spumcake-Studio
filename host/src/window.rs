@@ -2580,6 +2580,7 @@ impl HostWindow {
             };
             let declared = &mut started.running.declared;
             let canvas = declared.canvas.as_ref().filter(|canvas| canvas.tab == tab);
+            let stage = declared.stages.get(tab);
             let Some(display) = declared.documents.get_mut(tab) else {
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.rect_filled(rect, 0.0, CANVAS);
@@ -2599,7 +2600,7 @@ impl HostWindow {
                     self.surface.escape(&mut doc);
                 }
             }
-            self.surface.show(ui, &mut doc, rect, dismissing);
+            self.surface.show(ui, &mut doc, rect, dismissing, stage);
         }
         for message in out {
             self.send(app, message);

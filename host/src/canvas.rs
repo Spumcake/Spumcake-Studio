@@ -42,6 +42,8 @@ pub(crate) struct Surface {
     /// The edit generation the caret has already been focused for.
     text_focus: u64,
     text_cache: text::Cache,
+    /// The stage's other drawings, read once each time the stage changes.
+    stage: StageMarks,
     /// The canvas's screen rectangle last frame, so a press elsewhere, such
     /// as on the panel, leaves the text being edited open.
     canvas_rect: Rect,
@@ -144,6 +146,7 @@ impl Surface {
             editor_rect: None,
             text_focus: 0,
             text_cache: text::Cache::new(),
+            stage: StageMarks::default(),
             canvas_rect: Rect::NOTHING,
             draft_fit: None,
             locked: false,
@@ -675,21 +678,40 @@ impl Surface {
         );
     }
 
-    fn paint(&mut self, ui: &egui::Ui, doc: &mut Doc, rect: Rect) {
+    fn paint(&mut self, ui: &egui::Ui, doc: &mut Doc, rect: Rect, stage: Option<&protocol::Stage>) {
         let painter = ui.painter().with_clip_rect(rect);
         painter.rect_filled(rect, 0.0, CANVAS);
         let origin = doc.camera_origin();
         let zoom = doc.zoom();
         paint_grid(&painter, rect, origin, zoom);
+        let view = View { rect, origin, zoom };
+        if let Some(stage) = stage {
+            self.stage.refresh(stage);
+            self.paint_stage_field(ui, &painter, &view, stage);
+            self.paint_underlays(ui, &painter, &view, false);
+        }
+        // The drawing being worked on, as its layer is set: hidden, faded,
+        // or outlined.
+        let active = stage.map(|stage| stage.active.clone()).unwrap_or(protocol::ActiveDrawing {
+            visible: true,
+            opacity: 1.0,
+            outline: None,
+        });
         let caret = doc.text_caret();
         let editing = caret.as_ref().and_then(|caret| caret.id);
         // Text committed and not yet answered keeps its typed words, so it
         // does not blink back to what the document held.
         let committed = doc.committed_caret();
-        let marks = doc.scene();
+        let marks = if active.visible { doc.scene() } else { Vec::new() };
         for mark in marks {
             match mark {
-                SceneMark::Ink(paint) => paint_mark(&painter, rect, origin, zoom, &paint),
+                SceneMark::Ink(mut paint) => {
+                    paint.opacity *= f64::from(active.opacity);
+                    if let Some(outline) = active.outline {
+                        outlined(&mut paint, outline);
+                    }
+                    paint_mark(&painter, rect, origin, zoom, &paint)
+                }
                 SceneMark::Text(mut view) => {
                     // Text being edited is measured with its typed words, so
                     // its background and outline follow the typing.
@@ -808,6 +830,10 @@ impl Surface {
             }
         }
         self.paint_text_drag(&painter, ui, doc, rect);
+        if let Some(stage) = stage {
+            self.paint_underlays(ui, &painter, &view, true);
+            paint_veil(&painter, &view, stage);
+        }
         self.paint_selection(&painter, doc, rect);
     }
 
@@ -1434,7 +1460,14 @@ impl Surface {
 
     /// The canvas part of the reference's frame: the pointer, the text
     /// editor, the cursor, and the paint, in `rect`.
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, doc: &mut Doc, rect: Rect, dismissing: bool) {
+    pub(crate) fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &mut Doc,
+        rect: Rect,
+        dismissing: bool,
+        stage: Option<&protocol::Stage>,
+    ) {
         self.canvas_rect = rect;
         doc.settle_sent();
         if self.stroking && !doc.gesture_open() {
@@ -1487,7 +1520,7 @@ impl Surface {
         } else {
             response.on_hover_cursor(CursorIcon::Crosshair);
         }
-        self.paint(ui, doc, rect);
+        self.paint(ui, doc, rect, stage);
         if let Some((pos, radius)) = ring {
             let painter = ui.painter().with_clip_rect(rect);
             widgets::ring(&painter, pos, radius, 1.0, Color32::from_black_alpha(160));
@@ -1578,6 +1611,180 @@ fn paint_mark(painter: &egui::Painter, rect: Rect, origin: [f64; 2], zoom: f64, 
         mesh.add_triangle(index, index + 1, index + 2);
     }
     painter.add(Shape::mesh(mesh));
+}
+
+/// Where the stage's drawings are painted: the canvas's rectangle and camera.
+struct View {
+    rect: Rect,
+    origin: [f64; 2],
+    zoom: f64,
+}
+
+/// The stage's other drawings as marks, with how each is drawn: under or
+/// over the drawing being worked on, tinted, faded, outlined, and moved.
+#[derive(Default)]
+struct StageMarks {
+    stage: Option<protocol::Stage>,
+    drawings: Vec<StageDrawing>,
+}
+
+struct StageDrawing {
+    marks: Vec<SceneMark>,
+    tint: Option<[u8; 3]>,
+    opacity: f64,
+    above: bool,
+    outline: bool,
+    world: Affine,
+    tag: Option<String>,
+}
+
+impl StageMarks {
+    fn refresh(&mut self, stage: &protocol::Stage) {
+        if self.stage.as_ref() == Some(stage) {
+            return;
+        }
+        self.drawings = stage
+            .underlays
+            .iter()
+            .filter_map(|underlay| {
+                let drawing = draw::document::snapshot::drawing_from_value(&underlay.drawing)?.drawing;
+                Some(StageDrawing {
+                    marks: drawing.scene(None),
+                    tint: underlay.tint,
+                    opacity: f64::from(underlay.opacity),
+                    above: underlay.above,
+                    outline: underlay.outline,
+                    world: Affine::translate(Vec2::new(underlay.offset[0], underlay.offset[1]))
+                        * Affine::rotate(underlay.rotation.to_radians()),
+                    tag: underlay.tag.clone(),
+                })
+            })
+            .collect();
+        self.stage = Some(stage.clone());
+    }
+}
+
+/// Ink drawn as an outline: a light wash in the outline's colour, so what
+/// lies under it shows through.
+fn outlined(paint: &mut InkPaint, rgb: [u8; 3]) {
+    paint.rgb = rgb;
+    paint.opacity *= 0.35;
+}
+
+impl Surface {
+    /// The field's plain colour, or a frame the workspace decoded, under
+    /// every drawing.
+    fn paint_stage_field(&mut self, ui: &egui::Ui, painter: &egui::Painter, view: &View, stage: &protocol::Stage) {
+        let Some([x, y, width, height]) = stage.field else {
+            return;
+        };
+        let field = Rect::from_two_pos(
+            document_to_screen(view.rect, view.origin, view.zoom, [x, y]),
+            document_to_screen(view.rect, view.origin, view.zoom, [x + width, y + height]),
+        );
+        if let Some(rgb) = stage.fill {
+            painter.rect_filled(field, 0.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+        }
+        if let Some(image) = stage.image.as_ref()
+            && let Some(texture) = crate::frames::texture(ui.ctx(), image)
+        {
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            painter.image(texture.id(), field, uv, Color32::WHITE);
+        }
+    }
+
+    /// The stage's drawings that lie under, or over, the one worked on.
+    fn paint_underlays(&mut self, ui: &egui::Ui, painter: &egui::Painter, view: &View, above: bool) {
+        for drawing in self.stage.drawings.iter().filter(|drawing| drawing.above == above) {
+            for mark in &drawing.marks {
+                match mark {
+                    SceneMark::Ink(paint) => {
+                        let mut paint = InkPaint {
+                            rgb: paint.rgb,
+                            opacity: paint.opacity * drawing.opacity,
+                            eraser_preview: false,
+                            triangles: paint
+                                .triangles
+                                .iter()
+                                .map(|triangle| triangle.map(|point| moved(drawing.world, point)))
+                                .collect(),
+                        };
+                        if let Some(tint) = drawing.tint {
+                            paint.rgb = tint;
+                        }
+                        if drawing.outline {
+                            outlined(&mut paint, drawing.tint.unwrap_or([0, 0, 0]));
+                        }
+                        paint_mark(painter, view.rect, view.origin, view.zoom, &paint);
+                    }
+                    SceneMark::Text(text_view) => {
+                        let text_view = draw::document::TextView {
+                            id: text_view.id,
+                            content: text_view.content.clone(),
+                            style: text_view.style.clone(),
+                            look: text_view.look.clone(),
+                            origin: text_view.origin,
+                            box_width: text_view.box_width,
+                            box_height: text_view.box_height,
+                            world: drawing.world * text_view.world,
+                        };
+                        let laid = text::lay(
+                            ui.ctx(),
+                            &text_view.content,
+                            &text_view.style,
+                            &text_view.look,
+                            text_view.origin,
+                            text_view.box_width,
+                            text_view.box_height,
+                            text_view.world,
+                            view.zoom,
+                            true,
+                            &mut self.text_cache,
+                        );
+                        text::paint(painter, view.rect, view.origin, view.zoom, &text_view, &laid);
+                    }
+                }
+            }
+            if let Some(tag) = &drawing.tag {
+                let at = document_to_screen(view.rect, view.origin, view.zoom, moved(drawing.world, [0.0, 0.0]));
+                painter.text(
+                    at + vec2(4.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    tag,
+                    egui::FontId::proportional(13.0),
+                    Color32::from_rgb(96, 165, 250),
+                );
+            }
+        }
+    }
+}
+
+fn moved(world: Affine, point: Point) -> Point {
+    let moved = world * kurbo::Point::new(point[0], point[1]);
+    [moved.x, moved.y]
+}
+
+/// What lies outside the field, under a gray veil.
+fn paint_veil(painter: &egui::Painter, view: &View, stage: &protocol::Stage) {
+    let (true, Some([x, y, width, height])) = (stage.veil, stage.field) else {
+        return;
+    };
+    let field = Rect::from_two_pos(
+        document_to_screen(view.rect, view.origin, view.zoom, [x, y]),
+        document_to_screen(view.rect, view.origin, view.zoom, [x + width, y + height]),
+    );
+    let veil = Color32::from_black_alpha(26);
+    let outer = view.rect;
+    for band in [
+        Rect::from_min_max(outer.min, Pos2::new(outer.max.x, field.min.y)),
+        Rect::from_min_max(Pos2::new(outer.min.x, field.max.y), outer.max),
+        Rect::from_min_max(Pos2::new(outer.min.x, field.min.y), Pos2::new(field.min.x, field.max.y)),
+        Rect::from_min_max(Pos2::new(field.max.x, field.min.y), Pos2::new(outer.max.x, field.max.y)),
+    ] {
+        if band.is_positive() {
+            painter.rect_filled(band.intersect(outer), 0.0, veil);
+        }
+    }
 }
 
 fn box_corners(min: Point, max: Point) -> [Point; 4] {

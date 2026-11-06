@@ -64,13 +64,19 @@ fn hand_check(dir: &Path) -> Result<(), String> {
     let first_tab = first.0.clone();
 
     let replies = exchange(&mut link, &mut oracle, command("new_storyboard", None, None))?;
-    let (tab, storyboard, camera) = document_of(&replies).ok_or("new_storyboard sent no document")?;
+    let (tab, _, camera) = document_of(&replies).ok_or("new_storyboard sent no document")?;
     if tab == first_tab || !camera {
         return Err("new_storyboard did not open a new storyboard with its camera".into());
     }
     if storyboard_existed_before(&greeting, &tab) {
         return Err("the new storyboard existed before new_storyboard".into());
     }
+    // Drawing happens inside a clip: add one on the film's timeline, then
+    // open it from the clip the timeline declares.
+    let replies = exchange(&mut link, &mut oracle, command("new_clip", Some(&tab), None))?;
+    let clip = first_clip(&replies).ok_or("new_clip put no clip on the timeline")?;
+    let replies = exchange(&mut link, &mut oracle, command("edit_clip", Some(&tab), Some(clip)))?;
+    let storyboard = document_of(&replies).ok_or("edit_clip sent no document")?.1;
     let (canvas, source) = canvas_and_source(&storyboard).ok_or("the new storyboard has no canvas")?;
     let padding_before = canvas_padding(&storyboard).ok_or("the canvas has no padding")?;
 
@@ -380,6 +386,27 @@ fn canvas_node(storyboard: &Value) -> Option<&Value> {
         .find(|node| node.get("kind").and_then(Value::as_str) == Some("canvas"))
 }
 
+/// The first clip on the last timeline among `messages`, by its id.
+pub(crate) fn first_clip(messages: &[AppMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|message| match message {
+        AppMessage::Timeline(timeline) => timeline.rows.iter().find_map(|row| match &row.content {
+            protocol::RowContent::Items { items } => items.first().map(|item| item.id.clone()),
+            protocol::RowContent::Cells { .. } => None,
+        }),
+        _ => None,
+    })
+}
+
+/// A saved storyboard's drawing: the file's only keyframe drawing, or the
+/// drawing itself, as a document carries one.
+fn drawing_in(storyboard: &Value) -> &Value {
+    storyboard
+        .get("drawings")
+        .and_then(Value::as_object)
+        .and_then(|drawings| drawings.values().next())
+        .unwrap_or(storyboard)
+}
+
 pub(crate) fn canvas_and_source(storyboard: &Value) -> Option<(u64, u64)> {
     let canvas = canvas_node(storyboard)?;
     let id = canvas.get("id")?.as_u64()?;
@@ -392,13 +419,13 @@ pub(crate) fn canvas_and_source(storyboard: &Value) -> Option<(u64, u64)> {
 }
 
 fn canvas_padding(storyboard: &Value) -> Option<f64> {
-    canvas_node(storyboard)?.get("padding")?.as_f64()
+    canvas_node(drawing_in(storyboard))?.get("padding")?.as_f64()
 }
 
 pub(crate) fn stroke_counts(storyboard: &Value) -> (usize, usize) {
     let mut strokes = 0;
     let mut erases = 0;
-    for node in storyboard
+    for node in drawing_in(storyboard)
         .get("nodes")
         .and_then(Value::as_array)
         .into_iter()

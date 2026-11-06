@@ -619,7 +619,11 @@ fn the_assistants_work_is_storyboard_generators_and_one_undo_takes_it_back() {
     let tab = window.app.apps[0].running.tabs().1.expect("a storyboard is open");
     window.until(|app| app.apps[0].running.declared.documents.contains_key(&tab));
     let before = marks(&window.app, &tab);
+    // A new storyboard is an empty film: the assistant adds a clip and
+    // opens it, where drawing happens, as the person would.
     stand_in.script(vec![
+        call_reply("storyboard-generator__clips__add_clip", json!({"tab": tab})),
+        call_reply("storyboard-generator__clips__edit_clip", json!({"tab": tab, "clip": 1})),
         call_reply(
             "storyboard-generator__draw__add_shape",
             json!({"tab": tab, "kind": "ellipse", "from": [0, 0], "to": [100, 100]}),
@@ -634,7 +638,7 @@ fn the_assistants_work_is_storyboard_generators_and_one_undo_takes_it_back() {
     let after = marks(&window.app, &tab);
     assert!(after >= before + 2, "the shapes never reached the host: {before} then {after}");
     let requests = stand_in.requests();
-    assert!(requests[1].to_string().contains("\\\"ok\\\":true"), "the ellipse failed");
+    assert!(requests[3].to_string().contains("\\\"ok\\\":true"), "the ellipse failed");
 
     // The person's undo, as the toolbar sends it.
     let index = 0;
@@ -649,7 +653,20 @@ fn the_assistants_work_is_storyboard_generators_and_one_undo_takes_it_back() {
         },
     );
     let expected = before;
-    window.until(move |app| marks(app, &tab) == expected);
+    let shown = tab.clone();
+    window.until(move |app| marks(app, &shown) == expected);
+    // The one undo took the clip back too, not only the drawing out of view.
+    let clips = window.app.apps[0].running.declared.timelines.get(&tab).map_or(0, |timeline| {
+        timeline
+            .rows
+            .iter()
+            .map(|row| match &row.content {
+                protocol::RowContent::Items { items } => items.len(),
+                protocol::RowContent::Cells { .. } => 0,
+            })
+            .sum::<usize>()
+    });
+    assert_eq!(clips, 0, "the undo left the request's clip on the film");
 }
 
 impl Window {
@@ -845,6 +862,20 @@ fn change_on_its_own(storyboard: &Path) {
         unreachable!()
     };
     let tab = tabs.active.clone();
+    // The storyboard opens at the film's level; drawing happens in its clip.
+    say(protocol::HostMessage::Invoke {
+        call: String::from("c0"),
+        tab: tab.clone(),
+        tool: String::from("storyboard-generator__clips__edit_clip"),
+        input: json!({"clip": 1}),
+        group: String::from("g0"),
+    });
+    let protocol::AppMessage::ToolResult(opened) =
+        wait(&|message| matches!(message, protocol::AppMessage::ToolResult(_)))
+    else {
+        unreachable!()
+    };
+    assert!(opened.ok, "the clip did not open: {:?}", opened.output);
     say(protocol::HostMessage::Invoke {
         call: String::from("c1"),
         tab: tab.clone(),
@@ -876,7 +907,7 @@ fn change_on_its_own(storyboard: &Path) {
 /// that writes into the project's folder with no dialog; returns the file.
 fn save_tab(window: &mut Window, app: usize) -> PathBuf {
     let tab = window.app.apps[app].running.tabs().1.clone().unwrap();
-    for id in ["new_canvas", "save"] {
+    for id in ["new_clip", "save"] {
         window.app.send(
             app,
             protocol::HostMessage::Command {
@@ -1005,6 +1036,14 @@ fn clicking_the_bar_over_the_canvas_draws_nothing() {
     window.app.toggle_workspace();
     keep_ticking(&mut window);
     let tab = window.app.apps[0].running.tabs().1.clone().unwrap();
+    // Drawing happens inside a clip: add one and open it, as the person would.
+    for (id, arg) in [("new_clip", None), ("edit_clip", Some(json!(1)))] {
+        window.app.send(
+            0,
+            protocol::HostMessage::Command { id: id.into(), tab: Some(tab.clone()), arg, node: None, viewport: [800.0, 600.0] },
+        );
+        keep_ticking(&mut window);
+    }
     window.app.send(
         0,
         protocol::HostMessage::Command { id: "select_tool".into(), tab: Some(tab.clone()), arg: Some(json!("brush")), node: None, viewport: [800.0, 600.0] },
@@ -1158,10 +1197,10 @@ fn reach(show: bool) -> Reach {
             "storyboard-generator__look__look_at",
             json!({"tab": tab, "visible_area": true, "size": 128}),
         ),
-        call_reply("storyboard-generator__edit__new_canvas", json!({"tab": tab})),
+        call_reply("storyboard-generator__clips__add_clip", json!({"tab": tab})),
         text_reply("Done."),
     ]);
-    window.ask("Look at what I see, then add a canvas.");
+    window.ask("Look at what I see, then add a clip.");
     let requests = stand_in.requests();
     assert!(requests.len() >= 3, "the model was not asked enough: {requests:#?}");
     let image = requests[1].to_string();
@@ -1477,7 +1516,7 @@ fn a_change_left_at_once_is_written_by_the_switch() {
     let tab = window.app.apps[0].running.tabs().1.clone().unwrap();
     window.app.send(
         0,
-        protocol::HostMessage::Command { id: "new_canvas".into(), tab: Some(tab), arg: None, node: None, viewport: [800.0, 600.0] },
+        protocol::HostMessage::Command { id: "new_clip".into(), tab: Some(tab), arg: None, node: None, viewport: [800.0, 600.0] },
     );
     window.menu(SessionChoice::NewSession { project });
     window.until(|app| app.project.as_ref().is_some_and(|open| open.session != first));
@@ -1510,7 +1549,7 @@ fn a_change_that_cannot_be_written_stops_the_switch() {
     std::fs::set_permissions(&folder, permissions.clone()).unwrap();
     window.app.send(
         0,
-        protocol::HostMessage::Command { id: "new_canvas".into(), tab: Some(tab), arg: None, node: None, viewport: [800.0, 600.0] },
+        protocol::HostMessage::Command { id: "new_clip".into(), tab: Some(tab), arg: None, node: None, viewport: [800.0, 600.0] },
     );
     window.menu(SessionChoice::Open { project, session: first });
     window.until(|app| app.flows.idle() && app.chat.conversation.iter().any(|entry| entry.text.contains("could not be written")));
@@ -1715,6 +1754,13 @@ fn a_change_made_with_no_host_shows_when_the_session_reopens() {
     let mut window = project_window(both(), &stand_in, &dir);
     let reopened = window.app.apps[0].running.tabs().1.clone().unwrap();
     window.until(|app| app.apps[0].running.declared.documents.contains_key(&reopened));
+    // A storyboard reopens at the film's level; its drawing is in its clip.
+    window.app.send(
+        0,
+        protocol::HostMessage::Command { id: "edit_clip".into(), tab: Some(reopened.clone()), arg: Some(json!(1)), node: None, viewport: [800.0, 600.0] },
+    );
+    let shown = reopened.clone();
+    window.until(move |app| marks(app, &shown) >= 1);
     assert!(marks(&window.app, &reopened) >= 1, "the change saved on its own is not in the reopened tab");
     let _ = std::fs::remove_dir_all(dir);
 }

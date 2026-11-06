@@ -170,7 +170,23 @@ impl Session {
                     action,
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // The timeline's keys, as Adobe Animate has them.
+        let key = |name: &str, shift: bool, id: &str| Binding {
+            chord: protocol::Chord { key: name.to_string(), command: false, shift: Some(shift), alt: false },
+            then: Vec::new(),
+            action: Action::new(id),
+        };
+        let mut bindings = bindings;
+        bindings.extend([
+            key("F5", false, "insert_frame"),
+            key("F6", false, "insert_keyframe"),
+            key("F7", false, "insert_blank_keyframe"),
+            key("F5", true, "remove_frames"),
+            key("F6", true, "clear_keyframe"),
+            key("Comma", false, "step_back"),
+            key("Period", false, "step_forward"),
+        ]);
         Keys {
             bindings,
             copy: Some(command_action(CommandId::Copy)),
@@ -275,15 +291,14 @@ impl Session {
             items.push(self.command_button(*id));
         }
         items.push(ToolItem::Separator);
-        for id in registry::canvas_commands() {
-            items.push(self.command_button(*id));
-        }
         let current = self.tool();
+        // Drawing happens inside a clip: anywhere else the tools are greyed out.
+        let drawing = self.can_draw();
         for tool in registry::tools() {
             items.push(ToolItem::Button {
                 icon: tool.icon.to_string(),
                 tip: registry::hover(tool.label, tool.shortcuts),
-                enabled: true,
+                enabled: drawing,
                 selected: tool.id == current,
                 action: Some(Action::with_arg("select_tool", json!(tool_key(tool.id)))),
                 menu: menu_rows(
@@ -454,6 +469,20 @@ impl Session {
     /// back from a color page, and each section's rows with their values.
     pub(crate) fn declare_properties(&self) -> Properties {
         let toggle = registry::command(CommandId::TogglePanel);
+        // The film's pages: a clip's or the storyboard's at the film's
+        // level, and a layer's inside a clip after its row was chosen.
+        if let Some(sections) = crate::timeline::panel_sections(self) {
+            return Properties {
+                open: self.panel_open(),
+                toggle: command_action(CommandId::TogglePanel),
+                tip: registry::hover(toggle.label, toggle.shortcuts),
+                finish: Action::new("finish_edit"),
+                back: None,
+                layers: None,
+                sections,
+                pages: Vec::new(),
+            };
+        }
         let back = self.back_label().map(|label| Back {
             label,
             action: Action::new("go_back"),
@@ -575,12 +604,14 @@ impl Session {
                     parent: node.parent.map(NodeId::get),
                     depth: node.depth,
                     icon: layer_icon(node.kind).to_string(),
-                    name: node.name.clone(),
+                    // A drawing's canvas is where its ink is: the list shows
+                    // it as the drawing's colours, as the owner set on 2026-11-06.
+                    name: if node.kind == LayerKind::Canvas { "Colours".to_string() } else { node.name.clone() },
                     group: node.kind == LayerKind::Group,
                     selected: node.selected,
                     visible: node.visible,
                     locked: node.locked,
-                    renamable: matches!(node.kind, LayerKind::Canvas | LayerKind::Group),
+                    renamable: node.kind == LayerKind::Group,
                     click: Action::with_arg("select_click", json!({ "node": id })),
                     rename: Action::with_arg("rename_node", json!({ "node": id })),
                     toggle_visible: Action::with_arg(

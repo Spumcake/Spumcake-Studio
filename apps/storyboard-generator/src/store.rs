@@ -3,8 +3,11 @@
 //! preferences. Leftover files named `LEFTOVER_PREFIX<id>.json` stay where they
 //! are: their ids are reserved, and they are neither opened nor deleted.
 
+use crate::film::{Film, Onion};
 use crate::record::Record;
-use draw::document::{Allocator, DrawingId};
+use draw::document::snapshot::{SnapshotDrawing, drawing_from_value};
+use draw::document::{Allocator, Camera, Drawing, DrawingId, ToolColor};
+use std::collections::HashMap;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -52,13 +55,142 @@ pub(crate) fn file_title(path: &Path) -> String {
         .to_string()
 }
 
+/// A storyboard as a file holds it, before the session makes it a record.
+pub(crate) enum Stored {
+    /// A version-1 file: one drawing, from before storyboards held a film.
+    Drawing(SnapshotDrawing),
+    /// A version-2 file: the film and its drawings.
+    Film {
+        id: DrawingId,
+        name: String,
+        film: Film,
+        drawings: HashMap<u64, Drawing>,
+        cameras: Vec<(Option<u64>, Camera)>,
+        onion: Onion,
+    },
+}
+
+impl Stored {
+    pub(crate) fn id(&self) -> DrawingId {
+        match self {
+            Stored::Drawing(snapshot) => snapshot.id,
+            Stored::Film { id, .. } => *id,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Stored::Drawing(snapshot) => &snapshot.name,
+            Stored::Film { name, .. } => name,
+        }
+    }
+
+    fn reserve_ids(&self, ids: &mut Allocator) {
+        match self {
+            Stored::Drawing(snapshot) => snapshot.drawing.reserve_ids(ids),
+            Stored::Film { drawings, .. } => {
+                for drawing in drawings.values() {
+                    drawing.reserve_ids(ids);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn into_record(self, ids: &mut Allocator, palette: &[ToolColor]) -> Record {
+        match self {
+            Stored::Drawing(snapshot) => Record::from_snapshot(snapshot, ids, palette),
+            Stored::Film { id, name, film, drawings, cameras, onion } => {
+                let mut record = Record::from_film(id, name, film, drawings, ids, palette);
+                record.set_cameras(cameras);
+                record.set_onion(onion);
+                record.set_dirty(false);
+                record
+            }
+        }
+    }
+}
+
+/// The version the `.smx` holding a film is written as.
+const FILM_FORMAT: u64 = 2;
+
+/// Reads either version of a storyboard file.
+pub(crate) fn stored_from_text(text: &str) -> Option<Stored> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    stored_from_value(&value)
+}
+
+fn stored_from_value(value: &Value) -> Option<Stored> {
+    let object = value.as_object()?;
+    match object.get("format_version")?.as_u64()? {
+        1 => Some(Stored::Drawing(drawing_from_value(value)?)),
+        FILM_FORMAT => {
+            let film = Film::from_value(object.get("film")?)?;
+            let mut drawings = HashMap::new();
+            for (key, drawing) in object.get("drawings")?.as_object()? {
+                let id: u64 = key.parse().ok()?;
+                drawings.insert(id, drawing_from_value(drawing)?.drawing);
+            }
+            // Every key's drawing is in the file, or the file is damaged.
+            if film.drawings().iter().any(|id| !drawings.contains_key(id)) {
+                return None;
+            }
+            let mut cameras = Vec::new();
+            for camera in object.get("cameras").and_then(Value::as_array).cloned().unwrap_or_default() {
+                let clip = camera.get("clip").and_then(Value::as_u64);
+                let origin = camera.get("origin").and_then(Value::as_array)?;
+                let zoom = camera.get("zoom").and_then(Value::as_f64)?;
+                let origin = [origin.first()?.as_f64()?, origin.get(1)?.as_f64()?];
+                if !origin.iter().all(|value| value.is_finite()) || !(zoom.is_finite() && zoom > 0.0) {
+                    continue;
+                }
+                cameras.push((clip, Camera { origin, zoom }));
+            }
+            Some(Stored::Film {
+                id: DrawingId::new(object.get("id")?.as_u64().filter(|id| *id > 0)?),
+                name: object.get("name")?.as_str()?.to_string(),
+                film,
+                drawings,
+                cameras,
+                onion: Onion::from_value(object.get("onion")),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The version-2 value of a storyboard: its film, the drawings it names, and
+/// the view of the film and of each clip.
+pub(crate) fn storyboard_value(storyboard: &Record, name: &str) -> Value {
+    let mut drawings = Map::new();
+    for (id, drawing) in storyboard.named_drawings() {
+        drawings.insert(id.to_string(), drawing.snapshot_value(DrawingId::new(id), "Drawing"));
+    }
+    let mut cameras = Vec::new();
+    let mut clips: Vec<Option<u64>> = vec![None];
+    clips.extend(storyboard.film().clips.iter().map(|clip| Some(clip.id)));
+    for clip in clips {
+        if let Some(camera) = storyboard.camera_of(clip) {
+            cameras.push(serde_json::json!({ "clip": clip, "origin": camera.origin, "zoom": camera.zoom }));
+        }
+    }
+    serde_json::json!({
+        "format_version": FILM_FORMAT,
+        "id": storyboard.id().get(),
+        "name": name,
+        "film": storyboard.film().to_value(),
+        "drawings": drawings,
+        "cameras": cameras,
+        "onion": storyboard.onion().to_value(),
+    })
+}
+
 /// Reads a storyboard. The error is a sentence for the person: why it could not
 /// be read, or that the file is not a storyboard.
-pub(crate) fn read_smx(path: &Path) -> Result<Record, String> {
+pub(crate) fn read_smx(path: &Path) -> Result<Stored, String> {
     let bytes = std::fs::read(path).map_err(|error| reason(&error))?;
     String::from_utf8(bytes)
         .ok()
-        .and_then(|text| draw::document::snapshot::drawing_from_text(&text).map(Record::from_snapshot))
+        .and_then(|text| stored_from_text(&text))
         .ok_or_else(|| "It is not a storyboard file, or it is damaged.".to_string())
 }
 
@@ -92,11 +224,7 @@ pub(crate) fn reason(error: &std::io::Error) -> String {
 }
 
 fn smx_bytes(storyboard: &Record, name: &str) -> Option<Vec<u8>> {
-    let mut value = storyboard.drawing.snapshot_value(storyboard.id(), storyboard.name());
-    let object = value.as_object_mut()?;
-    object.insert("name".to_string(), Value::String(name.to_string()));
-    object.remove("path");
-    serde_json::to_vec_pretty(&value).ok()
+    serde_json::to_vec_pretty(&storyboard_value(storyboard, name)).ok()
 }
 
 pub(crate) fn recovery_path(dir: &Path, id: DrawingId) -> PathBuf {
@@ -113,7 +241,7 @@ pub(crate) fn write_recovery(dir: &Path, storyboard: &Record) -> bool {
 }
 
 pub(crate) fn recovery_bytes(storyboard: &Record) -> Option<Vec<u8>> {
-    let mut value = storyboard.drawing.snapshot_value(storyboard.id(), storyboard.name());
+    let mut value = storyboard_value(storyboard, storyboard.name());
     let object = value.as_object_mut()?;
     if let Some(path) = storyboard.path().and_then(|path| path.to_str()) {
         object.insert("path".to_string(), Value::String(path.to_string()));
@@ -128,7 +256,7 @@ pub(crate) fn delete_recovery(dir: &Path, id: DrawingId) {
 }
 
 pub(crate) struct LoadedRecovery {
-    pub storyboard: Record,
+    pub storyboard: Stored,
     pub path: Option<PathBuf>,
 }
 
@@ -218,11 +346,10 @@ fn id_from_name(path: &Path, prefix: &str, suffix: &str) -> Option<DrawingId> {
     Some(DrawingId::new(id))
 }
 
-fn snapshot_and_path(text: &str) -> Option<(Record, Option<PathBuf>)> {
+fn snapshot_and_path(text: &str) -> Option<(Stored, Option<PathBuf>)> {
     let value: Value = serde_json::from_str(text).ok()?;
     let path = value.as_object().and_then(path_from);
-    let storyboard = Record::from_snapshot(draw::document::snapshot::drawing_from_text(text)?);
-    Some((storyboard, path))
+    Some((stored_from_value(&value)?, path))
 }
 
 fn path_from(object: &Map<String, Value>) -> Option<PathBuf> {

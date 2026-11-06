@@ -152,6 +152,68 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
         used.insert(tool.to_string());
     };
 
+    // The film, by the assistant alone: clips made, timed, moved, and named,
+    // the storyboard's settings, and inside a clip layers, keys, frames,
+    // marks, and the onion skin. It ends inside a clip, where drawing happens.
+    let r0 = "request-0";
+    pair.refused("draw__add_shape", json!({"kind": "ellipse", "from": [0, 0], "to": [10, 10]}), r0)?;
+    let film = pair.ok("clips__read_film", json!({}), r0)?;
+    if film["clips"].as_array().is_none_or(|clips| !clips.is_empty()) || film["can_draw"] != json!(false) {
+        return Err(format!("a new storyboard is not an empty film: {film}"));
+    }
+    let clip = |made: &Value| made["made"].as_u64().ok_or_else(|| format!("nothing was made: {made}"));
+    let first_clip = clip(&pair.ok("clips__add_clip", json!({}), r0)?)?;
+    let second_clip = clip(&pair.ok("clips__add_clip", json!({"length": 24}), r0)?)?;
+    let third_clip = clip(&pair.ok("clips__duplicate_clip", json!({"clip": second_clip}), r0)?)?;
+    let timed = pair.ok("clips__retime_clip", json!({"clip": first_clip, "edge": "end", "frames": 12}), r0)?;
+    if timed["clips"][1]["start"] != json!(61) {
+        return Err(format!("retiming a clip did not move the next one: {timed}"));
+    }
+    pair.ok("clips__move_clips", json!({"clips": [third_clip], "frames": -84}), r0)?;
+    pair.ok("clips__delete_clip", json!({"clip": third_clip}), r0)?;
+    pair.refused("clips__delete_clip", json!({"clip": third_clip}), r0)?;
+    pair.ok("clips__set_clip", json!({"clip": first_clip, "shot": "12", "action": "Keeper turns toward the radio."}), r0)?;
+    pair.ok("clips__select_clips", json!({"clips": [second_clip]}), r0)?;
+    pair.ok("clips__set_storyboard", json!({"title": "The Last Signal", "scene": "3"}), r0)?;
+    pair.ok("clips__go_to_frame", json!({"frame": 30}), r0)?;
+    pair.refused("clips__add_layer", json!({}), r0)?;
+    pair.ok("clips__edit_clip", json!({"clip": first_clip}), r0)?;
+    pair.ok("clips__leave_clip", json!({}), r0)?;
+    let inside = pair.ok("clips__edit_clip", json!({"clip": first_clip}), r0)?;
+    let base = inside["where"]["layer"].as_u64().ok_or("no active layer")?;
+    let folder = clip(&pair.ok("clips__add_layer", json!({"folder": true}), r0)?)?;
+    let upper = clip(&pair.ok("clips__add_layer", json!({}), r0)?)?;
+    pair.ok("clips__move_layer", json!({"layer": upper, "position": 1, "folder": folder}), r0)?;
+    pair.ok("clips__set_layer", json!({"layer": upper, "name": "Keeper", "color": "#2563eb", "opacity": 0.8, "outline": false}), r0)?;
+    pair.ok("clips__insert_keyframe", json!({"layer": base, "frame": 13}), r0)?;
+    pair.ok("clips__insert_keyframe", json!({"layer": base, "frame": 25, "blank": true}), r0)?;
+    pair.ok("clips__clear_keyframe", json!({"layer": base, "frame": 25}), r0)?;
+    pair.ok("clips__insert_frames", json!({"layers": [base], "frame": 5, "count": 2}), r0)?;
+    pair.ok("clips__remove_frames", json!({"layers": [base], "frame": 5, "count": 2}), r0)?;
+    pair.ok("clips__move_frames", json!({"layers": [base], "start": 13, "end": 20, "frames": 4, "push": true}), r0)?;
+    pair.ok("clips__stretch_hold", json!({"layer": base, "frame": 17, "frames": 4}), r0)?;
+    pair.ok("clips__copy_frames", json!({"layers": [base], "start": 1, "end": 8}), r0)?;
+    pair.ok("clips__paste_frames", json!({"layers": [base], "frame": 40}), r0)?;
+    pair.ok("clips__reverse_frames", json!({"layers": [base], "start": 1, "end": 24}), r0)?;
+    let marked = pair.ok("clips__add_mark", json!({"layer": base, "frame": 3, "kind": "label", "text": "radio on"}), r0)?;
+    let mark = clip(&marked)?;
+    pair.ok("clips__remove_mark", json!({"layer": base, "mark": mark}), r0)?;
+    pair.ok("clips__set_onion_skin", json!({"on": true, "before": 1, "after": 1}), r0)?;
+    pair.ok("clips__select_frames", json!({"layers": [base], "start": 1, "end": 4}), r0)?;
+    pair.ok("clips__delete_layer", json!({"layer": folder}), r0)?;
+    pair.ok("clips__select_layer", json!({"layer": base}), r0)?;
+    pair.ok("clips__go_to_frame", json!({"frame": 1}), r0)?;
+    for tool in [
+        "read_film", "add_clip", "duplicate_clip", "retime_clip", "move_clips", "delete_clip", "set_clip", "select_clips",
+        "set_storyboard", "go_to_frame", "edit_clip", "leave_clip", "add_layer", "move_layer", "set_layer", "insert_keyframe",
+        "clear_keyframe", "insert_frames", "remove_frames", "move_frames", "stretch_hold", "copy_frames", "paste_frames",
+        "reverse_frames", "add_mark", "remove_mark", "set_onion_skin", "select_frames", "delete_layer", "select_layer",
+    ] {
+        note(&format!("clips__{tool}"));
+    }
+    // Drawing starts from what the open clip's drawing is.
+    let first = pair.shown.clone();
+
     // One request, every tool.
     let r1 = "request-1";
     let read = pair.ok("look__read_storyboard", json!({}), r1)?;
@@ -299,23 +361,19 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
     pair.ok("edit__move_object", json!({"object": ellipse, "position": 0}), r1)?;
     pair.refused("edit__move_object", json!({"object": ellipse, "position": 0}), r1)?;
     note("edit__move_object");
-    let fresh = pair.ok("edit__new_canvas", json!({}), r1)?;
-    let (canvas_two, _) = made(&fresh, "canvas")?;
-    note("edit__new_canvas");
     let active = pair.ok("edit__set_active_canvas", json!({"canvas": canvas}), r1)?;
     if active["active_canvas"] != json!(canvas) {
         return Err("set_active_canvas did not make the canvas active".into());
     }
     pair.refused("edit__set_active_canvas", json!({"canvas": ellipse}), r1)?;
     note("edit__set_active_canvas");
-    let duplicated = pair.ok("edit__duplicate_layer", json!({"canvas": canvas, "layer": layer}), r1)?;
-    let copy_layer = duplicated["new_layers"][0].as_u64().ok_or("duplicate_layer made no layer")?;
-    note("edit__duplicate_layer");
-    pair.ok("edit__move_layer", json!({"canvas": canvas, "layer": copy_layer, "position": 3}), r1)?;
-    note("edit__move_layer");
-    pair.ok("edit__delete_layer", json!({"canvas": canvas, "layer": copy_layer}), r1)?;
-    note("edit__delete_layer");
-    let _ = canvas_two;
+    let duplicated = pair.ok("edit__duplicate_colour", json!({"canvas": canvas, "colour": layer}), r1)?;
+    let copy_layer = duplicated["new_layers"][0].as_u64().ok_or("duplicate_colour made no colour")?;
+    note("edit__duplicate_colour");
+    pair.ok("edit__move_colour", json!({"canvas": canvas, "colour": copy_layer, "position": 3}), r1)?;
+    note("edit__move_colour");
+    pair.ok("edit__delete_colour", json!({"canvas": canvas, "colour": copy_layer}), r1)?;
+    note("edit__delete_colour");
 
     let (ok, image, images, _) = pair.invoke("look__look_at", json!({}), r1)?;
     if !ok || images != 1 || image["width"].as_u64().is_none() {
@@ -476,7 +534,10 @@ pub(crate) fn workspace(dir: &Path, saved: &Path) -> Result<(), String> {
         return Err("the opened tab does not report its file".into());
     }
     declared_before_tabs(&replies, &opened.id)?;
-    let (_, document, camera) = document_of(&replies).ok_or("open sent no document")?;
+    let (_, _, camera) = document_of(&replies).ok_or("open sent no document")?;
+    let clip = crate::first_clip(&replies).ok_or("the opened storyboard shows no clip")?;
+    let replies = pair.exchange(command("edit_clip", Some(&opened.id), Some(clip)))?;
+    let (_, document, _) = document_of(&replies).ok_or("edit_clip sent no document")?;
     if !camera || crate::stroke_counts(&document).0 == 0 {
         return Err("the opened storyboard is not the saved one".into());
     }
@@ -489,6 +550,8 @@ pub(crate) fn workspace(dir: &Path, saved: &Path) -> Result<(), String> {
     }
     declared_before_tabs(&replies, &untitled)?;
     pair.tab = untitled.clone();
+    let made = pair.ok("clips__add_clip", json!({}), "request-w")?;
+    pair.ok("clips__edit_clip", json!({"clip": made["made"]}), "request-w")?;
     pair.ok("draw__add_shape", json!({"kind": "ellipse", "from": [0, 0], "to": [40, 40]}), "request-w")?;
 
     // A tab that has a file is kept as it is.

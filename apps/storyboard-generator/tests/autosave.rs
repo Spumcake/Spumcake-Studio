@@ -46,7 +46,7 @@ fn a_change_survives_a_kill_with_no_host() {
     send(
         &mut input,
         protocol::HostMessage::Command {
-            id: "new_canvas".into(),
+            id: "new_clip".into(),
             tab: Some(tab),
             arg: None,
             node: None,
