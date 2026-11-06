@@ -146,6 +146,12 @@ struct HostWindow {
     /// Cells being typed or run. The host draws every cell from here and
     /// from what a sub-application reported.
     board: crate::cells::Board,
+    /// Every workspace's declared items, and what is out of date.
+    items: crate::items::Index,
+    /// Renders under way for a workspace's `need`: the host's id, and the
+    /// application and id that asked.
+    renders: HashMap<String, (usize, String)>,
+    next_render: u64,
     /// Endpoint keys, read once each from the keyring.
     keys: crate::keys::Keys,
     /// Connection tests and model lists, by endpoint.
@@ -269,6 +275,9 @@ impl HostWindow {
             chat: Chat::default(),
             routing: Routing::default(),
             board: crate::cells::Board::default(),
+            items: crate::items::Index::default(),
+            renders: HashMap::new(),
+            next_render: 0,
             keys: crate::keys::Keys::default(),
             probes: crate::endpoints::Probes::default(),
             configured: None,
@@ -701,6 +710,7 @@ impl eframe::App for HostWindow {
         self.note_kinds();
         self.pump_assistant();
         self.take_cell_requests();
+        self.take_items();
         // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
         let editable = if self.locked() { Vec::new() } else { self.edited_types() };
@@ -766,7 +776,10 @@ impl eframe::App for HostWindow {
                         self.shell(ui, &ctx, app, tab.clone(), dismissing, &mut chosen, &mut sent);
                     });
                 } else {
-                    self.viewport = hidden_viewport(full, self.settings.chat_width, self.panel_width(app, tab.as_deref()));
+                    let timeline = tab.as_ref().is_some_and(|tab| {
+                        self.apps.get(app).is_some_and(|started| started.running.declared.timelines.contains_key(tab))
+                    });
+                    self.viewport = hidden_viewport(full, self.settings.chat_width, self.panel_width(app, tab.as_deref()), timeline);
                 }
                 let edge = if workspace_open { chat_rect.right() } else { full.right() };
                 if workspace_open {
@@ -1325,6 +1338,52 @@ impl HostWindow {
             rx,
             settled: false,
         });
+    }
+
+    /// Takes what the workspaces declared about items: updates the index,
+    /// tells each owner which of its items are out of date, and routes each
+    /// `need` to the item's owner as `render`, and its answer back.
+    fn take_items(&mut self) {
+        let mut declared = Vec::new();
+        let mut needs = Vec::new();
+        let mut rendered = Vec::new();
+        for (app, started) in self.apps.iter_mut().enumerate() {
+            let owner = started.id.clone();
+            declared.extend(started.running.declared.items.drain(..).map(|(path, items)| (owner.clone(), path, items)));
+            needs.extend(started.running.declared.needs.drain(..).map(|need| (app, need)));
+            rendered.extend(started.running.declared.rendered.drain(..));
+        }
+        if declared.is_empty() && needs.is_empty() && rendered.is_empty() {
+            return;
+        }
+        for (owner, path, items) in declared {
+            self.items.declare(&owner, path, items);
+        }
+        for (owner, path, items) in self.items.tell() {
+            if let Some(app) = self.apps.iter().position(|started| started.id == owner) {
+                self.send(app, HostMessage::Stale { path, items });
+            }
+        }
+        for (asker, (id, item, media_type)) in needs {
+            let owner = self.items.owner(&item.path).and_then(|owner| self.apps.iter().position(|started| started.id == owner));
+            match owner {
+                Some(owner) => {
+                    self.next_render += 1;
+                    let render = format!("render-{}", self.next_render);
+                    self.renders.insert(render.clone(), (asker, id));
+                    self.send(owner, HostMessage::Render { id: render, item, media_type, part: None });
+                }
+                None => self.send(
+                    asker,
+                    HostMessage::Provided { id, path: None, fingerprint: None, error: Some(String::from("No workspace has that item.")) },
+                ),
+            }
+        }
+        for (id, path, fingerprint, error) in rendered {
+            if let Some((asker, asked)) = self.renders.remove(&id) {
+                self.send(asker, HostMessage::Provided { id: asked, path, fingerprint, error });
+            }
+        }
     }
 
     fn take_cell_requests(&mut self) {
@@ -1940,13 +1999,22 @@ const CELL_MENU_W: f32 = 236.0;
 const BAR_GRAY: Color32 = Color32::from_rgb(186, 188, 192);
 
 /// The contents size the workspace would have if it were shown: the window
-/// minus the conversation column, this chrome, and an open properties panel.
-fn hidden_viewport(window: Rect, chosen: Option<f32>, panel: f32) -> [f64; 2] {
+/// minus the conversation column, this chrome, an open properties panel,
+/// and a docked timeline.
+fn hidden_viewport(window: Rect, chosen: Option<f32>, panel: f32, timeline: bool) -> [f64; 2] {
     let column = chat::width(window.width(), chosen);
     let shell_w = (window.width() - column).max(0.0);
     let width = (shell_w - panel).max(0.0);
-    let height = (window.height() - WORKSPACE_CHROME).max(0.0);
+    let mut height = (window.height() - WORKSPACE_CHROME).max(0.0);
+    if timeline {
+        height -= docked_timeline(height);
+    }
     [f64::from(width), f64::from(height)]
+}
+
+/// How much of the contents' height a docked timeline takes, shown or hidden alike.
+fn docked_timeline(height: f32) -> f32 {
+    crate::timeline::HEIGHT.min(height / 2.0)
 }
 
 impl HostWindow {
@@ -2019,6 +2087,7 @@ fn waits_while_locked(message: &HostMessage) -> bool {
         | HostMessage::RasterGesture { .. }
         | HostMessage::RasterText { .. }
         | HostMessage::Select { .. }
+        | HostMessage::TimelineGesture { .. }
         | HostMessage::Property { .. } => true,
         _ => false,
     }
@@ -2176,10 +2245,7 @@ impl HostWindow {
             .get(app)
             .and_then(|started| started.running.declared.timelines.get(&tab).cloned());
         let rect = match &timeline {
-            Some(_) => {
-                let height = crate::timeline::HEIGHT.min(whole.height() / 2.0);
-                Rect::from_min_max(whole.min, egui::pos2(whole.right(), whole.bottom() - height))
-            }
+            Some(_) => Rect::from_min_max(whole.min, egui::pos2(whole.right(), whole.bottom() - docked_timeline(whole.height()))),
             None => whole,
         };
         self.viewport = [f64::from(rect.width()), f64::from(rect.height())];

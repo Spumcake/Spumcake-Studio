@@ -97,6 +97,12 @@ pub struct Declared {
     pub kept: VecDeque<(String, Option<String>, Option<String>)>,
     /// The cells a tab reported, and which one is selected.
     pub cells: HashMap<String, (Vec<protocol::Cell>, Option<String>)>,
+    /// Files whose items were declared since the window last took them.
+    pub items: VecDeque<(String, Vec<protocol::Item>)>,
+    /// Answers to `render`: the id, the file, the item's fingerprint, or why not.
+    pub rendered: VecDeque<(String, Option<String>, Option<String>, Option<String>)>,
+    /// Items it asked for as files: the id, the item, and the media type.
+    pub needs: VecDeque<(String, protocol::ItemRef, String)>,
     /// Each tab's timeline, as last declared.
     pub timelines: HashMap<String, protocol::Timeline>,
     /// What each canvas tab's stage shows besides its drawing.
@@ -568,7 +574,11 @@ impl Running {
             AppMessage::Claimed { id, yours } => declared.claimed.push_back((id, yours)),
             // The items index, rendering, and the picker come with the host's
             // lifecycle work.
-            AppMessage::Items { .. } | AppMessage::Rendered { .. } | AppMessage::Need { .. } | AppMessage::Pick { .. } => {}
+            AppMessage::Items { path, items } => declared.items.push_back((path, items)),
+            AppMessage::Rendered { id, path, fingerprint, error } => declared.rendered.push_back((id, path, fingerprint, error)),
+            AppMessage::Need { id, item, media_type } => declared.needs.push_back((id, item, media_type)),
+            // The picker is drawn once its view is approved.
+            AppMessage::Pick { .. } => {}
             AppMessage::Timeline(timeline) => {
                 declared.timelines.insert(timeline.tab.clone(), timeline);
             }

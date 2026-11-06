@@ -8,6 +8,7 @@ mod env_file;
 mod doc;
 mod grid;
 mod icons;
+mod items;
 mod endpoints;
 mod film;
 mod frames;

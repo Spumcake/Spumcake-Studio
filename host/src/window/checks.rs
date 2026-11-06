@@ -97,6 +97,7 @@ mod image_checks;
 mod editor_checks;
 mod raster_checks;
 mod edit_checks;
+mod items_checks;
 
 /// A folder of the check's own, which it removes when done.
 fn scratch(name: &str) -> PathBuf {
