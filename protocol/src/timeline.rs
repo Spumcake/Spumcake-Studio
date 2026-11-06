@@ -344,6 +344,38 @@ pub struct Stage {
     pub underlays: Vec<Underlay>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlays: Vec<Overlay>,
+    /// How the editable drawing itself is shown.
+    #[serde(default, skip_serializing_if = "ActiveDrawing::is_plain")]
+    pub active: ActiveDrawing,
+}
+
+/// How the stage shows the drawing being edited: hidden, faded, or as
+/// outlines, as its layer's eye, opacity, and outline toggle set it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveDrawing {
+    #[serde(default = "yes")]
+    pub visible: bool,
+    #[serde(default = "one")]
+    pub opacity: f32,
+    /// Every mark drawn as a thin line in this colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<[u8; 3]>,
+}
+
+impl Default for ActiveDrawing {
+    fn default() -> Self {
+        Self { visible: true, opacity: 1.0, outline: None }
+    }
+}
+
+impl ActiveDrawing {
+    fn is_plain(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 /// Another drawing shown with the active one, never edited: under it, or,
@@ -361,6 +393,9 @@ pub struct Underlay {
     /// Drawn over the active drawing rather than under it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub above: bool,
+    /// Every mark drawn as a thin line in the tint, or in black without one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub outline: bool,
     #[serde(default)]
     pub offset: [f64; 2],
     /// Degrees.

@@ -1082,8 +1082,8 @@ mod tests {
             field: Some([0.0, 0.0, 1920.0, 1080.0]),
             veil: true,
             underlays: vec![
-                Underlay { drawing: serde_json::json!({"nodes": []}), tint: Some([220, 60, 60]), opacity: 0.3, above: false, offset: [12.0, 0.0], rotation: 5.0, tag: Some("Key 3".into()) },
-                Underlay { drawing: serde_json::json!({"nodes": []}), tint: None, opacity: 1.0, above: true, offset: [0.0, 0.0], rotation: 0.0, tag: None },
+                Underlay { drawing: serde_json::json!({"nodes": []}), tint: Some([220, 60, 60]), opacity: 0.3, above: false, outline: true, offset: [12.0, 0.0], rotation: 5.0, tag: Some("Key 3".into()) },
+                Underlay { drawing: serde_json::json!({"nodes": []}), tint: None, opacity: 1.0, above: true, outline: false, offset: [0.0, 0.0], rotation: 0.0, tag: None },
             ],
             overlays: vec![
                 Overlay::Rect { min: [0.0, 0.0], max: [10.0, 10.0], dashed: true },
@@ -1091,7 +1091,12 @@ mod tests {
                 Overlay::Label { at: [1.0, 1.0], text: "Start".into() },
                 Overlay::Dim { min: [0.0, 0.0], max: [5.0, 5.0] },
             ],
+            active: ActiveDrawing { visible: false, opacity: 0.5, outline: Some([40, 90, 200]) },
         }));
+        let Ok(AppMessage::Stage(plain)) = parse_app_message(r#"{"type":"stage","tab":"1"}"#) else {
+            panic!("a bare stage did not read");
+        };
+        assert_eq!(plain.active, ActiveDrawing::default());
         round_trip_app(AppMessage::Notices {
             tab: "1".into(),
             notices: vec![Notice {

@@ -70,12 +70,12 @@ fn the_new_host_parts_name_no_sub_application_skill_or_tool() {
 }
 
 /// Catches the timeline or the stage learning one workspace's work: they
-/// draw rows, items, and drawings, never clips, shots, sheets, or genga
-/// paper. Words are whole identifiers, so `clip_rect` is not a clip.
+/// draw rows, items, and drawings, never clips, shots, sheets, genga
+/// paper, or onion skin. Words are whole identifiers, so `clip_rect` is not a clip.
 #[test]
 fn the_timeline_and_the_stage_name_no_workspace_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let words = ["clip", "clips", "shot", "shots", "sheet", "sheets", "genga"];
+    let words = ["clip", "clips", "shot", "shots", "sheet", "sheets", "genga", "paper", "onion"];
     let mut found = Vec::new();
     for file in ["src/timeline.rs", "src/canvas.rs"] {
         let text = std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| panic!("{file}: {error}"));
