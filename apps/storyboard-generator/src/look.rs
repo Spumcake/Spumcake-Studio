@@ -67,13 +67,57 @@ impl Looker {
     /// The marks inside `min`..`max`, in document units, scaled so the
     /// longer side is at most `max_side` pixels and a unit at most 4.
     pub fn image(&mut self, marks: Vec<SceneMark>, min: Point, max: Point, max_side: u32) -> Option<Image> {
+        let (pixmap, scale) = self.paint(marks, min, max, max_side, BACKGROUND, true)?;
+        let png = pixmap.encode_png().ok()?;
+        Some(Image {
+            png,
+            width: pixmap.width(),
+            height: pixmap.height(),
+            scale,
+        })
+    }
+
+    /// The marks inside `min`..`max` on plain `background`, as a clip's
+    /// frame is rendered for another workspace: no grid.
+    pub fn plain_image(&mut self, marks: Vec<SceneMark>, min: Point, max: Point, max_side: u32, background: [u8; 3]) -> Option<Image> {
+        let (pixmap, scale) = self.paint(marks, min, max, max_side, background, false)?;
+        let png = pixmap.encode_png().ok()?;
+        Some(Image {
+            png,
+            width: pixmap.width(),
+            height: pixmap.height(),
+            scale,
+        })
+    }
+
+    /// The same as `plain_image`, as `width × height × 4` bytes of RGBA with
+    /// straight alpha, as the host reads a thumbnail.
+    pub fn pixels(&mut self, marks: Vec<SceneMark>, min: Point, max: Point, max_side: u32, background: [u8; 3]) -> Option<(Vec<u8>, u32, u32)> {
+        let (pixmap, _) = self.paint(marks, min, max, max_side, background, false)?;
+        let (width, height) = (pixmap.width(), pixmap.height());
+        // The background is opaque, so every pixel is, and premultiplied
+        // and straight alpha are the same bytes.
+        Some((pixmap.take(), width, height))
+    }
+
+    fn paint(
+        &mut self,
+        marks: Vec<SceneMark>,
+        min: Point,
+        max: Point,
+        max_side: u32,
+        background: [u8; 3],
+        grid: bool,
+    ) -> Option<(Pixmap, f64)> {
         let span = [(max[0] - min[0]).max(1.0), (max[1] - min[1]).max(1.0)];
         let scale = (f64::from(max_side) / span[0].max(span[1])).min(4.0);
         let width = (span[0] * scale).ceil().max(1.0) as u32;
         let height = (span[1] * scale).ceil().max(1.0) as u32;
         let mut pixmap = Pixmap::new(width, height)?;
-        pixmap.fill(tiny_skia::Color::from_rgba8(BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 255));
-        paint_grid(&mut pixmap, min, max, scale);
+        pixmap.fill(tiny_skia::Color::from_rgba8(background[0], background[1], background[2], 255));
+        if grid {
+            paint_grid(&mut pixmap, min, max, scale);
+        }
         for mark in marks {
             match mark {
                 SceneMark::Ink(paint) => {
@@ -100,13 +144,7 @@ impl Looker {
                 SceneMark::Text(view) => self.paint_text(&mut pixmap, &view, min, scale),
             }
         }
-        let png = pixmap.encode_png().ok()?;
-        Some(Image {
-            png,
-            width,
-            height,
-            scale,
-        })
+        Some((pixmap, scale))
     }
 
     /// One text, through the host's layout and paint, then filled in.

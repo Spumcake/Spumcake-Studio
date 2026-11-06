@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod assist;
 mod declare;
+pub mod film;
 pub(crate) use declare::{action_named, command_named, session_value, tool_named};
 
 /// How long a dirty storyboard waits between recovery copies.
@@ -324,6 +325,12 @@ pub struct Session {
     recovery_due: HashMap<DrawingId, Instant>,
     /// Recovery files offered at startup and not yet restored or discarded.
     unrestored: HashSet<DrawingId>,
+    /// What each storyboard's timeline has selected.
+    picked: HashMap<DrawingId, film::Picked>,
+    /// Frames Copy frames kept, for Paste frames.
+    frames_clipboard: Option<crate::film::CopiedFrames>,
+    /// The panel shows the active layer's page; choosing a tool ends it.
+    layer_page: bool,
 }
 
 impl Session {
@@ -371,6 +378,9 @@ impl Session {
             file_intent: None,
             recovery_due: HashMap::new(),
             unrestored: HashSet::new(),
+            picked: HashMap::new(),
+            frames_clipboard: None,
+            layer_page: false,
         };
         session.push_blank();
         session
@@ -852,7 +862,10 @@ impl Session {
     /// Reads a storyboard file. A failure is kept for the window to show.
     fn read_or_report(&mut self, path: &Path) -> Option<Record> {
         match crate::store::read_smx(path) {
-            Ok(storyboard) => Some(storyboard),
+            Ok(stored) => {
+                let palette = self.brush_palette.clone();
+                Some(stored.into_record(&mut self.ids, &palette))
+            }
             Err(reason) => {
                 self.file_error = Some(FileError {
                     saving: false,
@@ -879,14 +892,16 @@ impl Session {
             return false;
         };
         self.unrestored.remove(&file_id);
+        let palette = self.brush_palette.clone();
+        let storyboard = loaded.storyboard.into_record(&mut self.ids, &palette);
         let path = loaded.path.map(|path| crate::store::normalize(&path));
         if let Some(path) = path.clone()
             && let Some(open_id) = self.find_open_path(&path)
         {
-            self.replace_storyboard(open_id, loaded.storyboard, Some(path), Some(file_id));
+            self.replace_storyboard(open_id, storyboard, Some(path), Some(file_id));
             return true;
         }
-        self.adopt(loaded.storyboard, path, Some(file_id));
+        self.adopt(storyboard, path, Some(file_id));
         true
     }
 
@@ -1307,6 +1322,7 @@ impl Session {
         }
         self.settle();
         self.tool = tool;
+        self.layer_page = false;
         if matches!(tool, Tool::Brush | Tool::Eraser) {
             self.active_storyboard_mut().select_active_canvas();
         }
@@ -1774,7 +1790,7 @@ impl Session {
                 let step = self.storyboards[index].duplicate_color(canvas, color, &mut self.ids);
                 self.storyboards[index].commit(step)
             }
-            MenuAction::Delete => self.delete_layer(canvas, color),
+            MenuAction::Delete => self.delete_colour(canvas, color),
             MenuAction::Properties => {
                 self.select_color(canvas, color);
                 self.panel_open = true;
@@ -1785,7 +1801,7 @@ impl Session {
     }
 
     /// Removes a canvas layer and its strokes. The last layer is left in place.
-    pub(crate) fn delete_layer(&mut self, canvas: NodeId, id: ColorId) -> bool {
+    pub(crate) fn delete_colour(&mut self, canvas: NodeId, id: ColorId) -> bool {
         self.finish_size_edit();
         let Some(index) = self.active_storyboard().color_index(canvas, id) else {
             return false;
@@ -2322,7 +2338,6 @@ impl Session {
             | CommandId::NudgeUp
             | CommandId::NudgeDown => storyboard.can_nudge(),
             CommandId::ZoomToSelection => storyboard.selection_bounds().is_some(),
-            CommandId::NewCanvas => true,
             CommandId::Group => storyboard.can_group(),
             CommandId::Ungroup => storyboard.can_ungroup(),
             CommandId::BringForward => storyboard.can_reorder(Reorder::Forward),
@@ -2409,10 +2424,6 @@ impl Session {
                 CloseEffect::Closed { replacement } => CommandEffect::Closed { replacement },
                 _ => CommandEffect::None,
             },
-            CommandId::NewCanvas => {
-                self.add_canvas();
-                CommandEffect::None
-            }
             CommandId::Delete => {
                 self.finish_size_edit();
                 let step = self.active_storyboard_mut().delete_selected();
@@ -2567,6 +2578,9 @@ impl Session {
         }
     }
 
+    /// A second canvas, for the carried-over checks of several canvases;
+    /// a person's drawing has one.
+    #[cfg(test)]
     fn add_canvas(&mut self) {
         self.finish_size_edit();
         let palette = self.brush_palette.clone();
@@ -2585,12 +2599,15 @@ impl Session {
         }
         match self.tool {
             Tool::Brush => {
-                // With no canvas highlighted the stroke makes a new canvas, as a
-                // shape tool makes a new shape. A highlighted canvas whose layer
-                // for this color is hidden or locked draws nothing.
+                // Every stroke goes to the drawing's one canvas. A canvas that
+                // is hidden or locked, or whose colour is, draws nothing.
+                self.active_storyboard_mut().activate_origin();
                 let canvas = self.active_storyboard().highlighted_id();
                 let source = self.brush_active;
-                if canvas.is_some() && !self.active_storyboard().brush_ready(source) {
+                // A drawing whose canvas was deleted gets a new one with the
+                // stroke; a canvas that is there but hidden or locked takes none.
+                let none_left = self.active_storyboard().origin_canvas().is_none();
+                if canvas.is_none() && !none_left || canvas.is_some() && !self.active_storyboard().brush_ready(source) {
                     return Err(CommandError::Unavailable);
                 }
                 let item = self
@@ -2613,6 +2630,7 @@ impl Session {
             }
             Tool::Eraser => {
                 // With no canvas highlighted there is nothing to erase.
+                self.active_storyboard_mut().activate_origin();
                 let canvas = self
                     .active_storyboard()
                     .highlighted_id()
@@ -4007,6 +4025,30 @@ impl Default for Session {
 
 #[cfg(test)]
 mod tests {
+
+    /// A session drawing inside a clip, as the carried-over checks expect:
+    /// a new storyboard is an empty film, and drawing happens in a clip.
+    fn drawing_session() -> Session {
+        let mut session = Session::new();
+        enter_new_clip(&mut session);
+        session
+    }
+
+    /// Opens a new clip with nothing in its history and its canvas selected,
+    /// as the carried-over blank storyboard began.
+    /// Opens the first clip of a storyboard just opened, where its drawing is.
+    fn enter_first_clip(session: &mut Session) {
+        let clip = session.film().clips[0].id;
+        assert!(session.enter_clip(clip));
+    }
+
+    fn enter_new_clip(session: &mut Session) {
+        let clip = session.add_clip(None, crate::film::NEW_CLIP_LENGTH).expect("a clip");
+        session.enter_clip(clip);
+        session.active_storyboard_mut().forget_history();
+        let canvas = session.active_storyboard().origin_canvas().expect("a canvas");
+        session.select_click(canvas, false);
+    }
     use super::*;
     use draw::document::TextLook;
     use draw::ink::{point_in_ring, point_in_shapes};
@@ -4148,7 +4190,7 @@ mod tests {
             0xD1B5_4A32_D192_ED03,
         ] {
             let samples = self_overlapping_scribble(seed);
-            let mut session = Session::new();
+            let mut session = drawing_session();
             commit_samples(&mut session, &samples);
 
             let mut near = vec![false; CELLS * CELLS];
@@ -4203,7 +4245,7 @@ mod tests {
 
     #[test]
     fn brush_diameter_follows_the_linear_pressure_curve() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_size(16).unwrap();
         let full = line(0.0, 360.0, 0.0, 8.0, Some(1.0));
         let light = line(0.0, 360.0, 80.0, 8.0, Some(0.25));
@@ -4245,7 +4287,7 @@ mod tests {
 
     #[test]
     fn outline_leaves_samples_and_id_unchanged() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let samples = line(10.0, 80.0, 12.0, 5.0, Some(0.4));
         commit_samples(&mut session, &samples);
         let id = session.stroke_ids()[0];
@@ -4263,7 +4305,7 @@ mod tests {
 
     #[test]
     fn erase_hides_ink_inside_the_outline_and_undo_restores_it() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_size(32).unwrap();
         commit_samples(&mut session, &line(0.0, 400.0, 0.0, 8.0, Some(1.0)));
         let id = session.stroke_ids()[0];
@@ -4381,7 +4423,7 @@ mod tests {
     #[test]
     fn fully_hidden_stroke_remains_and_fit_matches_empty() {
         let viewport = [800.0, 600.0];
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_size(6).unwrap();
         commit_samples(&mut session, &line(0.0, 200.0, 0.0, 4.0, Some(1.0)));
         let id = session.stroke_ids()[0];
@@ -4406,7 +4448,7 @@ mod tests {
         assert_eq!(session.redo_len(), redo_len);
         assert_eq!(session.stroke_count(), 1);
 
-        let mut empty = Session::new();
+        let mut empty = drawing_session();
         empty.fit(viewport);
         assert_eq!(session.zoom(), empty.zoom());
         assert_eq!(session.zoom(), 1.0);
@@ -4424,13 +4466,13 @@ mod tests {
     #[test]
     fn camera_does_not_bake_samples_and_zoom_clamps() {
         let viewport = [800.0, 600.0];
-        let mut empty = Session::new();
+        let mut empty = drawing_session();
         empty.fit(viewport);
         assert_eq!(empty.zoom(), 1.0);
         assert!((empty.camera_origin()[0] - (-400.0)).abs() < 1e-9);
         assert!((empty.camera_origin()[1] - (-300.0)).abs() < 1e-9);
 
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_size(8).unwrap();
         let samples = line(0.0, 120.0, 4.0, 10.0, Some(1.0));
         commit_samples(&mut session, &samples);
@@ -4464,7 +4506,7 @@ mod tests {
 
     #[test]
     fn size_rejects_out_of_range_and_keeps_limits() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         assert_eq!(session.size(), 3);
         assert_eq!(session.set_size(0), Err(CommandError::SizeOutOfRange));
         assert_eq!(session.size(), 3);
@@ -4488,7 +4530,7 @@ mod tests {
 
     #[test]
     fn short_pen_and_miss_erase_leave_history_unchanged() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.begin().unwrap();
         session
             .add_sample(Sample {
@@ -4529,7 +4571,7 @@ mod tests {
 
     #[test]
     fn new_committed_gesture_clears_redo() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         commit_samples(&mut session, &line(0.0, 30.0, 0.0, 10.0, Some(1.0)));
         let first = session
             .stroke_samples(session.stroke_ids()[0])
@@ -4560,7 +4602,7 @@ mod tests {
 
     #[test]
     fn storyboards_keep_separate_strokes_camera_and_history() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let first = session.active_id();
         commit_samples(&mut session, &line(0.0, 40.0, 0.0, 10.0, None));
         session.pan_screen([30.0, -10.0]);
@@ -4575,6 +4617,7 @@ mod tests {
         assert_eq!(session.redo_len(), 0);
 
         let second = session.new_storyboard();
+        enter_new_clip(&mut session);
         assert_ne!(second, first);
         assert_eq!(session.stroke_count(), 0);
         assert_eq!(session.undo_len(), 0);
@@ -4618,7 +4661,7 @@ mod tests {
 
     #[test]
     fn tool_settings_and_the_active_color_stay_across_tabs() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let first = session.active_id();
         session.set_tool(Tool::Eraser);
         session.set_size(12).unwrap();
@@ -4670,7 +4713,6 @@ mod tests {
         let mut session = Session::new();
         let first = session.active_id();
         assert_eq!(session.storyboard_count(), 1);
-        assert_eq!(session.canvas_name(), Some("Canvas 1"));
         assert_eq!(session.swatches().len(), 9);
         assert!(session.swatches()[0].active);
         assert_eq!(session.swatches()[0].rgb, [20, 20, 20]);
@@ -4702,7 +4744,7 @@ mod tests {
 
     #[test]
     fn discarding_last_dirty_storyboard_leaves_one_blank() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let id = session.active_id();
         commit_samples(&mut session, &line(0.0, 30.0, 0.0, 10.0, None));
         assert_eq!(session.request_close(id), CloseEffect::NeedsConfirm);
@@ -4740,7 +4782,7 @@ mod tests {
 
     #[test]
     fn an_open_stroke_paints_in_its_color_layer() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let black = session.swatches()[0].rgb;
         let red_id = session.swatches()[1].id;
         let red = session.swatches()[1].rgb;
@@ -4774,7 +4816,7 @@ mod tests {
 
     #[test]
     fn earlier_palette_color_paints_above_a_later_one() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let black = session.swatches()[0].rgb;
         let red_id = session.swatches()[1].id;
         let red = session.swatches()[1].rgb;
@@ -4822,7 +4864,7 @@ mod tests {
 
     #[test]
     fn editing_a_color_size_changes_the_outline_and_keeps_samples() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         assert_eq!(session.size(), 3);
         let samples = line(0.0, 240.0, 0.0, 8.0, Some(1.0));
         commit_samples(&mut session, &samples);
@@ -4862,7 +4904,7 @@ mod tests {
 
     #[test]
     fn a_color_edit_undoes_and_leaves_samples_unchanged() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_size(10).unwrap();
         let samples = line(0.0, 200.0, 0.0, 4.0, Some(1.0));
         commit_samples(&mut session, &samples);
@@ -4891,7 +4933,7 @@ mod tests {
 
     #[test]
     fn brush_and_eraser_settings_are_not_undo_steps() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         commit_samples(&mut session, &line(0.0, 40.0, 0.0, 10.0, Some(1.0)));
         session.undo().unwrap();
         assert_eq!(session.redo_len(), 1);
@@ -4936,7 +4978,7 @@ mod tests {
 
     #[test]
     fn an_out_of_range_value_is_clamped_and_the_rest_stays() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         assert!(session.set_panel_property(PropId::Smoothing, PropValue::Number(240.0)));
         assert_eq!(
             session.panel_property(PropId::Smoothing),
@@ -5006,7 +5048,7 @@ mod tests {
 
     #[test]
     fn deleting_the_last_color_does_nothing() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         commit_samples(&mut session, &line(0.0, 30.0, 0.0, 10.0, None));
         let stroke = session.stroke_ids()[0];
         let samples = session.stroke_samples(stroke).unwrap().to_vec();
@@ -5015,11 +5057,11 @@ mod tests {
         while layers(&session) > 1 {
             let last = layers(&session) - 1;
             let id = session.active_storyboard().color_id_at(canvas, last).unwrap();
-            assert!(session.delete_layer(canvas, id));
+            assert!(session.delete_colour(canvas, id));
         }
         let undo_len = session.undo_len();
         let only = session.active_storyboard().color_id_at(canvas, 0).unwrap();
-        assert!(!session.delete_layer(canvas, only));
+        assert!(!session.delete_colour(canvas, only));
         assert_eq!(layers(&session), 1);
         assert_eq!(session.undo_len(), undo_len);
         assert_eq!(session.redo_len(), 0);
@@ -5029,7 +5071,7 @@ mod tests {
 
     #[test]
     fn a_color_drag_does_not_commit_over_undo_or_redo() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         commit_samples(&mut session, &line(0.0, 40.0, 0.0, 10.0, Some(1.0)));
         open_layer(&mut session, 0);
         assert!(session.preview_panel_property(PropId::Opacity, PropValue::Number(0.25)));
@@ -5070,7 +5112,7 @@ mod tests {
 
     #[test]
     fn a_hidden_or_locked_layer_draws_nothing_and_keeps_the_brush() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         open_layer(&mut session, 0);
         assert!(session.set_panel_property(PropId::Visible, PropValue::Bool(false)));
         assert!(session.begin().is_err(), "the hidden layer is not drawn on");
@@ -5094,7 +5136,7 @@ mod tests {
 
     #[test]
     fn moving_a_canvas_changes_its_transform_and_undo_restores_it() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let samples = line(0.0, 80.0, 0.0, 4.0, Some(1.0));
         commit_samples(&mut session, &samples);
         let canvas = session.selection()[0];
@@ -5136,9 +5178,9 @@ mod tests {
 
     #[test]
     fn grouping_then_ungrouping_keeps_world_positions() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let first = session.selection()[0];
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         let second = session.selection()[0];
         session.select_click(first, true);
         assert_eq!(session.selection().len(), 2);
@@ -5162,7 +5204,7 @@ mod tests {
 
     #[test]
     fn a_hidden_or_locked_node_is_not_picked() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         commit_samples(&mut session, &line(0.0, 80.0, 0.0, 4.0, Some(1.0)));
         let canvas = session.selection()[0];
         let on_ink = [12.0, 0.0];
@@ -5180,7 +5222,7 @@ mod tests {
         assert!(session.toggle_node(canvas, PropId::Locked));
         assert_eq!(translation(session.changeable_locals()[0].1), [0.0, 0.0]);
 
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         session.select_click(canvas, true);
         session.perform(CommandId::Group, [1.0, 1.0]);
         let group = session.selection()[0];
@@ -5193,7 +5235,7 @@ mod tests {
 
     #[test]
     fn with_no_canvas_the_brush_makes_one_and_the_eraser_erases_nothing() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.perform(CommandId::Delete, [1.0, 1.0]);
         assert!(session.selection().is_empty());
         assert_eq!(session.tool(), Tool::Brush, "the brush stays chosen");
@@ -5226,13 +5268,13 @@ mod tests {
 
     #[test]
     fn a_new_canvas_copies_the_brush_palette_and_keeps_its_own() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let original = swatch_rgbs(&session);
         // Editing a layer leaves the brush's palette, and later canvases, alone.
         open_layer(&mut session, 0);
         assert!(session.set_panel_property(PropId::Rgb, PropValue::Rgb([10, 20, 30])));
         assert_eq!(swatch_rgbs(&session), original);
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         let second = session.highlighted_id().unwrap();
         let rgb = session
             .active_storyboard()
@@ -5249,7 +5291,7 @@ mod tests {
             .active_storyboard()
             .color_prop(second, layer_at(&session, 0), PropId::Rgb);
         assert_eq!(kept, Some(PropValue::Rgb(original[0])));
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         let third = session.highlighted_id().unwrap();
         let rgb = session
             .active_storyboard()
@@ -5259,7 +5301,7 @@ mod tests {
 
     #[test]
     fn renaming_a_color_is_one_undo_step_and_refuses_a_blank() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let canvas = session.selection()[0];
         let red = layer_at(&session, 1);
         let name = |session: &Session| {
@@ -5279,9 +5321,9 @@ mod tests {
 
     #[test]
     fn bring_to_front_and_send_to_back_are_one_step_each() {
-        let mut session = Session::new();
-        session.perform(CommandId::NewCanvas, [800.0, 600.0]);
-        session.perform(CommandId::NewCanvas, [800.0, 600.0]);
+        let mut session = drawing_session();
+        session.add_canvas();
+        session.add_canvas();
         let order = |session: &Session| -> Vec<NodeId> {
             session.layers().iter().map(|node| node.id).collect()
         };
@@ -5307,7 +5349,7 @@ mod tests {
 
     #[test]
     fn a_rotated_canvas_box_hugs_its_ink() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let circle: Vec<Sample> = (0..=72)
             .map(|step| {
                 let angle = f64::from(step) / 72.0 * std::f64::consts::TAU;
@@ -5338,18 +5380,18 @@ mod tests {
 
     #[test]
     fn saving_a_palette_as_default_changes_the_next_canvas() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let first = session.selection()[0];
         open_layer(&mut session, 0);
         assert!(session.set_panel_property(PropId::Rgb, PropValue::Rgb([10, 20, 30])));
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         let second = session.selection()[0];
         assert_ne!(first, second);
         // From the first canvas's row menu, with the second still selected.
         assert!(session.make_palette_default(first));
         assert_eq!(session.selection(), vec![second]);
         assert_eq!(session.swatches()[0].rgb, [10, 20, 30]);
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         let third = session.highlighted_id().unwrap();
         let rgb = session
             .active_storyboard()
@@ -5368,10 +5410,10 @@ mod tests {
 
     #[test]
     fn a_marquee_selects_a_group_rather_than_a_child() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         commit_samples(&mut session, &line(0.0, 80.0, 0.0, 4.0, Some(1.0)));
         let child = session.selection()[0];
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         session.select_click(child, true);
         session.perform(CommandId::Group, [1.0, 1.0]);
         let group = session.selection()[0];
@@ -5383,9 +5425,9 @@ mod tests {
 
     #[test]
     fn nudging_a_selected_group_leaves_its_selected_child() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let child = session.selection()[0];
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         session.select_click(child, true);
         session.perform(CommandId::Group, [1.0, 1.0]);
         let group = session.selection()[0];
@@ -5404,7 +5446,7 @@ mod tests {
 
     #[test]
     fn a_locked_canvas_does_not_toggle_its_colors() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let canvas = session.selection()[0];
         let color = layer_at(&session, 0);
         assert!(session.toggle_node(canvas, PropId::Locked));
@@ -5427,7 +5469,7 @@ mod tests {
 
     #[test]
     fn text_alone_or_in_a_group_has_no_rotate_or_flip() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         place_shape(&mut session, [0.0, 0.0], [40.0, 30.0], false);
         let shape = session.active_storyboard().root_at(0).unwrap();
@@ -5470,7 +5512,7 @@ mod tests {
 
     #[test]
     fn a_shape_keeps_the_stroke_it_was_drawn_with() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         session.set_size(12).unwrap();
         let outline = session.swatches()[0].id;
@@ -5499,7 +5541,7 @@ mod tests {
 
     #[test]
     fn constrain_makes_a_square_from_an_unequal_drag() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         assert!(session.set_panel_property(PropId::Constrain, PropValue::Bool(true)));
         place_shape(&mut session, [0.0, 0.0], [10.0, 40.0], false);
@@ -5512,7 +5554,7 @@ mod tests {
 
     #[test]
     fn snap_lands_corners_on_the_grid() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         assert!(session.set_panel_property(PropId::Snap, PropValue::Bool(true)));
         place_shape(&mut session, [10.0, 10.0], [50.0, 30.0], false);
@@ -5525,7 +5567,7 @@ mod tests {
 
     #[test]
     fn a_drag_that_does_not_move_adds_nothing() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Ellipse);
         let roots = session.active_storyboard().root_len();
         place_shape(&mut session, [12.0, 18.0], [12.0, 18.0], false);
@@ -5536,7 +5578,7 @@ mod tests {
 
     #[test]
     fn the_eraser_does_not_change_a_shape() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         place_shape(&mut session, [0.0, 0.0], [100.0, 80.0], false);
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -5552,7 +5594,7 @@ mod tests {
 
     #[test]
     fn undo_removes_a_new_shape() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Line);
         place_shape(&mut session, [0.0, 0.0], [80.0, 10.0], false);
         assert_eq!(session.active_storyboard().root_len(), 2);
@@ -5573,7 +5615,7 @@ mod tests {
 
     #[test]
     fn an_empty_text_commit_leaves_no_object_and_no_history() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         let roots = session.active_storyboard().root_len();
         place_text(&mut session, [10.0, 20.0], [10.0, 20.0], false, "");
@@ -5584,7 +5626,7 @@ mod tests {
 
     #[test]
     fn a_committed_text_object_is_one_undo_step() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         let roots = session.active_storyboard().root_len();
         place_text(&mut session, [10.0, 20.0], [10.0, 20.0], false, "Hi");
@@ -5601,7 +5643,7 @@ mod tests {
 
     #[test]
     fn a_text_drag_stores_a_width_and_turns_auto_size_off() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         place_text(&mut session, [10.0, 20.0], [90.0, 25.0], true, "Wide");
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -5612,7 +5654,7 @@ mod tests {
 
     #[test]
     fn the_eraser_does_not_change_text() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         place_text(&mut session, [10.0, 20.0], [10.0, 20.0], false, "Letters");
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -5629,7 +5671,7 @@ mod tests {
 
     #[test]
     fn a_later_tool_edit_does_not_change_committed_text() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         place_text(&mut session, [4.0, 8.0], [4.0, 8.0], false, "Stay");
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -5645,7 +5687,7 @@ mod tests {
 
     #[test]
     fn emptying_existing_text_is_one_undo_step() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         place_text(&mut session, [10.0, 20.0], [10.0, 20.0], false, "Hi");
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -5672,7 +5714,7 @@ mod tests {
 
     #[test]
     fn the_size_slider_sets_the_next_stroke_and_never_resizes_old_ones() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let samples = line(0.0, 240.0, 0.0, 8.0, None);
         commit_samples(&mut session, &samples);
         let locked = session.stroke_ids()[0];
@@ -5733,7 +5775,7 @@ mod tests {
 
     #[test]
     fn a_brush_color_added_later_adds_its_layer_with_the_stroke() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let canvas = session.highlighted_id().unwrap();
         let layers = session.active_storyboard().palette_len(canvas).unwrap();
         let black = session.swatches()[0].id;
@@ -5774,7 +5816,7 @@ mod tests {
 
     #[test]
     fn each_tool_shows_its_own_palette_and_objects_copy_it() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         assert_eq!(session.swatches().len(), 9);
         session.set_tool(Tool::Eraser);
         assert!(session.swatches().is_empty());
@@ -5863,7 +5905,7 @@ mod tests {
 
     #[test]
     fn a_selected_shapes_palette_opens_its_colors_as_undo_steps() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         place_shape(&mut session, [0.0, 0.0], [40.0, 30.0], false);
         let shape = session.active_storyboard().root_at(0).unwrap();
@@ -5898,7 +5940,7 @@ mod tests {
 
     #[test]
     fn editing_text_in_place_shows_and_edits_that_object() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         place_text(&mut session, [10.0, 20.0], [10.0, 20.0], false, "Hi");
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -5931,7 +5973,7 @@ mod tests {
 
     #[test]
     fn properties_opens_a_page_and_every_color_has_visible() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         assert!(!session.panel_open(), "the panel starts closed");
 
         // A tool's page has no Palette: its colors are its swatches.
@@ -5972,7 +6014,7 @@ mod tests {
 
     #[test]
     fn properties_opens_an_objects_page_and_a_canvas_lists_its_layers() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         place_shape(&mut session, [0.0, 0.0], [40.0, 30.0], false);
         session.set_tool(Tool::Text);
@@ -6021,7 +6063,7 @@ mod tests {
 
     #[test]
     fn a_color_page_goes_back_where_it_came_from_and_the_box_takes_right_clicks() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Rectangle);
         place_shape(&mut session, [0.0, 0.0], [100.0, 80.0], false);
         session.set_tool(Tool::Select);
@@ -6070,7 +6112,7 @@ mod tests {
 
     #[test]
     fn the_selection_follows_what_was_made_last_and_the_brush_keeps_its_canvas() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let canvas = session.highlighted_id().unwrap();
         commit_samples(&mut session, &line(0.0, 80.0, 0.0, 8.0, None));
         assert_eq!(session.selection(), vec![canvas]);
@@ -6107,7 +6149,7 @@ mod tests {
 
     #[test]
     fn the_text_tools_bar_changes_the_text_it_is_working_on() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         place_text(&mut session, [0.0, 0.0], [0.0, 0.0], false, "Hello");
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -6155,7 +6197,7 @@ mod tests {
 
     #[test]
     fn the_text_tools_bar_sets_up_the_next_text() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         let undo_len = session.undo_len();
         assert!(session.set_bar_value(PropId::Align, PropValue::Index(3), true));
@@ -6199,7 +6241,7 @@ mod tests {
 
     #[test]
     fn a_side_handle_sets_texts_width_and_an_end_its_height_in_one_step() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_tool(Tool::Text);
         place_text(&mut session, [10.0, 0.0], [10.0, 0.0], false, "Hello there");
         let id = session.active_storyboard().root_at(0).unwrap();
@@ -6268,7 +6310,7 @@ mod tests {
 
     #[test]
     fn a_second_paste_is_thirty_two_units_from_the_source() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let source = session.selection()[0];
         assert_eq!(translation_of(&session, source), [0.0, 0.0]);
         let undo_len = session.undo_len();
@@ -6293,7 +6335,7 @@ mod tests {
 
     #[test]
     fn a_pasted_canvas_keeps_samples_and_erasures_under_new_ids() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_size(32).unwrap();
         commit_samples(&mut session, &line(0.0, 80.0, 0.0, 8.0, Some(1.0)));
         let canvas = session.selection()[0];
@@ -6352,7 +6394,7 @@ mod tests {
 
     #[test]
     fn a_cut_is_one_undo_step_and_undo_leaves_the_clipboard() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let source = session.selection()[0];
         let undo_len = session.undo_len();
         session.perform(CommandId::Cut, [1.0, 1.0]);
@@ -6372,7 +6414,7 @@ mod tests {
 
     #[test]
     fn paste_with_an_empty_clipboard_adds_nothing() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let roots = session.active_storyboard().root_len();
         let undo_len = session.undo_len();
         let selection = session.selection();
@@ -6385,9 +6427,9 @@ mod tests {
 
     #[test]
     fn a_selected_group_copied_with_a_selected_child_pastes_the_child_once() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let first = session.selection()[0];
-        session.perform(CommandId::NewCanvas, [1.0, 1.0]);
+        session.add_canvas();
         session.select_click(first, true);
         session.perform(CommandId::Group, [1.0, 1.0]);
         let group = session.selection()[0];
@@ -6411,7 +6453,7 @@ mod tests {
 
     #[test]
     fn a_locked_object_is_not_deleted_by_cut() {
-        let mut session = Session::new();
+        let mut session = drawing_session();
         let canvas = session.selection()[0];
         assert!(session.toggle_node(canvas, PropId::Locked));
         let undo_len = session.undo_len();
@@ -6470,7 +6512,7 @@ mod tests {
     #[test]
     fn a_storyboard_round_trips_through_smx() {
         let dir = temp_store("round");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         session.set_size(7).unwrap();
         commit_samples(&mut session, &line(0.0, 80.0, 0.0, 8.0, Some(1.0)));
@@ -6524,7 +6566,7 @@ mod tests {
 
         let text_file = std::fs::read_to_string(&path).unwrap();
         let stored: serde_json::Value = serde_json::from_str(&text_file).unwrap();
-        assert_eq!(stored["format_version"], 1);
+        assert_eq!(stored["format_version"], 2);
         assert_eq!(stored["id"], storyboard_id.get());
         assert_eq!(stored["name"], "Round");
         forbid_stored_keys(&stored);
@@ -6548,6 +6590,7 @@ mod tests {
         assert_eq!(opened.undo_len(), 0);
         assert_eq!(opened.redo_len(), 0);
         assert!(!opened.command_enabled(CommandId::Paste));
+        enter_first_clip(&mut opened);
         assert!((opened.zoom() - zoom).abs() < 1e-9);
         let opened_origin = opened.camera_origin();
         assert!((opened_origin[0] - origin[0]).abs() < 1e-9);
@@ -6580,13 +6623,11 @@ mod tests {
             2
         );
 
-        let max_node = layers.iter().map(|row| row.id.get()).max().unwrap();
+        // Every stroke goes to the drawing's one canvas, with an id of its own.
         let roots = opened.active_storyboard().root_len();
         opened.set_tool(Tool::Brush);
         commit_samples(&mut opened, &line(0.0, 40.0, 200.0, 10.0, None));
-        assert_eq!(opened.active_storyboard().root_len(), roots + 1);
-        let made = opened.highlighted_id().expect("the new stroke's canvas");
-        assert!(made.get() > max_node);
+        assert_eq!(opened.active_storyboard().root_len(), roots);
         assert!(opened.stroke_ids().iter().any(|id| id.get() > stroke.get()));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -6595,7 +6636,7 @@ mod tests {
     #[test]
     fn save_overwrites_its_file_and_a_failed_write_keeps_it() {
         let dir = temp_store("overwrite");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 30.0, 0.0, 10.0, None));
         let id = session.active_id();
@@ -6646,7 +6687,7 @@ mod tests {
     fn save_a_copy_leaves_the_path_and_an_open_path_focuses() {
         let dir = temp_store("copy");
         let drawings = drawings(&dir);
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         let home = session.dialog_directory();
         commit_samples(&mut session, &line(0.0, 20.0, 0.0, 10.0, None));
@@ -6709,9 +6750,10 @@ mod tests {
         assert!(opened.open_path(&original));
         assert_eq!(opened.storyboard_count(), tabs);
         assert_eq!(opened.active_id(), stroke_tab);
-        assert_eq!(opened.stroke_count(), 1);
         assert!(opened.selection().is_empty());
         assert!(opened.highlighted_id().is_none());
+        enter_first_clip(&mut opened);
+        assert_eq!(opened.stroke_count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6719,7 +6761,7 @@ mod tests {
     fn replacing_another_file_asks_and_the_storyboard_file_does_not() {
         let dir = temp_store("replace");
         let drawings = drawings(&dir);
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 16.0, 0.0, 8.0, None));
         let id = session.active_id();
@@ -6758,7 +6800,7 @@ mod tests {
     #[test]
     fn recovery_does_not_change_the_smx_until_save_or_discard() {
         let dir = temp_store("recovery");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 24.0, 0.0, 8.0, None));
         let id = session.active_id();
@@ -6803,7 +6845,7 @@ mod tests {
         assert!(!recovery.exists(), "Discard left the recovery file");
         assert_eq!(std::fs::read(&path).unwrap(), after_save);
 
-        let mut again = Session::new();
+        let mut again = drawing_session();
         again.set_data_dir(&dir);
         commit_samples(&mut again, &line(0.0, 20.0, 0.0, 8.0, None));
         let again_id = again.active_id();
@@ -6829,6 +6871,7 @@ mod tests {
         );
         assert!(restored.selection().is_empty());
         assert!(restored.highlighted_id().is_none());
+        enter_first_clip(&mut restored);
         assert_eq!(restored.stroke_count(), 2);
         assert_eq!(std::fs::read(&again_path).unwrap(), untouched);
         assert_eq!(
@@ -6847,11 +6890,12 @@ mod tests {
     #[test]
     fn several_recoveries_are_taken_one_at_a_time() {
         let dir = temp_store("offers");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 16.0, 0.0, 8.0, None));
         let first = session.active_id();
         session.new_storyboard();
+        enter_new_clip(&mut session);
         commit_samples(&mut session, &line(0.0, 16.0, 10.0, 8.0, None));
         let second = session.active_id();
         session.recovery_tick();
@@ -6904,7 +6948,7 @@ mod tests {
     #[test]
     fn an_emergency_write_covers_each_dirty_storyboard() {
         let dir = temp_store("panic");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 12.0, 0.0, 6.0, None));
         let dirty = session.active_id();
@@ -6941,7 +6985,7 @@ mod tests {
         std::fs::write(dir.join("recovery").join("9.json"), b"{").unwrap();
         let bad = drawings(&dir).join("bad.smx");
         std::fs::write(&bad, b"{").unwrap();
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         assert!(session.recovery_offers().is_empty());
         assert!(session.command_enabled(CommandId::Open));
@@ -6975,7 +7019,7 @@ mod tests {
             std::fs::read(drawings(&dir).join("kept.smx")).unwrap(),
         )
         .unwrap();
-        let mut later = Session::new();
+        let mut later = drawing_session();
         later.set_data_dir(&dir);
         assert!(
             later
@@ -6991,7 +7035,7 @@ mod tests {
     #[test]
     fn a_second_file_does_not_alias_live_ids() {
         let dir = temp_store("alias");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 20.0, 0.0, 8.0, None));
         let source = session
@@ -7024,6 +7068,7 @@ mod tests {
         assert_ne!(session.active_id(), original);
         assert!(session.selection().is_empty());
         assert!(session.highlighted_id().is_none());
+        enter_first_clip(&mut session);
         let copied_canvas = session
             .layers()
             .iter()
@@ -7050,7 +7095,7 @@ mod tests {
     fn recent_paths_keep_the_last_ten_and_skip_missing() {
         let dir = temp_store("recent");
         let drawings = drawings(&dir);
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         let mut paths = Vec::new();
         for index in 0..11 {
@@ -7087,7 +7132,7 @@ mod tests {
         assert!(stored.contains(&paths[10]));
         assert!(stored.contains(&paths[5]));
         assert!(!session.recent_menu().iter().any(|path| path == &paths[5]));
-        let mut reloaded = Session::new();
+        let mut reloaded = drawing_session();
         reloaded.set_data_dir(&dir);
         reloaded.set_recent(stored);
         assert_eq!(reloaded.recent_menu()[0], paths[10]);
@@ -7098,7 +7143,7 @@ mod tests {
     #[test]
     fn save_stores_words_still_being_typed() {
         let dir = temp_store("draft");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         session.set_tool(Tool::Text);
         session.begin_text([10.0, 20.0]).unwrap();
@@ -7117,20 +7162,21 @@ mod tests {
         let mut opened = Session::new();
         opened.set_data_dir(&dir);
         assert!(opened.open_initial(&path));
+        assert!(opened.selection().is_empty());
+        assert!(opened.highlighted_id().is_none());
+        enter_first_clip(&mut opened);
         let text = opened.active_storyboard().root_at(0).unwrap();
         assert_eq!(
             opened.active_storyboard().text_content(text).as_deref(),
             Some("Hello")
         );
-        assert!(opened.selection().is_empty());
-        assert!(opened.highlighted_id().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn opening_a_storyboard_keeps_its_camera_through_the_first_view() {
         let dir = temp_store("camera");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         session.pan_screen([80.0, -30.0]);
         let origin = session.camera_origin();
@@ -7143,6 +7189,7 @@ mod tests {
         let mut opened = Session::new();
         opened.set_data_dir(&dir);
         assert!(opened.open_initial(&path));
+        enter_first_clip(&mut opened);
         opened.present_view([1000.0, 800.0]);
         assert_eq!(opened.camera_origin(), origin);
         assert_eq!(opened.zoom(), zoom);
@@ -7156,7 +7203,7 @@ mod tests {
     #[test]
     fn a_new_blank_does_not_replace_a_recovery_offer() {
         let dir = temp_store("offer-id");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         commit_samples(&mut session, &line(0.0, 16.0, 0.0, 6.0, None));
         session.set_data_dir(&dir);
         assert_eq!(session.active_id().get(), 1);
@@ -7203,7 +7250,7 @@ mod tests {
     #[test]
     fn restoring_an_open_path_replaces_that_tab() {
         let dir = temp_store("replace-tab");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 18.0, 0.0, 6.0, None));
         let path = drawings(&dir).join("notes.smx");
@@ -7240,6 +7287,7 @@ mod tests {
             })
             .count();
         assert_eq!(aimed, 1);
+        enter_first_clip(&mut opened);
         assert_eq!(opened.stroke_count(), 2);
         assert!(opened.tabs().iter().any(|tab| tab.needs_keep));
         assert!(recovery.is_file(), "restore deleted the recovery file");
@@ -7250,7 +7298,7 @@ mod tests {
     #[test]
     fn words_still_being_typed_are_recovered_and_block_quit() {
         let dir = temp_store("draft-recovery");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 12.0, 0.0, 4.0, None));
         let id = session.active_id();
@@ -7286,7 +7334,7 @@ mod tests {
     #[test]
     fn a_failed_recovery_write_does_not_skip_the_interval() {
         let dir = temp_store("retry");
-        let mut session = Session::new();
+        let mut session = drawing_session();
         session.set_data_dir(&dir);
         commit_samples(&mut session, &line(0.0, 14.0, 0.0, 5.0, None));
         let id = session.active_id();

@@ -766,7 +766,10 @@ impl eframe::App for HostWindow {
                         self.shell(ui, &ctx, app, tab.clone(), dismissing, &mut chosen, &mut sent);
                     });
                 } else {
-                    self.viewport = hidden_viewport(full, self.settings.chat_width, self.panel_width(app, tab.as_deref()));
+                    let timeline = tab.as_ref().is_some_and(|tab| {
+                        self.apps.get(app).is_some_and(|started| started.running.declared.timelines.contains_key(tab))
+                    });
+                    self.viewport = hidden_viewport(full, self.settings.chat_width, self.panel_width(app, tab.as_deref()), timeline);
                 }
                 let edge = if workspace_open { chat_rect.right() } else { full.right() };
                 if workspace_open {
@@ -1940,13 +1943,22 @@ const CELL_MENU_W: f32 = 236.0;
 const BAR_GRAY: Color32 = Color32::from_rgb(186, 188, 192);
 
 /// The contents size the workspace would have if it were shown: the window
-/// minus the conversation column, this chrome, and an open properties panel.
-fn hidden_viewport(window: Rect, chosen: Option<f32>, panel: f32) -> [f64; 2] {
+/// minus the conversation column, this chrome, an open properties panel,
+/// and a docked timeline.
+fn hidden_viewport(window: Rect, chosen: Option<f32>, panel: f32, timeline: bool) -> [f64; 2] {
     let column = chat::width(window.width(), chosen);
     let shell_w = (window.width() - column).max(0.0);
     let width = (shell_w - panel).max(0.0);
-    let height = (window.height() - WORKSPACE_CHROME).max(0.0);
+    let mut height = (window.height() - WORKSPACE_CHROME).max(0.0);
+    if timeline {
+        height -= docked_timeline(height);
+    }
     [f64::from(width), f64::from(height)]
+}
+
+/// How much of the contents' height a docked timeline takes, shown or hidden alike.
+fn docked_timeline(height: f32) -> f32 {
+    crate::timeline::HEIGHT.min(height / 2.0)
 }
 
 impl HostWindow {
@@ -2176,10 +2188,7 @@ impl HostWindow {
             .get(app)
             .and_then(|started| started.running.declared.timelines.get(&tab).cloned());
         let rect = match &timeline {
-            Some(_) => {
-                let height = crate::timeline::HEIGHT.min(whole.height() / 2.0);
-                Rect::from_min_max(whole.min, egui::pos2(whole.right(), whole.bottom() - height))
-            }
+            Some(_) => Rect::from_min_max(whole.min, egui::pos2(whole.right(), whole.bottom() - docked_timeline(whole.height()))),
             None => whole,
         };
         self.viewport = [f64::from(rect.width()), f64::from(rect.height())];
@@ -2514,6 +2523,7 @@ impl HostWindow {
             };
             let declared = &mut started.running.declared;
             let canvas = declared.canvas.as_ref().filter(|canvas| canvas.tab == tab);
+            let stage = declared.stages.get(tab);
             let Some(display) = declared.documents.get_mut(tab) else {
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.rect_filled(rect, 0.0, CANVAS);
@@ -2533,7 +2543,7 @@ impl HostWindow {
                     self.surface.escape(&mut doc);
                 }
             }
-            self.surface.show(ui, &mut doc, rect, dismissing);
+            self.surface.show(ui, &mut doc, rect, dismissing, stage);
         }
         for message in out {
             self.send(app, message);

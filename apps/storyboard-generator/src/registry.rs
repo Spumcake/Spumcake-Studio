@@ -38,7 +38,6 @@ pub enum CommandId {
     Fit,
     ZoomToSelection,
     Maximize,
-    NewCanvas,
     Group,
     Ungroup,
     BringForward,
@@ -455,7 +454,6 @@ const ZOOM_OUT: &[Chord] = &[Chord::ctrl_any_shift(Key::Minus)];
 const FIT: &[Chord] = &[Chord::ctrl(Key::Digit0)];
 const ZOOM_SELECTION: &[Chord] = &[Chord::shift(Key::Digit2)];
 const MAXIMIZE: &[Chord] = &[];
-const NEW_CANVAS: &[Chord] = &[Chord::ctrl_shift(Key::N)];
 const GROUP: &[Chord] = &[Chord::ctrl(Key::G)];
 const UNGROUP: &[Chord] = &[Chord::ctrl_shift(Key::G)];
 const FORWARD: &[Chord] = &[Chord::ctrl(Key::BracketRight)];
@@ -646,14 +644,6 @@ pub fn commands() -> &'static [CommandDef] {
             toggle_icon: Some("reduce"),
         },
         CommandDef {
-            id: CommandId::NewCanvas,
-            label: "New canvas",
-            icon: "plus-circle",
-            shortcuts: NEW_CANVAS,
-            enable: Enable::Waiting,
-            toggle_icon: None,
-        },
-        CommandDef {
             id: CommandId::Group,
             label: "Group",
             icon: "exclude",
@@ -811,15 +801,10 @@ pub fn file_commands() -> &'static [CommandId] {
     &[CommandId::NewStoryboard, CommandId::Open, CommandId::Save]
 }
 
-/// Before the tools, to the brush's left: the brush draws on a canvas, and
-/// this makes one.
 /// Icons the Iconoir pack does not have, drawn by the toolbar in Iconoir's
 /// style instead of taken from the font.
 pub const DRAWN_ICONS: &[&str] = &["brush"];
 
-pub fn canvas_commands() -> &'static [CommandId] {
-    &[CommandId::NewCanvas]
-}
 
 /// What a right-click menu can do: on a tool, a swatch, or an outliner row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -873,10 +858,6 @@ pub fn role_menu() -> &'static [MenuActionDef] {
 /// The menu on a canvas's row in the outliner.
 pub fn canvas_row_menu() -> &'static [MenuActionDef] {
     &[
-        MenuActionDef {
-            action: MenuAction::Rename,
-            label: "Rename canvas",
-        },
         MenuActionDef {
             action: MenuAction::MakePaletteDefault,
             label: "Make palette default",
