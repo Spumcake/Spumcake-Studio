@@ -8,5 +8,5 @@ pub mod registry;
 pub mod schema;
 pub mod serve;
 pub mod session;
-pub mod skills;
+pub mod tools;
 pub mod store;

@@ -1,6 +1,6 @@
 # Template — sub-application
 
-The smallest correct Spumcake Studio sub-application. It reports one tab named Template, declares the shared grid and the properties panel on the right, and provides the assistant one skill, which renames that tab. Started with `--restore`, it opens its tab only when the host sends `open`. It does nothing else. The **scaffolding** skill in `skills/scaffolding/` copies this folder to start every new sub-application, so keep it minimal and working.
+The smallest correct Spumcake Studio sub-application. It reports one tab named Template, declares the shared grid and the properties panel on the right, and offers the assistant one tool group, whose one tool renames that tab. Started with `--restore`, it opens its tab only when the host sends `open`. It does nothing else. The **scaffolding** skill in `skills/scaffolding/` copies this folder to start every new sub-application, so keep it minimal and working.
 
 ## Rules for this sub-application
 

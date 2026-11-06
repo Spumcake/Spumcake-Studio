@@ -144,7 +144,7 @@ impl Session {
             });
         }
         // No skills yet: the assistant reading or changing a recipe comes later.
-        messages.push(AppMessage::Skills { skills: Vec::new() });
+        messages.push(AppMessage::Tools { groups: Vec::new() });
         messages.push(AppMessage::End);
         if let Some(recipe) = self.recipes.first() {
             // A new recipe's first cell, so the host draws it at once.
@@ -206,7 +206,10 @@ impl Session {
                 state,
                 output,
                 error,
-            } => self.finish(&tab, &cell, Run { input, endpoint, model, effort, state, output, error }, &mut out),
+                settings,
+                used,
+                ..
+            } => self.finish(&tab, &cell, Run { input, endpoint, model, effort, state, output, error, settings, used }, &mut out),
             HostMessage::InsertCell { tab, index, cell } => self.insert(&tab, index, cell, &mut out),
             HostMessage::SelectCell { tab, cell } => self.select(&tab, &cell, &mut out),
             HostMessage::SetVersion { tab, cell, index } => self.set_version(&tab, &cell, index, &mut out),
@@ -217,6 +220,9 @@ impl Session {
                 id,
                 yours: claims(Path::new(&path)) && self.in_project(Path::new(&path)),
             }),
+            // Items come with the lifecycle's recipe work.
+            HostMessage::Render { id, .. } => out.push(protocol::no_items(id)),
+            HostMessage::Provided { .. } | HostMessage::Stale { .. } | HostMessage::Picked { .. } => {}
             HostMessage::Invoke { call, .. } => out.extend(self.invoke(call)),
             HostMessage::Keep { tab } => {
                 let kept = match self.recipes.iter().position(|recipe| recipe.id == tab) {
@@ -636,6 +642,8 @@ impl Session {
                 state: run.state,
                 error: run.error,
                 time: now(),
+                settings: run.settings,
+                used: run.used,
             });
             recipe.dirty = true;
             return;
@@ -654,6 +662,8 @@ impl Session {
                 state: run.state,
                 error: run.error,
                 time: now(),
+                settings: run.settings,
+                used: run.used,
             });
             cell.versions = runs.clone();
             cell.current = Some(cell.versions.len() - 1);
@@ -714,6 +724,8 @@ impl Session {
         out.push(AppMessage::RunCell {
             tab: recipe.id.clone(),
             cell: id,
+            content: None,
+            at: None,
         });
     }
 
@@ -1093,6 +1105,8 @@ struct Run {
     state: CellState,
     output: Vec<CellPart>,
     error: Option<String>,
+    settings: Option<serde_json::Value>,
+    used: Vec<protocol::UsedItem>,
 }
 
 fn now() -> u64 {
@@ -1314,6 +1328,8 @@ pub fn read_recipe(path: &Path) -> Result<Read, String> {
                         state: cell.state,
                         error: cell.error.clone(),
                         time: 0,
+                        settings: cell.settings.clone(),
+                        used: Vec::new(),
                     });
                     cell.current = Some(0);
                 }
@@ -1419,6 +1435,9 @@ mod tests {
             state: CellState::Done,
             output: text(result),
             error: None,
+            settings: None,
+            used: Vec::new(),
+            at: None,
         })
     }
 
@@ -1504,6 +1523,9 @@ mod tests {
             state: CellState::Done,
             output: Vec::new(),
             error: None,
+            settings: None,
+            used: Vec::new(),
+            at: None,
         }));
         assert_eq!((cells[1].state, cells[1].versions.len()), (CellState::Done, 0));
         let (cells, _) = last_cells(&session.handle(HostMessage::ShowSource { tab: "1".into(), cell: notes.clone() }));

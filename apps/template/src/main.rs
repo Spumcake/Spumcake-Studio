@@ -1,5 +1,5 @@
 use protocol::{
-    AppMessage, ContentsKind, HostMessage, PanelSide, Skill, TabEntry, Tabs, Tool, ToolResult,
+    AppMessage, ContentsKind, HostMessage, PanelSide, ToolGroup, TabEntry, Tabs, Tool, ToolResult,
 };
 use serde_json::json;
 use std::io::{BufRead, Write};
@@ -22,7 +22,7 @@ fn main() {
         });
         greeting.extend(declare_tab());
     }
-    greeting.push(AppMessage::Skills { skills: skills() });
+    greeting.push(AppMessage::Tools { groups: tool_groups() });
     greeting.push(AppMessage::End);
     send(&greeting);
 
@@ -46,6 +46,7 @@ fn main() {
             Ok(HostMessage::Claim { id, .. }) => {
                 vec![AppMessage::Claimed { id, yours: false }]
             }
+            Ok(HostMessage::Render { id, .. }) => vec![protocol::no_items(id)],
             // The one tab, declared as the greeting declares it, then listed.
             Ok(HostMessage::Open { .. }) if !open => {
                 open = true;
@@ -107,8 +108,8 @@ fn tabs(label: &str) -> AppMessage {
 }
 
 /// What the assistant can do here: rename the tab.
-fn skills() -> Vec<Skill> {
-    vec![Skill {
+fn tool_groups() -> Vec<ToolGroup> {
+    vec![ToolGroup {
         id: "tab".to_string(),
         name: "Tab name".to_string(),
         description: "Rename this application's tab.".to_string(),
@@ -123,6 +124,7 @@ fn skills() -> Vec<Skill> {
                 "required": ["label"],
                 "additionalProperties": false,
             }),
+            implements: Vec::new(),
         }],
     }]
 }

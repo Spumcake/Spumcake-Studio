@@ -16,7 +16,7 @@ echo '{"type":"hello","protocol":1}'
 echo '{"type":"tab","id":"s1","label":"Slate"}'
 echo '{"type":"contents","tab":"s1","kind":"cells"}'
 echo '{"type":"end"}'
-echo '{"type":"skills","skills":[{"id":"slate","name":"Slate","description":"Keeps one slate.","instructions":"Mark the slate.","tools":[{"name":"mark","description":"Mark it.","input":{"type":"object","properties":{"mark":{"type":"string"}},"required":["mark"]}}]}]}'
+echo '{"type":"tools","groups":[{"id":"slate","name":"Slate","description":"Keeps one slate.","instructions":"Mark the slate.","tools":[{"name":"mark","description":"Mark it.","input":{"type":"object","properties":{"mark":{"type":"string"}},"required":["mark"]}}]}]}'
 echo '{"type":"tabs","tabs":[{"id":"s1","label":"Slate","saves":true}],"active":"s1"}'
 echo '{"type":"cells","tab":"s1","cells":[{"id":"slate-1","kind":"text","input":[{"text":"A slate line."}],"state":"idle"}],"selected":"slate-1"}'
 while IFS= read -r line; do

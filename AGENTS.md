@@ -7,24 +7,26 @@ The stack is Rust, egui through eframe, and Iconoir icons.
 ## Layout
 
 - `host/` — the `inpainter` program: the window, the session's conversation and the session menu (`sessions.rs`), the shell's common UI (tab strip, menu button, toolbar) shown when the workspace is open, the projects and their sessions (`workspace.rs`, `window/flows.rs`), the routing of the assistant's tool calls to sub-applications, the shared components a sub-application can declare (the properties panel with its outliner, the grid, the drawing surface, and cells), the questions and file dialogs a sub-application asks for, and finding and running sub-applications. It draws every toolbar item, menu row, panel row, tab, and cell from what was declared, and sends back the action each control carries. It runs every cell. It never depends on a sub-application.
-- `protocol/` — the contract between the host and sub-applications: the messages, one JSON object per line, the declarations, the cell, the skills a sub-application provides to the assistant, and the manifest.
-- `assistant/` — the assistant: the conversation, the agent loop, and the client for OpenRouter and OpenAI-compatible endpoints. The host tells it the endpoint, key, and Discussion prompt with `Configure`, and each request carries its model and effort. It runs on its own thread, and the host talks to it through the types in `assistant/src/lib.rs`. A chat answer can arrive in parts. It knows no sub-application, skill, or tool by name; everything it offers the model comes from declared skills, including the one tool the host declares.
+- `protocol/` — the contract between the host and sub-applications: the messages, one JSON object per line, the declarations, the cell, the tool groups a sub-application offers the assistant, items and what each was made from (`protocol/src/items.rs`), and the manifest.
+- `assistant/` — the assistant: the conversation, the agent loop, and the client for OpenRouter and OpenAI-compatible endpoints. The host tells it the endpoint, key, and Discussion prompt with `Configure`, and each request carries its model and effort. It runs on its own thread, and the host talks to it through the types in `assistant/src/lib.rs`. A chat answer can arrive in parts. It knows no sub-application, tool group, or tool by name; everything it offers the model comes from declared tool groups, including the host's own.
 - `draw/` — the shared document model of the drawing surface: documents, steps, ink, text, the camera, and gestures. The host draws and previews with it; a sub-application that owns such documents commits and records with it. It has no session, history, registry, store, or preferences.
 - `apps/<id>/` — one sub-application per folder: its crate, its `manifest.json`, and its own `AGENTS.md`. It depends on `protocol`, and on `draw` when it uses the drawing surface, never on the host or another sub-application.
 - `apps/template/` — the smallest correct sub-application, hidden from people. New ones are copied from it.
 - `apps/storyboard-generator/` — the Storyboard Generator: storyboards drawn on canvases.
 - `apps/recipe-creation/` — Recipe Creation: recipes, lists of cells. It stores cells and declares them. The host draws and runs them.
+- `apps/video-generator/` — the Video Generator: shots, to come; a scaffold copied from the template, which the Image and Video role session fills.
 - `apps/image-generator/` — the Image Generator: layered images. It owns every pixel, layer, and step of history, composites the image, and declares a raster tab; the host draws it, previews strokes, and sends gestures. Its `.ipx` format is in its own AGENTS.md.
 - `.project/scripts/check.sh` — the one check to run before calling work done (see Working rules).
-- `client/` — `storyboard-client`, the no-host check: it drives `storyboard-generator` through the protocol alone, including every skill tool, one undo per request, and `open` and `keep`, and compares every reply with an in-process session. Its coverage check fails when a hand action that changes a storyboard has no tool.
+- `client/` — `storyboard-client`, the no-host check: it drives `storyboard-generator` through the protocol alone, including every tool, one undo per request, and `open` and `keep`, and compares every reply with an in-process session. Its coverage check fails when a hand action that changes a storyboard has no tool.
 
 ## Rules
 
 - Every name a person reads, and the word for each thing in code, documents, and the assistant's tools, comes from Studio's conventions guide in the team repository, `.project/projects/spumcake-studio/documents/guides/conventions-guide.md`. A new name goes into the guide, with the owner's yes, before it is built. `host/tests/conventions.rs` holds the code to it.
-- The host and the assistant know sub-applications only through their manifests and the protocol. Do not put a sub-application's name, label, tool, skill, or rule in either.
+- The host and the assistant know sub-applications only through their manifests and the protocol. Do not put a sub-application's name, label, tool group, tool, or rule in either.
 - Every sub-application runs with no host, driven only through the protocol.
 - A change to the protocol updates the **scaffolding** skill in the same commit.
-- A skill is an agent skill, a `SKILL.md`. A workspace's tools are tools, never skills. The protocol still calls the groups of tools a sub-application declares `skills`, which predates the conventions guide's hierarchy of 2026-11-04; renaming them to tools is planned. Do not add new uses of the old sense.
+- A skill is an agent skill, a `SKILL.md`. A workspace's tools are tools, never skills. A sub-application declares its tools in tool groups, with `tools`; before 2026-11-05 that message was `skills`, a stored spelling the protocol still reads. Do not add new uses of the old sense.
+- The full lifecycle's shared contract, the lifecycle's `systems.md` in the team repository, says who owns what while the role sessions build it: items, fingerprints, `render`, `need`, `stale`, `pick`, and cells in any workspace.
 
 ## Working rules for agents
 
@@ -45,7 +47,7 @@ Developer skills for working on this code are in `skills/`, one folder each with
 
 - `skills/scaffolding/` — when a task creates a new sub-application, or brings an existing program into Spumcake Studio as one.
 
-These are for agents developing Spumcake Studio. They are not the assistant skills a sub-application declares to Studio's assistant through the protocol.
+These are for agents developing Spumcake Studio. They are not the tool groups a sub-application declares to Studio's assistant through the protocol, nor the agent skills Studio's assistant loads.
 
 ## Commands
 

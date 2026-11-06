@@ -1,4 +1,4 @@
-//! The assistant's "Image Generator" skill: it sees the tab's images and
+//! The assistant's "Image Generator" tool group: it sees the tab's images and
 //! their layers, arranges the gallery, and manages the shown image's
 //! layers, texts, masks, and adjustments. Painting, cloning, healing, and
 //! moving pixels stay the person's. Each call goes through the same changes
@@ -11,13 +11,13 @@ use crate::files;
 use crate::gallery::Gallery;
 use crate::layered::{Curves, Grade, Kind};
 use crate::text::Style;
-use protocol::{AppMessage, Skill, Tool, ToolResult};
+use protocol::{AppMessage, ToolGroup, Tool, ToolResult};
 use serde_json::{Value, json};
 
 /// The longest side of the image the assistant looks at.
 const LOOK_SIZE: u32 = 1024;
 
-pub fn skills() -> Vec<Skill> {
+pub fn tool_groups() -> Vec<ToolGroup> {
     let layer = json!({"type": "integer", "description": "The layer's or group's id, from list_layers."});
     let image = json!({"type": "integer", "minimum": 0, "description": "The image's position on the filmstrip, from list_images, 0 being the first."});
     let style = json!({
@@ -46,7 +46,7 @@ pub fn skills() -> Vec<Skill> {
             "additionalProperties": false,
         })
     };
-    vec![Skill {
+    vec![ToolGroup {
         id: "image".into(),
         name: "Image Generator".into(),
         description: "See the images in an Image Generator tab's gallery, arrange them on its filmstrip (show, add, duplicate, rename, reorder, and remove images), and manage the shown image's layers: add, rename, hide or show, reorder, and delete them; add and set texts, masks, and Curves and Color Grade adjustments.".into(),
@@ -56,16 +56,19 @@ pub fn skills() -> Vec<Skill> {
                 name: "look".into(),
                 description: "See an image as it is composited now, scaled down to at most 1024 pixels on its longer side: the shown one, or another.".into(),
                 input: object(json!({"image": {"type": "integer", "minimum": 0, "description": "The image's position, from list_images. Leave out for the image shown."}}), &[]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "list_images".into(),
                 description: "List the gallery's images in filmstrip order, with each one's position, name, size, and number of layers, and which is shown.".into(),
                 input: object(json!({}), &[]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "show_image".into(),
                 description: "Show an image, with its layers, as a click on its thumbnail does.".into(),
                 input: object(json!({"image": image}), &["image"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "add_image".into(),
@@ -74,16 +77,19 @@ pub fn skills() -> Vec<Skill> {
                     json!({"name": {"type": "string", "description": "The image's name. Leave out for \"Untitled Image\"; a name already used gets a number."}}),
                     &[],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "duplicate_image".into(),
                 description: "Copy an image, with its layers, beside it, named \"… copy\", and show the copy. Returns its position and name.".into(),
                 input: object(json!({"image": image}), &["image"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "rename_image".into(),
                 description: "Rename an image.".into(),
                 input: object(json!({"image": image, "name": {"type": "string", "description": "The new name."}}), &["image", "name"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "move_image".into(),
@@ -92,16 +98,19 @@ pub fn skills() -> Vec<Skill> {
                     json!({"image": image, "to": {"type": "integer", "minimum": 0, "description": "The image's new position, 0 being the first."}}),
                     &["image", "to"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "remove_image".into(),
                 description: "Remove an image from the gallery. The person can undo it from the filmstrip. The last image cannot be removed.".into(),
                 input: object(json!({"image": image}), &["image"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "list_layers".into(),
                 description: "List the image's size and every layer and group, top first, with ids, names, kinds, visibility, blend mode, opacity, fill, locks, masks, and each text's, curve's, or grade's settings.".into(),
                 input: object(json!({}), &[]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "add_layer".into(),
@@ -113,16 +122,19 @@ pub fn skills() -> Vec<Skill> {
                     }),
                     &["name"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "rename_layer".into(),
                 description: "Rename a layer or group.".into(),
                 input: object(json!({"layer": layer, "name": {"type": "string", "description": "The new name."}}), &["layer", "name"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "set_visible".into(),
                 description: "Show or hide a layer or group.".into(),
                 input: object(json!({"layer": layer, "visible": {"type": "boolean"}}), &["layer", "visible"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "move_layer".into(),
@@ -131,11 +143,13 @@ pub fn skills() -> Vec<Skill> {
                     json!({"layer": layer, "to": {"type": "integer", "minimum": 0, "description": "The new position among its siblings, 0 being the top."}}),
                     &["layer", "to"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "delete_layer".into(),
                 description: "Delete a layer, or a group with everything in it. The image keeps at least one layer.".into(),
                 input: object(json!({"layer": layer}), &["layer"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "add_text".into(),
@@ -150,6 +164,7 @@ pub fn skills() -> Vec<Skill> {
                     }),
                     &["text", "x", "y"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "set_text".into(),
@@ -168,11 +183,13 @@ pub fn skills() -> Vec<Skill> {
                     }),
                     &["layer"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "add_mask".into(),
                 description: "Put a white mask on a layer, text, adjustment, or group, which shows all of it. The person paints it to hide parts. Returns the mask's id.".into(),
                 input: object(json!({"layer": layer}), &["layer"]),
+                implements: Vec::new(),
             },
             Tool {
                 name: "set_mask".into(),
@@ -181,6 +198,7 @@ pub fn skills() -> Vec<Skill> {
                     json!({"layer": layer, "feather": {"type": "number", "minimum": 0, "maximum": 250}, "invert": {"type": "boolean"}}),
                     &["layer"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "add_adjustment".into(),
@@ -189,6 +207,7 @@ pub fn skills() -> Vec<Skill> {
                     json!({"kind": {"type": "string", "enum": ["curves", "grade"]}, "above": {"type": "integer", "description": "The layer to put it above. Leave out for above the active layer."}}),
                     &["kind"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "set_curves".into(),
@@ -197,6 +216,7 @@ pub fn skills() -> Vec<Skill> {
                     json!({"layer": layer, "channel": {"type": "string", "enum": ["rgb", "red", "green", "blue"]}, "points": points}),
                     &["layer", "channel", "points"],
                 ),
+                implements: Vec::new(),
             },
             Tool {
                 name: "set_grade".into(),
@@ -211,6 +231,7 @@ pub fn skills() -> Vec<Skill> {
                     }),
                     &["layer"],
                 ),
+                implements: Vec::new(),
             },
         ],
     }]
@@ -563,7 +584,7 @@ mod tests {
         let image = image.expect("no image");
         // A PNG's signature, in base64.
         assert!(image.starts_with("iVBORw0KGgo"), "{}", &image[..20]);
-        let names: Vec<String> = skills()[0].tools.iter().map(|tool| tool.name.clone()).collect();
+        let names: Vec<String> = tool_groups()[0].tools.iter().map(|tool| tool.name.clone()).collect();
         assert_eq!(
             names,
             [

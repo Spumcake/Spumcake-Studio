@@ -400,7 +400,7 @@ fn easel_of(name: &str, rows: impl FnOnce(&Path) -> Vec<LayerRow>, filmed: bool)
         String::from("{\"type\":\"contents\",\"tab\":\"r1\",\"kind\":\"raster\"}\n"),
         String::from("{\"type\":\"panel\",\"tab\":\"r1\",\"side\":\"right\"}\n"),
         String::from("{\"type\":\"end\"}\n"),
-        String::from("{\"type\":\"skills\",\"skills\":[{\"id\":\"easel\",\"name\":\"Easel\",\"description\":\"Shows an image.\",\"instructions\":\"Nothing to do.\",\"tools\":[{\"name\":\"look\",\"description\":\"Look.\",\"input\":{\"type\":\"object\",\"properties\":{}}}]}]}\n"),
+        String::from("{\"type\":\"tools\",\"groups\":[{\"id\":\"easel\",\"name\":\"Easel\",\"description\":\"Shows an image.\",\"instructions\":\"Nothing to do.\",\"tools\":[{\"name\":\"look\",\"description\":\"Look.\",\"input\":{\"type\":\"object\",\"properties\":{}}}]}]}\n"),
         line(AppMessage::Tabs(Tabs {
             tabs: vec![TabEntry { id: String::from("r1"), label: String::from("Image"), dirty: false, close_waits: false, path: None, saves: false }],
             active: String::from("r1"),

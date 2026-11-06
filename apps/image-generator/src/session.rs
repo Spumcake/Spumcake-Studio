@@ -333,7 +333,7 @@ impl Session {
             messages.push(AppMessage::Contents { tab: image.id.clone(), kind: ContentsKind::Raster });
             messages.push(AppMessage::Panel { tab: image.id.clone(), side: PanelSide::Right });
         }
-        messages.push(AppMessage::Skills { skills: crate::assist::skills() });
+        messages.push(AppMessage::Tools { groups: crate::assist::tool_groups() });
         messages.push(AppMessage::Edits { media_types: vec![String::from("image/png"), String::from("image/jpeg")] });
         messages.push(AppMessage::End);
         if !self.images.is_empty() {
@@ -580,6 +580,8 @@ impl Session {
                 let path = Path::new(&path);
                 out.push(AppMessage::Claimed { id, yours: files::is_ipx(path) && self.in_project(path) });
             }
+            // Items come with the lifecycle's image work.
+            HostMessage::Render { id, .. } => out.push(protocol::no_items(id)),
             _ => {}
         }
         if self.finish_writes(false) {

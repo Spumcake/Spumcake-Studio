@@ -4,7 +4,7 @@
 //! compared with an in-process `Server` given the same messages.
 
 use crate::{Link, VIEWPORT, brush_gesture, canvas_and_source, command, document_of, exchange, gesture};
-use protocol::{AppMessage, FileKind, HostMessage, Skill};
+use protocol::{AppMessage, FileKind, HostMessage, ToolGroup};
 use serde_json::{Value, json};
 use storyboard_generator::serve::Server;
 use std::path::{Path, PathBuf};
@@ -130,15 +130,15 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
     if greeting != expected {
         return Err("the declaration with skills does not match the session".into());
     }
-    let skills: Vec<Skill> = greeting
+    let skills: Vec<ToolGroup> = greeting
         .iter()
         .find_map(|message| match message {
-            AppMessage::Skills { skills } => Some(skills.clone()),
+            AppMessage::Tools { groups } => Some(groups.clone()),
             _ => None,
         })
-        .ok_or("storyboard-generator declared no skills")?;
+        .ok_or("storyboard-generator declared no tools")?;
     let end = greeting.iter().position(|message| matches!(message, AppMessage::End));
-    let declared = greeting.iter().position(|message| matches!(message, AppMessage::Skills { .. }));
+    let declared = greeting.iter().position(|message| matches!(message, AppMessage::Tools { .. }));
     if declared > end {
         return Err("the skills are not part of the declaration".into());
     }

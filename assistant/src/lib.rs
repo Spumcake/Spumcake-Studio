@@ -75,7 +75,7 @@ pub struct Target {
     /// The manifest name, which the model reads.
     pub name: String,
     pub tabs: Vec<TabInfo>,
-    pub skills: Vec<protocol::Skill>,
+    pub tool_groups: Vec<protocol::ToolGroup>,
     /// Its tools take no `tab`, such as the host's own. A target that does
     /// not say so offers nothing while it has no open tab.
     pub tabless: bool,

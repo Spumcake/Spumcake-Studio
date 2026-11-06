@@ -11,6 +11,7 @@ const WORKSPACES: &[(&str, &str, bool)] = &[
     ("recipe-creation", "Recipe Creation", false),
     ("storyboard-generator", "Storyboard Generator", false),
     ("template", "Template", true),
+    ("video-generator", "Video Generator", false),
 ];
 
 /// Words the guide retires, as a word or part of an identifier.

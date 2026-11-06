@@ -3,8 +3,8 @@
 //! startup, the preferences and recovery upkeep, and the panic hook are the
 //! ones `canvas.rs` ran; the window is the host's. Each host message runs the
 //! session call the window's widget made, and the declarations that changed
-//! are sent back. The assistant's `invoke` runs one of the skills in
-//! `skills.rs`; a workspace's `open` and `keep` open a file in a tab and give
+//! are sent back. The assistant's `invoke` runs one of the tools in
+//! `tools.rs`; a workspace's `open` and `keep` open a file in a tab and give
 //! a tab a file through Storyboard Generator's own Save.
 //!
 //! Inside a project, which the host names with `project`, every storyboard is
@@ -158,8 +158,8 @@ impl Server {
                 side: PanelSide::Right,
             });
         }
-        messages.push(AppMessage::Skills {
-            skills: crate::skills::skills(),
+        messages.push(AppMessage::Tools {
+            groups: crate::tools::tool_groups(),
         });
         messages.push(AppMessage::End);
         messages.extend(self.updates(true));
@@ -333,6 +333,9 @@ impl Server {
                 yours: crate::store::readable_smx(std::path::Path::new(&path))
                     && self.allowed_project_path(std::path::Path::new(&path)),
             }),
+            // Items come with the lifecycle's storyboard work.
+            HostMessage::Render { id, .. } => replies.push(protocol::no_items(id)),
+            HostMessage::Provided { .. } | HostMessage::Stale { .. } | HostMessage::Picked { .. } => {}
             HostMessage::EditCell { .. }
             | HostMessage::CellResult { .. }
             | HostMessage::InsertCell { .. }
@@ -390,7 +393,7 @@ impl Server {
         self.session.activate(storyboard);
         self.session.assist_settle();
         self.session.join_group(storyboard, group);
-        let outcome = crate::skills::Desk {
+        let outcome = crate::tools::Desk {
             session: &mut self.session,
             looker: &mut self.looker,
             viewport: self.viewport,

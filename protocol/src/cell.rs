@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{CellUse, ItemRef, UsedItem};
+
 /// One cell. A kind this build does not know still parses: `kind` is a string,
 /// and parts this build does not show stay in `input` and `output`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,6 +41,10 @@ pub struct Cell {
     /// Every run, oldest first. A run always exists: nothing removes one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub versions: Vec<CellVersion>,
+    /// What the task is run with besides its prompt, such as a video's
+    /// duration or a seed. Sent with the task and kept with each version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
     /// The version the cell shows. The top-level `endpoint`, `model`, `effort`,
     /// `output`, `state`, and `error` always equal it; only `input` may
     /// differ, as an edit not yet run.
@@ -69,6 +75,13 @@ pub struct CellVersion {
     /// Seconds since the Unix epoch.
     #[serde(default)]
     pub time: u64,
+    /// The settings it ran with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
+    /// Each item part of its prompt, with the fingerprint it resolved to
+    /// when it ran: what the run was made from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub used: Vec<UsedItem>,
 }
 
 /// The kind of a cell that sends its prompt to a language model.
@@ -78,6 +91,9 @@ pub const IMAGE_KIND: &str = "image";
 /// The kind of a cell of Markdown, which runs by showing its source as rich
 /// text, calls nothing, and has no versions.
 pub const MARKDOWN_KIND: &str = "markdown";
+/// The kind of a cell that makes a video from its prompt and frames: its
+/// first frame and, optionally, its last, in that order.
+pub const VIDEO_KIND: &str = "video";
 
 /// One part of a cell's prompt or result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +101,14 @@ pub const MARKDOWN_KIND: &str = "markdown";
 pub enum CellPart {
     Text { text: String },
     Path { path: String, media_type: String },
+    /// An item of the project, resolved into a file of `media_type` when the
+    /// cell runs. For a cell, `use` says whether its prompt or its result.
+    Item {
+        item: ItemRef,
+        media_type: String,
+        #[serde(default, rename = "use", skip_serializing_if = "Option::is_none")]
+        part: Option<CellUse>,
+    },
     /// A part of a shape a later version adds. It is kept as it was, so a
     /// cells message or a recipe holding one never fails to read.
     Other(serde_json::Value),
@@ -122,6 +146,7 @@ impl Cell {
             state: CellState::Idle,
             error: None,
             versions: Vec::new(),
+            settings: None,
             current: None,
         }
     }
@@ -180,7 +205,7 @@ fn parts_text(parts: &[CellPart]) -> String {
         .iter()
         .filter_map(|part| match part {
             CellPart::Text { text } => Some(text.as_str()),
-            CellPart::Path { .. } | CellPart::Other(_) => None,
+            CellPart::Path { .. } | CellPart::Item { .. } | CellPart::Other(_) => None,
         })
         .collect::<Vec<_>>()
         .join("")

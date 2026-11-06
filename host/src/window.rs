@@ -1059,7 +1059,7 @@ impl HostWindow {
     /// skills, runs as a cell in the conversation.
     fn begin_host_cell(&mut self, call: String, tool: &str, input: serde_json::Value) {
         // Editing a cell's image opens it; it makes no cell.
-        if protocol::split_tool_key(tool).is_some_and(|(_, skill, name)| skill == route::PROMPT_SKILL && name == route::EDIT_IMAGE) {
+        if protocol::split_tool_key(tool).is_some_and(|(_, skill, name)| skill == route::PROMPT_TOOLS && name == route::EDIT_IMAGE) {
             let cell = input.get("cell").and_then(|value| value.as_str()).filter(|cell| !cell.trim().is_empty());
             let (ok, output) = match self.edit_image(cell) {
                 Ok(name) => (true, serde_json::json!(format!("Opened the image as new work, \"{name}\", in its own tab."))),
@@ -1403,6 +1403,9 @@ impl HostWindow {
                     state: protocol::CellState::Done,
                     output: Vec::new(),
                     error: None,
+                    settings: None,
+                    used: Vec::new(),
+                    at: None,
                 },
             );
             return;
@@ -1516,6 +1519,8 @@ impl HostWindow {
                         state,
                         error: error.clone(),
                         time: workspace::now_seconds(),
+                        settings: cell.settings.clone(),
+                        used: Vec::new(),
                     });
                     cell.current = Some(cell.versions.len() - 1);
                     cell.agree();
@@ -1555,6 +1560,9 @@ impl HostWindow {
                         state,
                         output,
                         error,
+                        settings: None,
+                        used: Vec::new(),
+                        at: None,
                     },
                 );
             }

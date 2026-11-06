@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 
 mod cell;
 mod declare;
+mod items;
 mod raster;
-mod skills;
+mod tools;
 pub use cell::*;
 pub use declare::*;
+pub use items::*;
 pub use raster::*;
-pub use skills::*;
+pub use tools::*;
 
 /// The version this crate speaks. A sub-application's first message says
 /// which version it speaks; the host accepts only this one.
@@ -81,9 +83,14 @@ pub enum AppMessage {
     QuitReady,
     /// The answer to `ping`.
     Pong,
-    /// Every skill the sub-application provides to the assistant, replacing
-    /// those sent before.
-    Skills { skills: Vec<Skill> },
+    /// Every tool group the sub-application offers the assistant, replacing
+    /// those sent before. Before the hierarchy of 2026-11-04 this message was
+    /// `skills`, with its groups under `skills`: the stored spelling, still read.
+    #[serde(alias = "skills")]
+    Tools {
+        #[serde(alias = "skills")]
+        groups: Vec<ToolGroup>,
+    },
     /// The answer to one `invoke`, after any message the call caused.
     #[serde(rename = "result")]
     ToolResult(ToolResult),
@@ -103,12 +110,43 @@ pub enum AppMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selected: Option<String>,
     },
-    /// Asks the host to run that cell, as the toolbar's Run does.
-    RunCell { tab: String, cell: String },
+    /// Asks the host to run that cell, as the toolbar's Run does. With
+    /// `content` and `at`, the host runs the cell given, which lives at `at`
+    /// in a file no tab has open, and answers `cell_result` with `at`.
+    RunCell {
+        tab: String,
+        cell: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Cell>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<ItemRef>,
+    },
     /// Asks the host to stop that cell. The host keeps what had arrived.
     StopCell { tab: String, cell: String },
     /// Whether this application can open `path` as its own work.
     Claimed { id: String, yours: bool },
+    /// Every item of one file, replacing what was declared for it before.
+    /// Sent for each of its files after `project`, and again whenever a
+    /// file's items change. An empty list says the file is gone.
+    Items { path: String, items: Vec<Item> },
+    /// The answer to `render`: the file written, inside the project, and the
+    /// item's fingerprint as declared in `items`, not a hash of the file; or
+    /// `error`, a sentence.
+    Rendered {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Asks for another item as a file of `media_type`, for this
+    /// application's own work. The host answers `provided`.
+    Need { id: String, item: ItemRef, media_type: String },
+    /// Asks the host to let the person choose an item of one of these media
+    /// types. The host answers `picked`.
+    Pick { id: String, media_types: Vec<String> },
 }
 
 /// The cell, and its image's path relative to the project, that new work
@@ -179,8 +217,8 @@ pub enum HostMessage {
     Quit,
     /// Sent every second. The answer is `pong`.
     Ping,
-    /// Run one tool of a declared skill on that tab. `tool` is the tool's
-    /// key, `<application id>__<skill id>__<tool name>`. Every change made
+    /// Run one tool of a declared tool group on that tab. `tool` is the
+    /// tool's key, `<application id>__<group id>__<tool name>`. Every change made
     /// under one `group`, the assistant's request, is one undo step.
     Invoke {
         call: String,
@@ -237,6 +275,15 @@ pub enum HostMessage {
         output: Vec<CellPart>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The settings it ran with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<serde_json::Value>,
+        /// Each item part, with the fingerprint it resolved to.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        used: Vec<UsedItem>,
+        /// Where the cell lives, for a run asked for with `at`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<ItemRef>,
     },
     /// A dragged cell, already given a new id and `from` by the host, or,
     /// with no cell, an empty one the owner makes, of the kind it would add.
@@ -259,6 +306,40 @@ pub enum HostMessage {
     ShowSource { tab: String, cell: String },
     /// Asks whether `path` is this application's own work.
     Claim { id: String, path: String },
+    /// Render that item of one of this application's files as a file of
+    /// `media_type`, under `render_path`. For a cell, `use` says whether its
+    /// prompt or its result. The answer is `rendered`.
+    Render {
+        id: String,
+        item: ItemRef,
+        media_type: String,
+        #[serde(default, rename = "use", skip_serializing_if = "Option::is_none")]
+        part: Option<CellUse>,
+    },
+    /// The answer to `need`: the file, and the item's fingerprint; or
+    /// `error`, a sentence.
+    Provided {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The items of that file that are out of date, and which items they
+    /// were made from changed. Sent whenever that set changes; an empty list
+    /// when none are.
+    Stale { path: String, items: Vec<StaleItem> },
+    /// The answer to `pick`: the item the person chose, and which of the
+    /// media types asked for it is, or none when they cancelled.
+    Picked {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<ItemRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
 }
 
 /// What a selection message does, as the drawing surface's select tool does it.
@@ -423,13 +504,17 @@ impl Declaration {
             | AppMessage::Ask(_)
             | AppMessage::QuitReady
             | AppMessage::Pong
-            | AppMessage::Skills { .. }
+            | AppMessage::Tools { .. }
             | AppMessage::ToolResult(_)
             | AppMessage::Kept { .. }
             | AppMessage::Cells { .. }
             | AppMessage::RunCell { .. }
             | AppMessage::StopCell { .. }
             | AppMessage::Claimed { .. }
+            | AppMessage::Items { .. }
+            | AppMessage::Rendered { .. }
+            | AppMessage::Need { .. }
+            | AppMessage::Pick { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -533,6 +618,10 @@ pub struct Manifest {
     /// them, such as a session's tabs or its data folder, is its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub formerly: Vec<String>,
+    /// A folder of agent skills it ships, each a `SKILL.md` in a folder of
+    /// its own, relative to the manifest. The host loads them beside its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,7 +871,10 @@ mod tests {
                 state: CellState::Done,
                 error: None,
                 time: 1_793_146_000,
+                settings: None,
+                used: Vec::new(),
             }],
+            settings: None,
             current: Some(0),
         };
         let unknown = Cell {
@@ -797,6 +889,7 @@ mod tests {
             state: CellState::Idle,
             error: None,
             versions: Vec::new(),
+            settings: None,
             current: None,
         };
         round_trip_app(AppMessage::Cells {
@@ -824,8 +917,68 @@ mod tests {
             state: CellState::Failed,
             output: path.output.clone(),
             error: Some("The model failed.".into()),
+            settings: Some(serde_json::json!({"seconds": 4})),
+            used: vec![UsedItem { item: ItemRef { path: "Beach.ipx".into(), item: Some("2".into()) }, fingerprint: "00ff".into() }],
+            at: Some(ItemRef { path: "Shots.vid".into(), item: Some("c1".into()) }),
         });
         assert!(parse_app_message(r#"{"type":"cells","tab":"recipe","cells":[{"id":"x","kind":"plot","state":"running"}]}"#).is_err());
+    }
+
+    /// Catches the rename of 2026-11-05 stranding a sub-application or a
+    /// stored line that still says `skills`: it reads as `tools`.
+    #[test]
+    fn the_stored_spelling_of_tools_still_reads() {
+        let old = r#"{"type":"skills","skills":[{"id":"quill","name":"Quill","description":"Stamps.","tools":[{"name":"stamp","description":"Stamp.","input":{"type":"object"}}]}]}"#;
+        let Ok(AppMessage::Tools { groups }) = parse_app_message(old) else {
+            panic!("the stored spelling did not read");
+        };
+        assert_eq!(groups[0].tools[0].name, "stamp");
+        assert!(groups[0].tools[0].implements.is_empty());
+        round_trip_app(AppMessage::Tools { groups });
+    }
+
+    /// Every message of the lifecycle's contract round-trips, so a field
+    /// cannot be dropped quietly.
+    #[test]
+    fn item_messages_round_trip() {
+        let board = ItemRef { path: "Pilot.smx".into(), item: Some("b3".into()) };
+        let reference = ItemRef { path: "Cast.ipx".into(), item: Some("7".into()) };
+        round_trip_app(AppMessage::Items {
+            path: "Shots.vid".into(),
+            items: vec![Item {
+                id: "s1".into(),
+                name: "Shot 1".into(),
+                media_types: vec!["video/mp4".into()],
+                fingerprint: "a1".into(),
+                made: Some(Made {
+                    cell: Some(ItemRef { path: "Shots.vid".into(), item: Some("c1".into()) }),
+                    version: Some("v1".into()),
+                    used: vec![UsedItem { item: board.clone(), fingerprint: "b1".into() }],
+                    sources: vec![UsedItem { item: reference.clone(), fingerprint: "r1".into() }],
+                }),
+            }],
+        });
+        round_trip_app(AppMessage::Items { path: "Gone.vid".into(), items: Vec::new() });
+        round_trip_app(AppMessage::Rendered { id: "r".into(), path: Some(".inpainter/renders/x/b3-b1.png".into()), fingerprint: Some("b1".into()), error: None });
+        round_trip_app(AppMessage::Rendered { id: "r".into(), path: None, fingerprint: None, error: Some("No such board.".into()) });
+        round_trip_app(AppMessage::Need { id: "n".into(), item: board.clone(), media_type: "image/png".into() });
+        round_trip_app(AppMessage::Pick { id: "p".into(), media_types: vec!["image/png".into()] });
+        round_trip_app(AppMessage::RunCell {
+            tab: String::new(),
+            cell: "c1".into(),
+            content: Some(Cell::text("c1", "A wave.")),
+            at: Some(ItemRef { path: "Shots.vid".into(), item: Some("c1".into()) }),
+        });
+        round_trip_host(HostMessage::Render { id: "r".into(), item: board.clone(), media_type: "image/png".into(), part: None });
+        round_trip_host(HostMessage::Render { id: "r".into(), item: board.clone(), media_type: "text/plain".into(), part: Some(CellUse::Prompt) });
+        round_trip_host(HostMessage::Provided { id: "n".into(), path: Some("x.png".into()), fingerprint: Some("b1".into()), error: None });
+        round_trip_host(HostMessage::Stale { path: "Shots.vid".into(), items: vec![StaleItem { id: "s1".into(), changed: vec![reference.clone()] }] });
+        round_trip_host(HostMessage::Stale { path: "Shots.vid".into(), items: Vec::new() });
+        round_trip_host(HostMessage::Picked { id: "p".into(), item: Some(reference), media_type: Some("image/png".into()) });
+        round_trip_host(HostMessage::Picked { id: "p".into(), item: None, media_type: None });
+        // An item part reads as an item, not as a path or an unknown part.
+        let part: CellPart = serde_json::from_str(r#"{"item":{"path":"Pilot.smx","item":"b3"},"media_type":"image/png","use":"result"}"#).unwrap();
+        assert_eq!(part, CellPart::Item { item: board, media_type: "image/png".into(), part: Some(CellUse::Result) });
     }
 
     /// Every cell message round-trips, so a field cannot be dropped quietly.
@@ -834,6 +987,8 @@ mod tests {
         round_trip_app(AppMessage::RunCell {
             tab: "recipe".into(),
             cell: "c1".into(),
+            content: None,
+            at: None,
         });
         round_trip_app(AppMessage::StopCell {
             tab: "recipe".into(),

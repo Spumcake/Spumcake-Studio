@@ -38,9 +38,9 @@ pub(crate) const HOST_ID: &str = "inpainter";
 
 /// The host's tool: a prompt that runs as a cell. Learned the same way as
 /// any application's skill.
-pub(crate) fn host_skill() -> protocol::Skill {
-    protocol::Skill {
-        id: PROMPT_SKILL.into(),
+pub(crate) fn host_tools() -> protocol::ToolGroup {
+    protocol::ToolGroup {
+        id: PROMPT_TOOLS.into(),
         name: "Prompt".into(),
         description: "Write a prompt and run it as a cell in the conversation.".into(),
         instructions: "When the person asks for a piece of writing, or to write or run a prompt, call run_text_prompt with the prompt. Do not write the piece in the reply. When they ask to edit an image an Image cell made, call edit_image with the cell's id, or with none for the latest. After the tool returns, reply briefly.".into(),
@@ -56,6 +56,7 @@ pub(crate) fn host_skill() -> protocol::Skill {
                     "required": ["prompt"],
                     "additionalProperties": false
                 }),
+                implements: Vec::new(),
             },
             protocol::Tool {
                 name: EDIT_IMAGE.into(),
@@ -67,13 +68,14 @@ pub(crate) fn host_skill() -> protocol::Skill {
                     },
                     "additionalProperties": false
                 }),
+                implements: Vec::new(),
             },
         ],
     }
 }
 
-/// The host's own skill, which runs prompts and opens cells' images.
-pub(crate) const PROMPT_SKILL: &str = "prompt";
+/// The host's own tool group, which runs prompts and opens cells' images.
+pub(crate) const PROMPT_TOOLS: &str = "prompt";
 
 /// The tool that opens a cell's image as new work. A skill of the
 /// person's never takes this name.
@@ -87,7 +89,7 @@ const FORMER_EDIT_IMAGE: &str = "edit_picture"; // stored spelling
 /// under its former name becomes `EDIT_IMAGE`; any other key is unchanged.
 pub(crate) fn current_host_tool_key(key: &str) -> String {
     match protocol::split_tool_key(key) {
-        Some((HOST_ID, PROMPT_SKILL, FORMER_EDIT_IMAGE)) => protocol::tool_key(HOST_ID, PROMPT_SKILL, EDIT_IMAGE),
+        Some((HOST_ID, PROMPT_TOOLS, FORMER_EDIT_IMAGE)) => protocol::tool_key(HOST_ID, PROMPT_TOOLS, EDIT_IMAGE),
         _ => key.to_string(),
     }
 }
@@ -146,7 +148,7 @@ const SKILLS: &str = "skills";
 /// "Your skills": one tool for each skill the person made, as they named
 /// and described it. Calling one runs its prompt, with the input after it,
 /// as a cell on its own endpoint and model.
-fn your_skills(settings: &Settings) -> Option<protocol::Skill> {
+fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
     let offered = offered_skills(settings);
     if offered.is_empty() {
         return None;
@@ -181,10 +183,10 @@ fn your_skills(settings: &Settings) -> Option<protocol::Skill> {
                     }),
                 ),
             };
-            protocol::Tool { name, description, input }
+            protocol::Tool { name, description, input, implements: Vec::new() }
         })
         .collect();
-    Some(protocol::Skill {
+    Some(protocol::ToolGroup {
         id: SKILLS.into(),
         name: "Your skills".into(),
         description: "Skills the person made, each running its own prompt on its own endpoint.".into(),
@@ -194,13 +196,13 @@ fn your_skills(settings: &Settings) -> Option<protocol::Skill> {
 }
 
 fn host_target(settings: &Settings) -> Target {
-    let mut skills = vec![host_skill()];
-    skills.extend(your_skills(settings));
+    let mut tool_groups = vec![host_tools()];
+    tool_groups.extend(your_skills(settings));
     Target {
         app: HOST_ID.into(),
         name: "Spumcake Studio".into(),
         tabs: Vec::new(),
-        skills,
+        tool_groups,
         tabless: true,
     }
 }
@@ -223,7 +225,7 @@ pub(crate) fn targets(apps: &[Started], settings: &Settings) -> Vec<Target> {
                     label: tab.label,
                 })
                 .collect(),
-            skills: started.running.declared.skills.clone(),
+            tool_groups: started.running.declared.tool_groups.clone(),
             tabless: false,
         })
         .collect();
@@ -337,8 +339,8 @@ mod tests {
     /// image tool no longer read: the former name is the current one.
     #[test]
     fn the_host_tools_former_name_is_its_current_one() {
-        let former = protocol::tool_key(HOST_ID, PROMPT_SKILL, FORMER_EDIT_IMAGE);
-        assert_eq!(current_host_tool_key(&former), protocol::tool_key(HOST_ID, PROMPT_SKILL, EDIT_IMAGE));
+        let former = protocol::tool_key(HOST_ID, PROMPT_TOOLS, FORMER_EDIT_IMAGE);
+        assert_eq!(current_host_tool_key(&former), protocol::tool_key(HOST_ID, PROMPT_TOOLS, EDIT_IMAGE));
         assert_eq!(current_host_tool_key("app__skill__tool"), "app__skill__tool");
     }
     use super::*;

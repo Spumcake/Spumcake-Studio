@@ -489,15 +489,15 @@ impl Agent {
 /// tab (empty when the application has none), and the input without `tab`.
 fn route(targets: &[Target], key: &str, arguments: &str) -> Result<(String, String, Value), String> {
     let unknown = || format!("No tool is named `{key}`. Use only the tools offered.");
-    let (app, skill, tool) = protocol::split_tool_key(key).ok_or_else(unknown)?;
+    let (app, group, tool) = protocol::split_tool_key(key).ok_or_else(unknown)?;
     let target = targets
         .iter()
         .find(|target| target.app == app)
         .ok_or_else(unknown)?;
     let offered = target
-        .skills
+        .tool_groups
         .iter()
-        .any(|declared| declared.id == skill && declared.tools.iter().any(|t| t.name == tool));
+        .any(|declared| declared.id == group && declared.tools.iter().any(|t| t.name == tool));
     if !offered {
         return Err(unknown());
     }

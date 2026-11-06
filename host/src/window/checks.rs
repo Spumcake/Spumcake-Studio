@@ -25,7 +25,7 @@ echo '{"type":"hello","protocol":1}'
 echo '{"type":"tab","id":"q1","label":"Quill Board"}'
 echo '{"type":"contents","tab":"q1","kind":"grid"}'
 echo '{"type":"end"}'
-echo '{"type":"skills","skills":[{"id":"quill","name":"Quill","description":"Stamps one glyph on the board.","instructions":"Pass the glyph to stamp.","tools":[{"name":"stamp_glyph","description":"Stamp a glyph.","input":{"type":"object","properties":{"glyph":{"type":"string"}},"required":["glyph"]}}]}]}'
+echo '{"type":"tools","groups":[{"id":"quill","name":"Quill","description":"Stamps one glyph on the board.","instructions":"Pass the glyph to stamp.","tools":[{"name":"stamp_glyph","description":"Stamp a glyph.","input":{"type":"object","properties":{"glyph":{"type":"string"}},"required":["glyph"]}}]}]}'
 while IFS= read -r line; do
   case "$line" in
     *'"type":"ping"'*) echo '{"type":"pong"}' ;;
@@ -362,7 +362,7 @@ impl Window {
         window.until(|app| {
             app.apps
                 .iter()
-                .all(|started| !started.running.pending() && !started.running.declared.skills.is_empty())
+                .all(|started| !started.running.pending() && !started.running.declared.tool_groups.is_empty())
         });
         window
     }
@@ -528,7 +528,7 @@ fn declared(app: &HostWindow) -> Vec<String> {
         .apps
         .iter()
         .flat_map(|started| {
-            started.running.declared.skills.iter().flat_map(move |skill| {
+            started.running.declared.tool_groups.iter().flat_map(move |skill| {
                 skill
                     .tools
                     .iter()
@@ -950,7 +950,7 @@ fn a_new_data_folder_opens_on_an_untitled_project() {
         .find(|started| started.id == "storyboard-generator")
         .expect("Storyboard Generator is running");
     assert!(storyboard.running.tabs().1.is_some(), "Storyboard Generator has no tab");
-    assert!(!storyboard.running.declared.skills.is_empty());
+    assert!(!storyboard.running.declared.tool_groups.is_empty());
     assert!(
         window.app.bar_rect.center().x > 1200.0,
         "the bar is not at the right edge: {:?}",

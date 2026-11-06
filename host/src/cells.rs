@@ -493,6 +493,7 @@ fn output_text(cell: &Cell, live: Option<&str>, running: bool) -> Option<(String
         .map(|part| match part {
             CellPart::Text { text } => text.clone(),
             CellPart::Path { path, .. } => path.clone(),
+            CellPart::Item { item, .. } => item.path.clone(),
             CellPart::Other(value) => value.to_string(),
         })
         .collect();

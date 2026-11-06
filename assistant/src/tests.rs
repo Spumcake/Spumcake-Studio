@@ -3,7 +3,7 @@
 //! No network, no money.
 
 use crate::*;
-use protocol::{Skill, Tool, ToolResult};
+use protocol::{ToolGroup, Tool, ToolResult};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -158,6 +158,7 @@ fn tool(name: &str) -> Tool {
             "properties": {"text": {"type": "string"}},
             "required": ["text"],
         }),
+        implements: Vec::new(),
     }
 }
 
@@ -172,15 +173,15 @@ fn targets() -> Vec<Target> {
                 TabInfo { id: String::from("n2"), label: String::from("Notes Two") },
             ],
             tabless: false,
-            skills: vec![
-                Skill {
+            tool_groups: vec![
+                ToolGroup {
                     id: String::from("reading"),
                     name: String::from("Reading notes"),
                     description: String::from("Reads the notes."),
                     instructions: String::from("Read before you write."),
                     tools: vec![tool("list"), tool("look")],
                 },
-                Skill {
+                ToolGroup {
                     id: String::from("writing"),
                     name: String::from("Writing notes"),
                     description: String::from("Writes notes."),
@@ -194,7 +195,7 @@ fn targets() -> Vec<Target> {
             name: String::from("Fixture Labels"),
             tabs: vec![TabInfo { id: String::from("l1"), label: String::from("Labels") }],
             tabless: false,
-            skills: vec![Skill {
+            tool_groups: vec![ToolGroup {
                 id: String::from("naming"),
                 name: String::from("Naming"),
                 description: String::from("Renames a tab."),
@@ -307,7 +308,7 @@ fn offered(chat: &Value) -> Vec<String> {
 fn declared(targets: &[Target]) -> Vec<String> {
     let mut keys = Vec::new();
     for target in targets {
-        for skill in &target.skills {
+        for skill in &target.tool_groups {
             for tool in &skill.tools {
                 keys.push(protocol::tool_key(&target.app, &skill.id, &tool.name));
             }
@@ -904,7 +905,7 @@ fn only_a_tabless_target_offers_tools_without_a_tab() {
         name: String::from(app),
         tabs: Vec::new(),
         tabless,
-        skills: vec![Skill {
+        tool_groups: vec![ToolGroup {
             id: String::from("making"),
             name: String::from("Making"),
             description: String::from("Makes."),

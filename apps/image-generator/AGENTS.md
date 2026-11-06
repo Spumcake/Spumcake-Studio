@@ -22,7 +22,7 @@ The Image Generator edits a gallery of layered images per tab: a filmstrip of im
 - `src/gallery.rs` — one tab's gallery: its images in order, the one shown, and the filmstrip's history, which holds a removed image, with its own history, until it is put back.
 - `src/session.rs` — the tabs, the protocol messages, the filmstrip's commands and which of strip or image has the keyboard, files and autosave, and the images and thumbnails written for the host.
 - `src/declare.rs` — the toolbar and settings row as the approved views show them, the panel's Layers, Properties, and Adjustments pages, the filmstrip, the menu, the keys, and the tab list.
-- `src/assist.rs` — the assistant's "Image Generator" skill: the gallery's tools, `look` at any image, and the shown image's layers, texts, masks, and adjustments. Painting, cloning, healing, and moving pixels stay the person's.
+- `src/assist.rs` — the assistant's "Image Generator" tool group: the gallery's tools, `look` at any image, and the shown image's layers, texts, masks, and adjustments. Painting, cloning, healing, and moving pixels stay the person's.
 - `src/files.rs` — the `.ipx` file, PNG and JPEG in and out, and whole-file writes.
 
 ## What it writes for the host

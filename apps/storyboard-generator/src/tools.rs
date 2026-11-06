@@ -1,4 +1,4 @@
-//! Storyboard Generator's skills for the assistant: everything a person does to a
+//! Storyboard Generator's tool groups for the assistant: everything a person does to a
 //! storyboard's contents by hand, as tools. They are built from the hand
 //! surface, not from a list of shapes: the brush, eraser, shape, text, and
 //! select gestures; the commands that change contents; every property the
@@ -14,7 +14,7 @@ use base64::Engine as _;
 use draw::document::{ColorId, NodeId, Point, Sample, ShapeKind};
 use draw::{PropId, PropValue};
 use kurbo::Affine;
-use protocol::{Skill, Tool};
+use protocol::{ToolGroup, Tool};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
@@ -86,6 +86,7 @@ fn tool(name: &str, description: &str, input: Value) -> Tool {
         name: name.to_string(),
         description: description.to_string(),
         input,
+        implements: Vec::new(),
     }
 }
 
@@ -176,10 +177,10 @@ fn names(table: &[(CommandId, &'static str)]) -> Vec<&'static str> {
     table.iter().map(|(_, name)| *name).collect()
 }
 
-/// Every skill Storyboard Generator provides, as `skills` declares them.
-pub fn skills() -> Vec<Skill> {
+/// Every tool group Storyboard Generator offers, as `tools` declares them.
+pub fn tool_groups() -> Vec<ToolGroup> {
     vec![
-        Skill {
+        ToolGroup {
             id: "look".into(),
             name: "Read and look at a storyboard".into(),
             description: "Read what a storyboard holds, as data, and look at an image of it as it is drawn.".into(),
@@ -213,12 +214,12 @@ pub fn skills() -> Vec<Skill> {
                 ),
             ],
         },
-        Skill {
+        ToolGroup {
             id: "draw".into(),
             name: "Draw by hand".into(),
             description: "Draw as the person draws with the tools: freehand strokes, erasing, rectangles, ellipses, lines, text, and moving, scaling, or rotating objects.".into(),
             instructions: format!(
-                "Each tool is one gesture of the person's own tools, made on the open storyboard. The person's tool settings stay as they were. Freehand strokes go on a canvas, into the layer of their color; a color is a layer id of that canvas or one of the brush's colors from read_storyboard, and a brush color the canvas has no layer for adds that layer. Strokes are smoothed and pressure-shaped like the person's own, so give points a few units apart along the path; to fill an area, draw several strokes side by side. Erasing removes ink along a path without deleting strokes. Shapes and text are drawn with the tools' current colors and sizes; change them afterwards with the style skill, using the palette color ids the result gives. Put new work inside the visible area that read_storyboard gives, unless the request says where. Ink's color belongs to its layer, so to recolor only part of a freehand drawing, such as one part of a figure: find those strokes with read_storyboard and look_at, redraw them from their points in the new brush color, make sure that color's layer is above the old one with edit's move_layer (read_storyboard lists layers top to bottom), then erase the old ink along the same path. Each result names what was made. All the changes of one request are taken back by one undo. {COORDINATES}"
+                "Each tool is one gesture of the person's own tools, made on the open storyboard. The person's tool settings stay as they were. Freehand strokes go on a canvas, into the layer of their color; a color is a layer id of that canvas or one of the brush's colors from read_storyboard, and a brush color the canvas has no layer for adds that layer. Strokes are smoothed and pressure-shaped like the person's own, so give points a few units apart along the path; to fill an area, draw several strokes side by side. Erasing removes ink along a path without deleting strokes. Shapes and text are drawn with the tools' current colors and sizes; change them afterwards with the Restyle tools, using the palette color ids the result gives. Put new work inside the visible area that read_storyboard gives, unless the request says where. Ink's color belongs to its layer, so to recolor only part of a freehand drawing, such as one part of a figure: find those strokes with read_storyboard and look_at, redraw them from their points in the new brush color, make sure that color's layer is above the old one with edit's move_layer (read_storyboard lists layers top to bottom), then erase the old ink along the same path. Each result names what was made. All the changes of one request are taken back by one undo. {COORDINATES}"
             ),
             tools: vec![
                 tool(
@@ -300,7 +301,7 @@ pub fn skills() -> Vec<Skill> {
                 ),
             ],
         },
-        Skill {
+        ToolGroup {
             id: "edit".into(),
             name: "Edit and arrange".into(),
             description: "Select, cut, copy, paste, delete, nudge, group, ungroup, order, align, rotate, and flip objects; add canvases and choose the one drawn on; and order, duplicate, or delete a canvas's color layers.".into(),
@@ -390,12 +391,12 @@ pub fn skills() -> Vec<Skill> {
                 ),
             ],
         },
-        Skill {
+        ToolGroup {
             id: "style".into(),
             name: "Restyle".into(),
             description: "Change the properties of objects, text, and palette colors, as the properties panel and the layers list do, and change a text's words.".into(),
             instructions: format!(
-                "Objects have their own properties: a canvas's padding, a rectangle's corner radius, text's font, size, alignment, and layout, and every object's visibility and lock. Colors are separate: a shape's outline and fill, a line's stroke, a text's text, background, and border, and each of a canvas's layers are palette colors with their own ids, from read_storyboard or the result that made them. To make a circle pink, set the rgb of its outline or fill color; to make freehand ink dashed or wider, set its layer's dash or color_size, which changes every stroke in that layer. To recolor only some strokes, redraw them in another color with the draw skill instead, as its instructions say; setting the layer's rgb recolors every stroke in it. A fill, a text background, or a text border is turned on with its color's visible. Leave objects out to change the selection, such as what the person selected by hand. A locked object must be unlocked before anything else of it changes. {COORDINATES}"
+                "Objects have their own properties: a canvas's padding, a rectangle's corner radius, text's font, size, alignment, and layout, and every object's visibility and lock. Colors are separate: a shape's outline and fill, a line's stroke, a text's text, background, and border, and each of a canvas's layers are palette colors with their own ids, from read_storyboard or the result that made them. To make a circle pink, set the rgb of its outline or fill color; to make freehand ink dashed or wider, set its layer's dash or color_size, which changes every stroke in that layer. To recolor only some strokes, redraw them in another color with the Draw by hand tools instead, as its instructions say; setting the layer's rgb recolors every stroke in it. A fill, a text background, or a text border is turned on with its color's visible. Leave objects out to change the selection, such as what the person selected by hand. A locked object must be unlocked before anything else of it changes. {COORDINATES}"
             ),
             tools: vec![
                 tool(
@@ -429,11 +430,11 @@ pub fn skills() -> Vec<Skill> {
 // Carrying out one call.
 
 impl Desk<'_> {
-    /// Runs `skill`'s `tool` with `input` on the active storyboard.
-    pub fn run(&mut self, skill: &str, tool: &str, input: &Value) -> Outcome {
+    /// Runs `group`'s `tool` with `input` on the active storyboard.
+    pub fn run(&mut self, group: &str, tool: &str, input: &Value) -> Outcome {
         let before = self.snapshot();
         let selection_before = self.session.selection();
-        let done = match (skill, tool) {
+        let done = match (group, tool) {
             ("look", "read_storyboard") => return self.read(input),
             // Its stored spelling in conversations kept before 0.14.
             ("look", "read_sketch") => return self.read(input), // The stored spelling.
@@ -504,7 +505,7 @@ impl Desk<'_> {
                 let words = text(input, "text")?;
                 self.session.assist_set_text(id, words)
             })(),
-            _ => return failed(format!("Storyboard Generator has no tool {skill}__{tool}")),
+            _ => return failed(format!("Storyboard Generator has no tool {group}__{tool}")),
         };
         match done {
             Ok(()) => self.changes(&before, None),

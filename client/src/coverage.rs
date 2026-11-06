@@ -19,7 +19,7 @@
 use draw::PropId;
 use draw::document::{ColorId, Dynamics, NodeId, ShapeKind, TextBox};
 use draw::gesture::GestureKind;
-use protocol::{AppMessage, HostMessage, SelectOp, Skill};
+use protocol::{AppMessage, HostMessage, SelectOp, ToolGroup};
 use serde_json::{Value, json};
 use storyboard_generator::registry::{self, CommandId};
 use storyboard_generator::serve::Server;
@@ -204,7 +204,7 @@ fn select_ops() -> Vec<SelectOp> {
 }
 
 /// The declared tools, by `skill__tool`, with their input schemas.
-fn declared(skills: &[Skill]) -> BTreeMap<String, Value> {
+fn declared(skills: &[ToolGroup]) -> BTreeMap<String, Value> {
     skills
         .iter()
         .flat_map(|skill| skill.tools.iter().map(move |tool| (format!("{}__{}", skill.id, tool.name), tool.input.clone())))
@@ -327,7 +327,7 @@ impl Walk {
     }
 }
 
-fn gather() -> Result<(Vec<Skill>, Seen), String> {
+fn gather() -> Result<(Vec<ToolGroup>, Seen), String> {
     let mut walk = Walk {
         server: Server::new(None),
         seen: Seen { actions: BTreeSet::new(), object_props: BTreeSet::new(), color_props: BTreeSet::new() },
@@ -339,10 +339,10 @@ fn gather() -> Result<(Vec<Skill>, Seen), String> {
     let skills = greeting
         .iter()
         .find_map(|message| match message {
-            AppMessage::Skills { skills } => Some(skills.clone()),
+            AppMessage::Tools { groups } => Some(groups.clone()),
             _ => None,
         })
-        .ok_or("storyboard-generator declared no skills")?;
+        .ok_or("storyboard-generator declared no tools")?;
     walk.tab = crate::document_of(&greeting).ok_or("no document")?.0;
     walk.send(HostMessage::Viewport { viewport: crate::VIEWPORT }, None);
 

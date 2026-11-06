@@ -4,8 +4,8 @@
 use crate::Target;
 use serde_json::{Map, Value, json};
 
-/// The fixed part of the system prompt. It names no application, skill, or
-/// tool.
+/// The fixed part of the system prompt. It names no application, tool group,
+/// or tool.
 pub const SYSTEM: &str = "\
 You are the assistant in Spumcake Studio, a desktop program for creative work. \
 The person's work is open in tabs, and each tab belongs to one of the applications listed below. \
@@ -33,7 +33,7 @@ pub const STALE: &str = "The person may have changed the work since the last req
 so anything read before this message may be out of date.";
 
 /// The system prompt for one model turn: the fixed text, then each running
-/// application with its tabs and skills.
+/// application with its tabs and tool groups.
 pub fn system(targets: &[Target], selected: Option<&(String, String)>) -> String {
     let mut text = String::from(SYSTEM);
     if targets.is_empty() {
@@ -57,24 +57,24 @@ pub fn system(targets: &[Target], selected: Option<&(String, String)>) -> String
                 text.push_str(&format!("- \"{}\", tab `{}`{mark}\n", tab.label, tab.id));
             }
         }
-        if target.skills.is_empty() {
-            text.push_str("Skills: none.\n");
+        if target.tool_groups.is_empty() {
+            text.push_str("Tools: none.\n");
         }
-        for skill in &target.skills {
-            text.push_str(&format!("\n### Skill: {}\n", skill.name));
-            if !skill.description.trim().is_empty() {
-                text.push_str(skill.description.trim());
+        for group in &target.tool_groups {
+            text.push_str(&format!("\n### Tools: {}\n", group.name));
+            if !group.description.trim().is_empty() {
+                text.push_str(group.description.trim());
                 text.push('\n');
             }
-            if !skill.instructions.trim().is_empty() {
+            if !group.instructions.trim().is_empty() {
                 text.push('\n');
-                text.push_str(skill.instructions.trim());
+                text.push_str(group.instructions.trim());
                 text.push('\n');
             }
-            let keys: Vec<String> = skill
+            let keys: Vec<String> = group
                 .tools
                 .iter()
-                .map(|tool| format!("`{}`", protocol::tool_key(&target.app, &skill.id, &tool.name)))
+                .map(|tool| format!("`{}`", protocol::tool_key(&target.app, &group.id, &tool.name)))
                 .collect();
             if !keys.is_empty() {
                 text.push_str(&format!("\nIts tools: {}.\n", keys.join(", ")));
@@ -89,12 +89,12 @@ pub fn system(targets: &[Target], selected: Option<&(String, String)>) -> String
 pub fn tools(targets: &[Target]) -> Vec<Value> {
     let mut offered = Vec::new();
     for target in targets {
-        if target.skills.is_empty() || (!target.tabless && target.tabs.is_empty()) {
+        if target.tool_groups.is_empty() || (!target.tabless && target.tabs.is_empty()) {
             continue;
         }
         let tabs: Vec<Value> = target.tabs.iter().map(|tab| json!(tab.id)).collect();
-        for skill in &target.skills {
-            for tool in &skill.tools {
+        for group in &target.tool_groups {
+            for tool in &group.tools {
                 let parameters = if target.tabless {
                     tool.input.clone()
                 } else {
@@ -103,7 +103,7 @@ pub fn tools(targets: &[Target]) -> Vec<Value> {
                 offered.push(json!({
                     "type": "function",
                     "function": {
-                        "name": protocol::tool_key(&target.app, &skill.id, &tool.name),
+                        "name": protocol::tool_key(&target.app, &group.id, &tool.name),
                         "description": tool.description,
                         "parameters": parameters,
                     }

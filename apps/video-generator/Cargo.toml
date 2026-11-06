@@ -1,0 +1,10 @@
+[package]
+name = "video-generator"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+protocol = { path = "../../protocol" }
+serde_json = "=1.0.152"

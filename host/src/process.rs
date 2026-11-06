@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use draw::document::{Camera, NodeId, Drawing};
 use protocol::{
     Accept, AppMessage, Ask, Canvas, Declaration, FileFilter, FileKind, HostMessage, Keys,
-    MenuEntry, Properties, RasterView, Skill, TabEntry, Tabs, Toolbar, ToolResult,
+    MenuEntry, Properties, RasterView, ToolGroup, TabEntry, Tabs, Toolbar, ToolResult,
 };
 
 /// How long a closing window waits for the sub-application to exit after
@@ -85,10 +85,10 @@ pub struct Declared {
     pub ask: Option<Ask>,
     pub files: VecDeque<FileRequest>,
     pub quit_ready: bool,
-    /// The skills it provides to the assistant, as last declared.
-    pub skills: Vec<Skill>,
-    /// Counts the `skills` messages, so a change is noticed.
-    pub skills_version: u64,
+    /// The tool groups it offers the assistant, as last declared.
+    pub tool_groups: Vec<ToolGroup>,
+    /// Counts the `tools` messages, so a change is noticed.
+    pub tool_groups_version: u64,
     /// The media types it edits, as its `edits` declared.
     pub edits: Vec<String>,
     /// Answers to `invoke` not yet passed to the assistant.
@@ -545,9 +545,9 @@ impl Running {
                 self.shown.panels.push(protocol::PanelReport { tab, side });
             }
             AppMessage::Hello { .. } | AppMessage::Tab { .. } | AppMessage::End => {}
-            AppMessage::Skills { skills } => {
-                declared.skills = skills;
-                declared.skills_version += 1;
+            AppMessage::Tools { groups } => {
+                declared.tool_groups = groups;
+                declared.tool_groups_version += 1;
             }
             AppMessage::Edits { media_types } => declared.edits = media_types,
             AppMessage::Clipboard { text } => declared.clipboard.push_back(text),
@@ -556,9 +556,13 @@ impl Running {
             AppMessage::Cells { tab, cells, selected } => {
                 declared.cells.insert(tab, (cells, selected));
             }
-            AppMessage::RunCell { tab, cell } => declared.run_cells.push_back((tab, cell)),
+            // A cell given with `at` runs with the host's lifecycle work.
+            AppMessage::RunCell { tab, cell, .. } => declared.run_cells.push_back((tab, cell)),
             AppMessage::StopCell { tab, cell } => declared.stop_cells.push_back((tab, cell)),
             AppMessage::Claimed { id, yours } => declared.claimed.push_back((id, yours)),
+            // The items index, rendering, and the picker come with the host's
+            // lifecycle work.
+            AppMessage::Items { .. } | AppMessage::Rendered { .. } | AppMessage::Need { .. } | AppMessage::Pick { .. } => {}
         }
     }
 

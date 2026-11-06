@@ -23,7 +23,7 @@ const SEARCHED: &[&str] = &[
 ];
 
 /// Words that would mean one of these parts was written for a particular
-/// sub-application or its skills.
+/// sub-application or its tools.
 const NAMES: &[&str] = &[
     "simple sketch",
     "simple-sketch",
@@ -34,6 +34,8 @@ const NAMES: &[&str] = &[
     "image-editor",
     "recipe creation",
     "recipe-creation",
+    "video generator",
+    "video-generator",
     "mission control",
     "mission-control",
     "sketch",
@@ -72,8 +74,8 @@ fn the_host_depends_on_no_sub_application() {
     assert!(!manifest.contains("apps/"), "the host depends on a sub-application:\n{manifest}");
 }
 
-/// The skills a built sub-application declares, read from its greeting.
-fn declared_skills(program: &str) -> Vec<(String, protocol::Skill)> {
+/// The tool groups a built sub-application declares, read from its greeting.
+fn declared_tool_groups(program: &str) -> Vec<(String, protocol::ToolGroup)> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug").join(program);
@@ -85,7 +87,7 @@ fn declared_skills(program: &str) -> Vec<(String, protocol::Skill)> {
         .unwrap();
     let mut skills = Vec::new();
     for line in BufReader::new(child.stdout.take().unwrap()).lines() {
-        if let Ok(protocol::AppMessage::Skills { skills: declared }) =
+        if let Ok(protocol::AppMessage::Tools { groups: declared }) =
             protocol::parse_app_message(&line.unwrap())
         {
             skills = declared;
@@ -127,30 +129,31 @@ fn product_code(src: &Path) -> Vec<(String, String)> {
     out
 }
 
-/// Catches a host or an assistant written for particular skills: no skill
-/// id, tool name, or tool key that the Storyboard Generator, the template,
+/// Catches a host or an assistant written for particular tools: no tool
+/// group id, tool name, or tool key that the Storyboard Generator, the template,
 /// or the Image Generator declares appears in their product code.
 #[test]
-fn no_declared_skill_or_tool_is_named_in_the_host_or_the_assistant() {
+fn no_declared_tool_group_or_tool_is_named_in_the_host_or_the_assistant() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut words = Vec::new();
-    for (program, skill) in declared_skills("storyboard-generator")
+    for (program, group) in declared_tool_groups("storyboard-generator")
         .into_iter()
-        .chain(declared_skills("template"))
-        .chain(declared_skills("image-generator"))
-        // Recipe Creation declares no skills yet; its own words are searched for below.
+        .chain(declared_tool_groups("template"))
+        .chain(declared_tool_groups("image-generator"))
+        .chain(declared_tool_groups("video-generator"))
+        // Recipe Creation declares no tools yet; its own words are searched for below.
     {
-        words.push(format!("\"{}\"", skill.id));
-        for tool in &skill.tools {
+        words.push(format!("\"{}\"", group.id));
+        for tool in &group.tools {
             words.push(format!("\"{}\"", tool.name));
-            words.push(protocol::tool_key(&program, &skill.id, &tool.name));
+            words.push(protocol::tool_key(&program, &group.id, &tool.name));
         }
     }
     // `tab` is the protocol's own word: the host gives every tool a `tab`.
-    // A skill that happens to share it names nothing the host was written for.
+    // A tool group that happens to share it names nothing the host was written for.
     words.retain(|word| word != "\"tab\"");
     // `image` is also the model APIs' own word for what the assistant
-    // sends; the Image Generator's skill sharing it names nothing.
+    // sends; the Image Generator's tool group sharing it names nothing.
     words.retain(|word| word != "\"image\"");
     // Recipe Creation's names, former and current. `cells` and `cell` are
     // the protocol's words.
@@ -168,6 +171,9 @@ fn no_declared_skill_or_tool_is_named_in_the_host_or_the_assistant() {
     words.push(String::from("Image Generator"));
     words.push(String::from("image-editor"));
     words.push(String::from(".ipx"));
+    // The Video Generator's names.
+    words.push(String::from("video-generator"));
+    words.push(String::from("Video Generator"));
     let mut found = Vec::new();
     for crate_src in [root.join("src"), root.join("../assistant/src")] {
         for (file, text) in product_code(&crate_src) {

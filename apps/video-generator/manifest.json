@@ -1,0 +1,6 @@
+{
+  "id": "video-generator",
+  "name": "Video Generator",
+  "executable": "video-generator",
+  "protocol": 1
+}
