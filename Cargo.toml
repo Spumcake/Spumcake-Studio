@@ -5,6 +5,7 @@ members = [
     "protocol",
     "assistant",
     "draw",
+    "media",
     "client",
     "apps/template",
     "apps/storyboard-generator",

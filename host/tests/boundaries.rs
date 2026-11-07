@@ -99,6 +99,17 @@ fn the_host_depends_on_no_sub_application() {
     assert!(!manifest.contains("apps/"), "the host depends on a sub-application:\n{manifest}");
 }
 
+/// Catches the host decoding or playing media itself: it depends on no
+/// media library or codec, so frames reach it only as raw files a
+/// workspace writes.
+#[test]
+fn the_host_depends_on_no_media_library() {
+    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("the host's manifest");
+    for word in ["media", "ffmpeg", "cpal", "gstreamer", "symphonia", "openh264"] {
+        assert!(!manifest.contains(word), "the host depends on {word}:\n{manifest}");
+    }
+}
+
 /// The tool groups a built sub-application declares, read from its greeting.
 fn declared_tool_groups(program: &str) -> Vec<(String, protocol::ToolGroup)> {
     use std::io::{BufRead, BufReader};

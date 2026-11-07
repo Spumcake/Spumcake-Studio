@@ -1,0 +1,12 @@
+[package]
+name = "media"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+# Decoding, encoding, and sound for the workspaces that play and write
+# video, never for the host. Its dependencies, FFmpeg's libraries through
+# ffmpeg-next and cpal, are added with its code, as the owner set on
+# 2026-11-06.
+[dependencies]
