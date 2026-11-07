@@ -143,7 +143,7 @@ fn only_the_protocol_names_new_items() {
 #[test]
 fn no_retired_word_is_left() {
     let mut all = Vec::new();
-    for dir in ["apps", "host", "protocol", "draw", "assistant", "client", "docs", "skills"] {
+    for dir in ["apps", "host", "protocol", "draw", "media", "assistant", "client", "docs", "skills"] {
         files(&root().join(dir), &mut all);
     }
     all.push(root().join("AGENTS.md"));
