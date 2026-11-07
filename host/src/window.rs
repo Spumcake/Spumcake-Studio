@@ -1084,6 +1084,11 @@ impl HostWindow {
             self.assistant.send(Command::Result(protocol::ToolResult { call, ok, output, images: Vec::new() }));
             return;
         }
+        if protocol::split_tool_key(tool).is_some_and(|(_, group, name)| group == route::PROMPT_TOOLS && name == route::LIST_OUT_OF_DATE) {
+            let output = self.out_of_date();
+            self.assistant.send(Command::Result(protocol::ToolResult { call, ok: true, output, images: Vec::new() }));
+            return;
+        }
         let text = |key: &str| input.get(key).and_then(|value| value.as_str()).unwrap_or("").to_string();
         let (prompt, run_on, image) = match route::skill_for_tool(&self.settings, tool) {
             Some(skill) => {
@@ -1338,6 +1343,37 @@ impl HostWindow {
             rx,
             settled: false,
         });
+    }
+
+    /// The project's out-of-date items, upstream first, for the assistant:
+    /// each with its file, id, name, workspace, and what changed.
+    fn out_of_date(&self) -> serde_json::Value {
+        let stale = self.items.stale();
+        let items: Vec<serde_json::Value> = self
+            .items
+            .upstream_first()
+            .into_iter()
+            .map(|(at, owner)| {
+                let changed = stale
+                    .get(&at.path)
+                    .and_then(|items| items.iter().find(|item| Some(&item.id) == at.item.as_ref()))
+                    .map(|item| item.changed.clone())
+                    .unwrap_or_default();
+                let workspace = self.apps.iter().find(|started| started.id == owner).map_or(owner.clone(), |started| started.name.clone());
+                serde_json::json!({
+                    "path": at.path,
+                    "item": at.item,
+                    "name": self.items.name(&at),
+                    "workspace": workspace,
+                    "changed": changed,
+                })
+            })
+            .collect();
+        if items.is_empty() {
+            serde_json::json!({ "out_of_date": [], "note": "Nothing in the project is out of date." })
+        } else {
+            serde_json::json!({ "out_of_date": items })
+        }
     }
 
     /// Takes what the workspaces declared about items: updates the index,

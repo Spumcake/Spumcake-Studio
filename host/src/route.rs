@@ -42,8 +42,8 @@ pub(crate) fn host_tools() -> protocol::ToolGroup {
     protocol::ToolGroup {
         id: PROMPT_TOOLS.into(),
         name: "Prompt".into(),
-        description: "Write a prompt and run it as a cell in the conversation.".into(),
-        instructions: "When the person asks for a piece of writing, or to write or run a prompt, call run_text_prompt with the prompt. Do not write the piece in the reply. When they ask to edit an image an Image cell made, call edit_image with the cell's id, or with none for the latest. After the tool returns, reply briefly.".into(),
+        description: "Write a prompt and run it as a cell in the conversation, and find the project's work that is out of date.".into(),
+        instructions: "When the person asks for a piece of writing, or to write or run a prompt, call run_text_prompt with the prompt. Do not write the piece in the reply. When they ask to edit an image an Image cell made, call edit_image with the cell's id, or with none for the latest. When they ask what is out of date, or to render again what changed, call list_out_of_date: it lists each out-of-date item with its workspace, those made from others after the others; render each again with its workspace's own tools, in that order. After the tool returns, reply briefly.".into(),
         tools: vec![
             protocol::Tool {
                 name: RUN_PROMPT.into(),
@@ -56,6 +56,12 @@ pub(crate) fn host_tools() -> protocol::ToolGroup {
                     "required": ["prompt"],
                     "additionalProperties": false
                 }),
+                implements: Vec::new(),
+            },
+            protocol::Tool {
+                name: LIST_OUT_OF_DATE.into(),
+                description: "List every item of the project that is out of date, because something it was made from changed: each with its file, its id, its name, its workspace, and what changed, those made from others after the others.".into(),
+                input: serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
                 implements: Vec::new(),
             },
             protocol::Tool {
@@ -76,6 +82,10 @@ pub(crate) fn host_tools() -> protocol::ToolGroup {
 
 /// The host's own tool group, which runs prompts and opens cells' images.
 pub(crate) const PROMPT_TOOLS: &str = "prompt";
+
+/// The tool that lists the project's out-of-date items, upstream first,
+/// as the owner named it on 2026-11-06.
+pub(crate) const LIST_OUT_OF_DATE: &str = "list_out_of_date";
 
 /// The tool that opens a cell's image as new work. A skill of the
 /// person's never takes this name.

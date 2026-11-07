@@ -96,6 +96,11 @@ impl Index {
         changed
     }
 
+    /// An item's name as its owner declared it.
+    pub(crate) fn name(&self, at: &ItemRef) -> Option<&str> {
+        self.item(at).map(|item| item.name.as_str())
+    }
+
     fn item(&self, at: &ItemRef) -> Option<&Item> {
         let id = at.item.as_ref()?;
         self.files.get(&at.path)?.items.iter().find(|item| &item.id == id)
@@ -127,7 +132,6 @@ impl Index {
 
     /// Every out-of-date item, each with its owner, those made from others
     /// after the others, so rendering them in this order renders each once.
-    #[allow(dead_code)] // The host's out-of-date tool lists them, once its name is the owner's.
     pub(crate) fn upstream_first(&self) -> Vec<(ItemRef, String)> {
         let stale = self.stale();
         let all: Vec<ItemRef> = stale

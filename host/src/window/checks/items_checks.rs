@@ -119,3 +119,26 @@ fn a_needed_item_is_rendered_by_its_owner_and_handed_back() {
     assert_eq!(provided["fingerprint"], "h1");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Catches the assistant's out-of-date tool listing nothing, too much, or
+/// in an order that renders a shot before what it was made from: after the
+/// reference changes, it lists exactly the two shots, each with its name,
+/// its workspace, and what changed.
+#[test]
+fn the_assistant_lists_what_is_out_of_date() {
+    let dir = scratch("items-list");
+    let easel = program(&dir, "easel", EASEL);
+    let reel = program(&dir, "reel", REEL);
+    let stand_in = StandIn::start(Vec::new());
+    let mut window = project_window(vec![spec("easel", "Easel", &easel), spec("reel", "Reel", &reel)], &stand_in, &dir);
+    window.until(|app| app.items.owner("Shots.reel").is_some());
+    assert_eq!(window.app.out_of_date()["out_of_date"], serde_json::json!([]));
+    window.app.send(0, command("edit", "e1"));
+    window.until(|app| !app.items.stale().is_empty());
+    let listed = window.app.out_of_date();
+    let names: Vec<&str> = listed["out_of_date"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Shot 1", "Shot 2"]);
+    assert_eq!(listed["out_of_date"][0]["workspace"], "Reel");
+    assert_eq!(listed["out_of_date"][0]["changed"][0]["item"], "hero");
+    let _ = std::fs::remove_dir_all(dir);
+}

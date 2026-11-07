@@ -537,7 +537,7 @@ fn declared(app: &HostWindow) -> Vec<String> {
             })
         })
         .collect();
-    for tool in ["run_text_prompt", crate::route::EDIT_IMAGE] {
+    for tool in ["run_text_prompt", crate::route::EDIT_IMAGE, crate::route::LIST_OUT_OF_DATE] {
         names.push(protocol::tool_key(crate::route::HOST_ID, "prompt", tool));
     }
     names.sort();
@@ -594,6 +594,7 @@ fn a_stand_in_under_a_known_id_offers_only_its_own_skill() {
         offered(&requests[0]),
         vec![
             "inpainter__prompt__edit_image".to_string(),
+            "inpainter__prompt__list_out_of_date".to_string(),
             "inpainter__prompt__run_text_prompt".to_string(),
             "storyboard-generator__quill__stamp_glyph".to_string(),
         ]
