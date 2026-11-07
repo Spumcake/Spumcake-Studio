@@ -217,6 +217,11 @@ pub enum HostMessage {
     /// Show that frame. `live` while the playhead is held, as a slider's
     /// `preview`, and false once more when it is let go.
     Seek { tab: String, frame: u32, live: bool },
+    /// The host drew this revision of that tab's image or stage frame, at
+    /// `at`, milliseconds since the Unix epoch, so a workspace playing sound
+    /// can keep its image's lead true on any computer and display. Sent
+    /// once for each revision drawn.
+    Shown { tab: String, revision: u64, at: u64 },
     /// The contents area's size, once it is first known.
     Viewport { viewport: [f64; 2] },
     /// The button the person chose on an `ask`.
@@ -1123,6 +1128,7 @@ mod tests {
             gesture: TimelineGesture::Resize { pick: TimelinePick { row: "v1".into(), item: Some("c1".into()), frame: None }, edge: Edge::End, frames: -4 },
         });
         round_trip_host(HostMessage::Seek { tab: "1".into(), frame: 30, live: true });
+        round_trip_host(HostMessage::Shown { tab: "1".into(), revision: 41, at: 1_793_146_000_123 });
         round_trip_host(HostMessage::Camera { tab: "1".into(), origin: [0.0, 0.0], zoom: 1.0, rotation: 15.0, flip: true });
         let Ok(HostMessage::Camera { rotation, flip, .. }) = parse_host_message(r#"{"type":"camera","tab":"1","origin":[0,0],"zoom":1}"#) else {
             panic!("a camera without rotation did not read");

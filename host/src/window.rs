@@ -2268,6 +2268,23 @@ impl HostWindow {
                     .rect_filled(rect, 0.0, CANVAS);
             }
         }
+        // The workspace learns which frame of its stage or raster image was
+        // drawn, and when, once for each revision.
+        if let Some(image) = self
+            .apps
+            .get(app)
+            .and_then(|started| started.running.declared.stages.get(&tab))
+            .and_then(|stage| stage.image.as_ref())
+            && let Some(revision) = crate::frames::shown_revision(image)
+        {
+            crate::frames::note_shown(&tab, revision);
+        }
+        for (shown, revision) in crate::frames::take_shown() {
+            if shown == tab {
+                let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+                self.send(app, HostMessage::Shown { tab: tab.clone(), revision, at });
+            }
+        }
         if let Some(timeline) = &timeline {
             let below = Rect::from_min_max(egui::pos2(whole.left(), rect.bottom()), whole.max);
             for out in crate::timeline::show(ui, timeline, below, locked) {

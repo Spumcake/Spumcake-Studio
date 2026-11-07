@@ -301,6 +301,8 @@ impl Server {
                 activate(&mut self.session, Some(&tab));
                 crate::timeline::seek(&mut self.session, frame);
             }
+            // Kept in step with the image once the storyboard plays sound.
+            HostMessage::Shown { .. } => {}
             HostMessage::Gesture { tab, gesture } => {
                 // A gesture is always answered with the document, even when
                 // it changed nothing, so the host's preview of it can end.
