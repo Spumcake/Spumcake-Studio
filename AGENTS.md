@@ -18,6 +18,7 @@ The stack is Rust, egui through eframe, and Iconoir icons.
 - `apps/image-generator/` — the Image Generator: layered images. It owns every pixel, layer, and step of history, composites the image, and declares a raster tab; the host draws it, previews strokes, and sends gestures. Its `.ipx` format is in its own AGENTS.md.
 - `.project/scripts/check.sh` — the one check to run before calling work done (see Working rules).
 - `media/` — video, sound, and encoding, shared by the workspaces that play and write them, as `draw/` is; never used by the host. The Image and Video role session writes it, to the interface in the lifecycle contract.
+- `docs/tools.md` — the catalogue of every tool the assistant can be offered, written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`; a check fails while it is out of date, so regenerate it whenever a tool changes.
 - `client/` — `storyboard-client`, the no-host check: it drives `storyboard-generator` through the protocol alone, including every tool, one undo per request, and `open` and `keep`, and compares every reply with an in-process session. Its coverage check fails when a hand action that changes a storyboard has no tool.
 
 ## Rules

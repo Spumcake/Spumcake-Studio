@@ -25,6 +25,7 @@ mod route;
 mod tablet;
 mod tabs;
 mod timeline;
+mod tool_catalogue;
 mod toolbar;
 mod typescale;
 mod widgets;
