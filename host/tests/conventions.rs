@@ -15,7 +15,7 @@ const WORKSPACES: &[(&str, &str, bool)] = &[
 ];
 
 /// Words the guide retires, as a word or part of an identifier.
-const RETIRED_WORDS: &[&str] = &["notebook", "book", "sketch", "picture", "asset", "strategy", "strategies"];
+const RETIRED_WORDS: &[&str] = &["notebook", "book", "sketch", "picture", "asset"];
 
 /// Names the guide retires, matched with spaces, hyphens, and underscores
 /// left out, so "image-editor", "ImageEditor", and "mission_control" count.
