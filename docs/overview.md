@@ -43,7 +43,7 @@ A monolith that tries to do everything in one program. A general-purpose AI chat
 - **Project:** a folder Studio creates where the person chooses, holding its activities and its sessions.
 - **Session:** a conversation with the assistant, with the tabs it has open.
 - **Cell:** the standard presentation of one promptable task, its prompt and its result, drawn by the host the same way everywhere.
-- **Recipe Creation:** the sub-application whose work is recipes.
-- **Recipe:** a list of cells.
+- **Recipe:** the platform's concept, a list of cells, which Studio makes and edits.
+- **Recipe Creation:** the workspace that manages recipe activities.
 - **Workspace:** the editor a sub-application provides for its kind of activity, such as the Storyboard Generator or Recipe Creation. Each tab shows one.
 - **Workspace panel:** the area beside the conversation where a session's tabs are open, revealed from the bar at the window's right edge.
