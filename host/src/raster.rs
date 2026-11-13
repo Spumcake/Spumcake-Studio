@@ -611,6 +611,11 @@ impl Pointer {
         // 2026-10-30, so a white image stands apart from the grey.
         match raw_image(ui.ctx(), &view.image, view.width, view.height, view.revision, &display.patches, view.patch.as_ref().is_some_and(|patch| patch.file.is_some())) {
             Some((texture, opaque)) => {
+                // The workspace learns which revision is on screen, so a
+                // video it plays keeps its frames with its sound.
+                if let Some(revision) = shown_revision(ui.ctx(), &view.image) {
+                    crate::frames::note_shown(&view.tab, revision);
+                }
                 if !opaque {
                     checker(ui.ctx(), &painter, image);
                 }
@@ -1270,6 +1275,12 @@ pub(crate) fn raw_image(
         cache.retain(|_, image| pass.saturating_sub(image.used) < FORGET_AFTER);
     });
     answer
+}
+
+/// The revision of the image at `path` its texture shows now, if any.
+fn shown_revision(ctx: &egui::Context, path: &str) -> Option<u64> {
+    let id = egui::Id::new("raster-images");
+    ctx.data(|data| data.get_temp::<HashMap<String, Entry>>(id)?.get(path)?.shown.as_ref().map(|shown| shown.revision))
 }
 
 /// Uploads what a finished reading brought, unless the texture has moved

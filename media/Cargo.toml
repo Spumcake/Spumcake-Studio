@@ -6,7 +6,9 @@ rust-version = "1.95"
 publish = false
 
 # Decoding, encoding, and sound for the workspaces that play and write
-# video, never for the host. Its dependencies, FFmpeg's libraries through
-# ffmpeg-next and cpal, are added with its code, as the owner set on
-# 2026-11-06.
+# video, never for the host. FFmpeg's libraries through ffmpeg-next, and
+# cpal, as the owner set on 2026-11-06. Building needs the system's FFmpeg
+# development packages, clang, and the ALSA development package.
 [dependencies]
+cpal = "=0.18.2"
+ffmpeg-next = "=9.0.0"
