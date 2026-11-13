@@ -31,6 +31,13 @@ fn main() {
             let Ok(line) = line else {
                 break;
             };
+            // Which revision the host drew is for workspaces that play
+            // video. Read as a message, it would come after every image
+            // sent and keep the loop from ever being idle, so a finished
+            // stroke's image would never be written whole.
+            if line.contains("\"type\":\"shown\"") {
+                continue;
+            }
             if lines.send(line).is_err() {
                 break;
             }
