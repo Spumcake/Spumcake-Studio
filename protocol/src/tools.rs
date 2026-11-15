@@ -37,8 +37,8 @@ pub struct Tool {
     pub description: String,
     /// A JSON Schema for the tool's input, an object. The host adds `tab`.
     pub input: Value,
-    /// The Spumcake-Agent general skills this tool carries out, by name, as
-    /// an execution skill's `implements` does.
+    /// The Spumcake-Skills skills this tool carries out, by name, as an
+    /// execution skill's `implements` does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub implements: Vec<String>,
 }
