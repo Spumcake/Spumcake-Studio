@@ -949,15 +949,21 @@ pub fn run() {
             }
         }
     });
+    // The tick runs every TICK however busy the host keeps the line, since
+    // `shown` arrives with each frame drawn and would otherwise starve it.
+    let mut ticked = Instant::now();
     loop {
-        let line = match incoming.recv_timeout(TICK) {
-            Ok(line) => line,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                for reply in &server.tick() {
-                    send(reply);
-                }
-                continue;
+        let wait = TICK.saturating_sub(ticked.elapsed());
+        let received = incoming.recv_timeout(wait);
+        if ticked.elapsed() >= TICK {
+            ticked = Instant::now();
+            for reply in &server.tick() {
+                send(reply);
             }
+        }
+        let line = match received {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let Ok(message) = protocol::parse_host_message(&line) else {
