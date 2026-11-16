@@ -1467,7 +1467,9 @@ impl Session {
             }
             // Taken off already, as every message but a stroke's does.
             RasterGesture::StrokeCancel => self.tools.stroke = None,
-            RasterGesture::StrokePart { .. } | RasterGesture::DragPart { .. } => {}
+            // The Image Generator leaves its camera to the host, so a
+            // `view` gesture never comes; one that did changes nothing.
+            RasterGesture::StrokePart { .. } | RasterGesture::DragPart { .. } | RasterGesture::View { .. } => {}
             RasterGesture::Source { at } => {
                 if at[0].is_finite() && at[1].is_finite() {
                     self.tools.source = Some(at);
@@ -2284,6 +2286,7 @@ impl Session {
             crop: if crop_tool { frame.crop } else { None },
             bounds: bounds.map(|rect| [f64::from(rect.x), f64::from(rect.y), f64::from(rect.w), f64::from(rect.h)]),
             camera,
+            camera_owner: protocol::RasterCamera::Host,
             film: Some(film),
             text,
         })

@@ -222,6 +222,9 @@ impl Pointer {
         }
         let press_inside = over && !dismissing;
         let tool = display.view.tool.clone();
+        // The workspace moves its own view: the host's camera stays, and
+        // what would move it is sent instead.
+        let owned = !display.view.camera_owner.is_host();
         // Space types into a text rather than pans.
         let typing = display.view.text.is_some();
         let space = space && !typing;
@@ -250,8 +253,14 @@ impl Pointer {
                 } else if tool == RasterTool::Zoom {
                     if let Some(pos) = pos {
                         let factor = if alt { 1.0 / CLICK_STEP } else { CLICK_STEP };
-                        zoom_toward(display, factor, pos - rect.min);
-                        moved = true;
+                        if owned {
+                            if let Some(camera) = display.camera {
+                                out.push(Out::Gesture(view_gesture(&camera, rect, pos, factor, egui::Vec2::ZERO)));
+                            }
+                        } else {
+                            zoom_toward(display, factor, pos - rect.min);
+                            moved = true;
+                        }
                     }
                 } else if !locked && let Some(pos) = pos {
                     self.press(ui, display, rect, tablet, pos, out);
@@ -264,8 +273,13 @@ impl Pointer {
             if delta != egui::Vec2::ZERO
                 && let Some(camera) = display.camera.as_mut()
             {
-                pan(camera, delta);
-                moved = true;
+                if owned {
+                    let at = pos.unwrap_or(rect.center());
+                    out.push(Out::Gesture(view_gesture(camera, rect, at, 1.0, delta)));
+                } else {
+                    pan(camera, delta);
+                    moved = true;
+                }
             }
             if released(button) || !down(button) {
                 self.pan = None;
@@ -288,7 +302,7 @@ impl Pointer {
             out.push(Out::Text(TextInput::Word { at: image_at(&camera, rect, pos) }));
         }
 
-        moved |= wheel(ui, display, rect, over || self.drag.is_some() || self.pan.is_some());
+        moved |= wheel(ui, display, rect, over || self.drag.is_some() || self.pan.is_some(), owned.then_some(&mut *out));
 
         let cursor = self.cursor(ui, display, rect, &tool, space, alt, locked);
         response.on_hover_cursor(cursor);
@@ -950,9 +964,21 @@ fn pan(camera: &mut Camera, delta: egui::Vec2) {
     camera.origin[1] -= f64::from(delta.y) / camera.zoom;
 }
 
+/// What would move the host's camera, sent to a workspace that moves its
+/// own: a zoom by `zoom_by` about the pointer, and a pan of `pan_by` points
+/// on screen, both given in image pixels.
+fn view_gesture(camera: &Camera, rect: Rect, pointer: Pos2, zoom_by: f64, pan_by: egui::Vec2) -> RasterGesture {
+    RasterGesture::View {
+        zoom_by,
+        pan_by: [f64::from(pan_by.x) / camera.zoom, f64::from(pan_by.y) / camera.zoom],
+        at: image_at(camera, rect, pointer),
+    }
+}
+
 /// The wheel pans, sideways with Shift, and zooms at the pointer with the
-/// command key, as on the drawing surface.
-fn wheel(ui: &egui::Ui, display: &mut RasterDisplay, rect: Rect, inside: bool) -> bool {
+/// command key, as on the drawing surface. With `sent`, the workspace moves
+/// its own view, and each step goes there as a gesture instead.
+fn wheel(ui: &egui::Ui, display: &mut RasterDisplay, rect: Rect, inside: bool, mut sent: Option<&mut Vec<Out>>) -> bool {
     if !inside {
         return false;
     }
@@ -970,16 +996,28 @@ fn wheel(ui: &egui::Ui, display: &mut RasterDisplay, rect: Rect, inside: bool) -
         };
         let x = f64::from(delta.x) * scale;
         let y = f64::from(delta.y) * scale;
+        let at = hover.unwrap_or(rect.center());
         if modifiers.command {
             if y != 0.0 {
-                let pointer = hover.unwrap_or(rect.center()) - rect.min;
-                zoom_toward(display, (5.0_f64 / 4.0).powf(y / NOTCH_POINTS), pointer);
-                moved = true;
+                let factor = (5.0_f64 / 4.0).powf(y / NOTCH_POINTS);
+                match (sent.as_deref_mut(), display.camera) {
+                    (Some(out), Some(camera)) => out.push(Out::Gesture(view_gesture(&camera, rect, at, factor, egui::Vec2::ZERO))),
+                    (Some(_), None) => {}
+                    (None, _) => {
+                        zoom_toward(display, factor, at - rect.min);
+                        moved = true;
+                    }
+                }
             }
         } else if let Some(camera) = display.camera.as_mut() {
             let step = if modifiers.shift { vec2((x + y) as f32, 0.0) } else { vec2(x as f32, y as f32) };
-            pan(camera, step);
-            moved = true;
+            match sent.as_deref_mut() {
+                Some(out) => out.push(Out::Gesture(view_gesture(camera, rect, at, 1.0, step))),
+                None => {
+                    pan(camera, step);
+                    moved = true;
+                }
+            }
         }
     }
     moved
