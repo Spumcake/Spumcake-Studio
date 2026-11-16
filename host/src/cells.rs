@@ -90,6 +90,9 @@ pub(crate) struct Board {
     /// endpoint id, model, and effort its next run uses. The run's result
     /// records them.
     pub chosen: HashMap<String, (String, String, Option<String>)>,
+    /// Why a workspace cell's last run failed, by cell id, until it runs
+    /// again, for the panel's card.
+    pub failed: HashMap<String, String>,
 }
 
 impl Default for Board {
@@ -104,6 +107,7 @@ impl Default for Board {
             bordered: None,
             menu_buttons: Vec::new(),
             chosen: HashMap::new(),
+            failed: HashMap::new(),
         }
     }
 }
@@ -779,7 +783,7 @@ pub(crate) fn set_model_names(ctx: &egui::Context, names: &[(String, String)]) {
 
 /// A model's name from the picker's list, or its id without the provider
 /// when the list does not hold it.
-fn model_name(ctx: &egui::Context, id: &str) -> String {
+pub(crate) fn model_name(ctx: &egui::Context, id: &str) -> String {
     let known = ctx.data(|data| {
         data.get_temp::<HashMap<String, String>>(egui::Id::new("cell-model-names"))
             .and_then(|names| names.get(id).cloned())

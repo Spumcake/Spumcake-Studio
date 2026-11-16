@@ -10,6 +10,35 @@ fail() {
     exit 1
 }
 
+# The real-data checks run when this workspace holds what they read: the
+# Skills dev checkout's scripts and skills, the media team's linked skills,
+# and Last order. From a worktree folder, they sit beside it under
+# /mnt/Hot/Source; otherwise the checks that need them pass without running.
+root="$PWD"
+skills_dev="$root/../../../spumcake-skills/worktrees/dev"
+media_team="$root/../../../../../media-team"
+last_order="$media_team/src/spumcake-benchmarks/worktrees/dev/last-order"
+if [ -d "$skills_dev/scripts" ]; then
+    export SPUMCAKE_SKILLS_SCRIPTS="$(cd "$skills_dev/scripts" && pwd)"
+fi
+if [ -d "$skills_dev/skills" ]; then
+    folders="$(cd "$skills_dev/skills" && pwd)"
+    if [ -d "$media_team/.claude/skills" ]; then
+        folders="$folders:$(cd "$media_team/.claude/skills" && pwd)"
+    fi
+    export SPUMCAKE_SKILL_FOLDERS="$folders"
+fi
+if [ -d "$last_order" ]; then
+    export SPUMCAKE_LAST_ORDER="$(cd "$last_order" && pwd)"
+    export LAST_ORDER="$SPUMCAKE_LAST_ORDER"
+fi
+for name in SPUMCAKE_SKILLS_SCRIPTS SPUMCAKE_SKILL_FOLDERS SPUMCAKE_LAST_ORDER; do
+    case "${!name:-}" in
+        ""|/mnt/Hot/Source/*) ;;
+        *) unset "$name" LAST_ORDER ;;
+    esac
+done
+
 echo "== build"
 cargo build --workspace 2>&1 | tail -3
 [ "${PIPESTATUS[0]}" -eq 0 ] || fail "cargo build"

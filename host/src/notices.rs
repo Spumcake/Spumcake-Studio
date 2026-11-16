@@ -23,12 +23,6 @@ const BAR: Color32 = Color32::from_rgb(37, 99, 235);
 const FIT_MIN: f32 = 240.0;
 const FIT_MAX: f32 = 480.0;
 
-/// Draws `notices` stacked up from the bottom right of `area`, disabled
-/// while `locked`. Returns the actions chosen.
-pub(crate) fn show(ui: &mut egui::Ui, notices: &[Notice], area: Rect, locked: bool) -> Vec<Action> {
-    show_in(ui, notices, NoticeCorner::BottomRight, area, locked)
-}
-
 /// Draws `notices` stacked up from `corner` of `area`, above a filmstrip
 /// drawn in it this frame, disabled while `locked`. Returns the actions
 /// chosen.
