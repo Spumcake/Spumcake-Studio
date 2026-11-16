@@ -3,14 +3,17 @@
 //! show. The host draws the thumbnails and the + tile, and sends what the
 //! pointer does on them: `focus` at any press, `select` for a click, a
 //! thumbnail's own rows for a right-click, the + tile's rows, and `reorder`
-//! for a drag. What any of it means is the sub-application's.
+//! for a drag. What any of it means is the sub-application's. Items come in
+//! runs, each under its label, such as a round of takes, and a drag stays
+//! inside its run. A tile carries words on its corner, a mark, the chosen
+//! take's star, or, for a take not made yet, a striped or failed tile.
 
 use crate::widgets;
 use eframe::egui::{
     self, Color32, CursorIcon, Event, Key, MouseWheelUnit, PointerButton, Popup, Rect, RectAlign, Sense,
     SetOpenCommand, pos2, vec2,
 };
-use protocol::{Action, Film, FilmItem};
+use protocol::{Action, Film, FilmItem, FilmPending};
 use serde_json::{Value, json};
 
 /// The strip's height, its hairline included, in points.
@@ -37,13 +40,76 @@ const EDGE: f32 = 28.0;
 const EDGE_STEP: f32 = 8.0;
 /// A wheel notch, as on the image.
 const NOTCH_POINTS: f32 = 50.0;
+/// What a run's label adds above the thumbnails, and the space between two
+/// runs, with a hairline in its middle, as ig-filmstrip-rounds shows.
+const LABEL_H: f32 = 22.0;
+const RUN_GAP: f32 = 25.0;
+/// A run's label, small and gray.
+const LABEL_SIZE: f32 = 12.5;
+/// The words on a tile's corner, white on a dark rounded badge.
+const BADGE_SIZE: f32 = 11.5;
+const BADGE_FILL: Color32 = Color32::from_rgba_premultiplied(17, 18, 20, 190);
+/// A tile still being made: light gray, striped, as vg-take-running shows.
+const PENDING_FILL: Color32 = Color32::from_rgb(243, 244, 246);
+const STRIPE: Color32 = Color32::from_rgb(232, 234, 238);
+const STRIPE_STEP: f32 = 8.0;
+/// A tile that failed: pale, with a red mark, as ig-request-failed shows.
+const FAILED_FILL: Color32 = Color32::from_rgb(248, 249, 250);
+const FAILED: Color32 = Color32::from_rgb(220, 38, 38);
+const SPINNER: Color32 = Color32::from_rgb(120, 126, 136);
+
+/// The strip's height for `film`: taller by a line when its runs have labels.
+pub(crate) fn height(film: &Film) -> f32 {
+    if labelled(film) { HEIGHT + LABEL_H } else { HEIGHT }
+}
+
+/// Whether any run has a label to draw above it.
+fn labelled(film: &Film) -> bool {
+    film.groups.iter().any(|group| !group.label.is_empty())
+}
+
+/// Where a filmstrip was drawn this frame, if one was, so notices can sit
+/// above it.
+pub(crate) fn drawn(ctx: &egui::Context) -> Option<Rect> {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|data| data.get_temp::<(u64, Rect)>(drawn_id()))
+        .filter(|(at, _)| *at == pass)
+        .map(|(_, rect)| rect)
+}
+
+fn drawn_id() -> egui::Id {
+    egui::Id::new("film-drawn")
+}
+
+/// The strip's runs, in order: each group's items, then any items past
+/// the groups as a run of their own, with no label. An empty run is left
+/// out, unless the strip has no items at all.
+fn runs(film: &Film) -> Vec<(usize, usize, Option<usize>)> {
+    let len = film.items.len();
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for (index, group) in film.groups.iter().enumerate() {
+        let end = (start + group.count).min(len);
+        if end > start {
+            runs.push((start, end, Some(index)));
+        }
+        start = end;
+    }
+    if start < len {
+        runs.push((start, len, None));
+    }
+    if runs.is_empty() {
+        runs.push((0, 0, None));
+    }
+    runs
+}
 
 /// The area a raster tab gives its image, and the strip under it when the
 /// view has a filmstrip. An area too short for both keeps the image.
 pub(crate) fn split(rect: Rect, film: Option<&Film>) -> (Rect, Option<Rect>) {
     match film {
-        Some(_) if rect.height() > 2.0 * HEIGHT => {
-            let top = rect.bottom() - HEIGHT;
+        Some(film) if rect.height() > 2.0 * height(film) => {
+            let top = rect.bottom() - height(film);
             (Rect::from_min_max(rect.min, pos2(rect.right(), top)), Some(Rect::from_min_max(pos2(rect.left(), top), rect.max)))
         }
         _ => (rect, None),
@@ -118,25 +184,59 @@ impl Strip {
 }
 
 /// Where each tile lies along the strip, from its start: the thumbnails,
-/// then the + tile.
+/// in their runs, then the + tile.
 struct Layout {
     lefts: Vec<f32>,
     widths: Vec<f32>,
+    spans: Vec<Span>,
+    /// Where each hairline between two runs is.
+    dividers: Vec<f32>,
     add: f32,
     total: f32,
+}
+
+/// One run along the strip: its items, `start` to before `end`, the group
+/// it is, and where its first tile starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Span {
+    start: usize,
+    end: usize,
+    group: Option<usize>,
+    left: f32,
+}
+
+impl Layout {
+    /// The run holding item `index`.
+    fn span_of(&self, index: usize) -> Span {
+        self.spans
+            .iter()
+            .copied()
+            .find(|span| span.start <= index && index < span.end)
+            .unwrap_or(Span { start: 0, end: self.lefts.len(), group: None, left: INSET })
+    }
 }
 
 fn layout(film: &Film) -> Layout {
     let mut x = INSET;
     let mut lefts = Vec::with_capacity(film.items.len());
     let mut widths = Vec::with_capacity(film.items.len());
-    for item in &film.items {
-        let width = thumb_width(item);
-        lefts.push(x);
-        widths.push(width);
-        x += width + GAP;
+    let mut spans = Vec::new();
+    let mut dividers = Vec::new();
+    for (index, (start, end, group)) in runs(film).into_iter().enumerate() {
+        if index > 0 {
+            let right = x - GAP;
+            dividers.push(right + RUN_GAP / 2.0);
+            x = right + RUN_GAP;
+        }
+        spans.push(Span { start, end, group, left: x });
+        for item in &film.items[start..end] {
+            let width = thumb_width(item);
+            lefts.push(x);
+            widths.push(width);
+            x += width + GAP;
+        }
     }
-    Layout { lefts, widths, add: x, total: x + ADD_W + INSET }
+    Layout { lefts, widths, spans, dividers, add: x, total: x + ADD_W + INSET }
 }
 
 /// A thumbnail's width at the strip's height, at its image's proportions.
@@ -146,12 +246,15 @@ fn thumb_width(item: &FilmItem) -> f32 {
 }
 
 /// Where a dragged thumbnail lands with the pointer at `x` along the strip:
-/// before every other thumbnail whose middle is past it, counted after the
-/// dragged one is taken out, as `reorder` wants.
+/// inside its own run, before every other thumbnail of the run whose
+/// middle is past it, counted after the dragged one is taken out, as
+/// `reorder` wants.
 fn landing(layout: &Layout, from: usize, x: f32) -> usize {
-    (0..layout.lefts.len())
-        .filter(|index| *index != from && layout.lefts[*index] + layout.widths[*index] / 2.0 < x)
-        .count()
+    let span = layout.span_of(from);
+    span.start
+        + (span.start..span.end)
+            .filter(|index| *index != from && layout.lefts[*index] + layout.widths[*index] / 2.0 < x)
+            .count()
 }
 
 /// `action` with these fields added to its argument, as `Action::with_value`
@@ -185,6 +288,8 @@ impl Strip {
         dismissing: bool,
         out: &mut Vec<Action>,
     ) {
+        let pass = ui.ctx().cumulative_pass_nr();
+        ui.ctx().data_mut(|data| data.insert_temp(drawn_id(), (pass, rect)));
         let painter = ui.painter().with_clip_rect(rect);
         painter.rect_filled(rect, 0.0, Color32::WHITE);
         painter.hline(rect.x_range(), rect.top() + 0.5, (1.0, widgets::BORDER));
@@ -237,7 +342,10 @@ impl Strip {
         }
         self.scroll = self.scroll.clamp(0.0, (layout.total - rect.width()).max(0.0));
         let start = rect.left() - self.scroll;
-        let top = rect.center().y + 0.5 - THUMB_H / 2.0;
+        // Under the runs' labels when they have them, the thumbnails are
+        // centered on the rest of the strip.
+        let label_h = if labelled(film) { LABEL_H } else { 0.0 };
+        let top = (rect.top() + label_h + rect.bottom()) / 2.0 + 0.5 - THUMB_H / 2.0;
         let tile = |left: f32, width: f32| Rect::from_min_size(pos2(start + left, top), vec2(width, THUMB_H));
 
         // The open drag lands or is let go.
@@ -257,6 +365,36 @@ impl Strip {
         let mut strip = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("film"));
         strip.set_clip_rect(rect.intersect(ui.clip_rect()));
         let mut chosen: Option<Action> = None;
+
+        // Each run's label above its first tile, cut before the next run,
+        // and a hairline between runs.
+        for x in &layout.dividers {
+            painter.vline(start + x, (rect.top() + 8.0)..=(top + THUMB_H), (1.0, widgets::BORDER));
+        }
+        if label_h > 0.0 {
+            for (index, span) in layout.spans.iter().enumerate() {
+                let Some(group) = span.group.and_then(|group| film.groups.get(group)) else {
+                    continue;
+                };
+                if group.label.is_empty() {
+                    continue;
+                }
+                let right = layout.spans.get(index + 1).map_or(layout.add + ADD_W, |next| next.left - RUN_GAP / 2.0 - 4.0);
+                let place = Rect::from_min_max(pos2(start + span.left, rect.top() + 4.0), pos2(start + right, rect.top() + label_h + 6.0));
+                let mut job = egui::text::LayoutJob::simple_singleline(group.label.clone(), egui::FontId::proportional(LABEL_SIZE), widgets::MUTED);
+                job.wrap = egui::text::TextWrapping::truncate_at_width(place.width().max(1.0));
+                let galley = painter.layout_job(job);
+                let at = pos2(place.left(), place.center().y - galley.size().y / 2.0);
+                let label = Rect::from_min_size(at, galley.size());
+                painter.galley(at, galley, widgets::MUTED);
+                if acts && !group.menu.is_empty() {
+                    let response = strip.interact(label, strip.id().with(("run", index)), Sense::click());
+                    if let Some(row) = widgets::action_menu(&response, &group.menu) {
+                        chosen = row.action.clone();
+                    }
+                }
+            }
+        }
         for (index, item) in film.items.iter().enumerate() {
             let place = tile(layout.lefts[index], layout.widths[index]);
             let mut response = strip.interact(place, strip.id().with(("thumb", index)), Sense::click_and_drag());
@@ -269,9 +407,10 @@ impl Strip {
                 let extend = strip.input(|input| input.modifiers.ctrl || input.modifiers.command || input.modifiers.shift);
                 out.push(film.select_message(index, extend));
             }
+            let span = layout.span_of(index);
             if acts
                 && self.moving.is_none()
-                && film.items.len() > 1
+                && span.end - span.start > 1
                 && response.drag_started_by(PointerButton::Primary)
             {
                 let grab = response.interact_pointer_pos().map_or(place.width() / 2.0, |at| at.x - place.left());
@@ -324,9 +463,11 @@ impl Strip {
             && let Some(pos) = pos
         {
             let to = landing(&layout, moving.from, pos.x - start);
-            let others: Vec<usize> = (0..film.items.len()).filter(|index| *index != moving.from).collect();
-            let before = if to == 0 { INSET - GAP } else { layout.lefts[others[to - 1]] + layout.widths[others[to - 1]] };
-            let after = others.get(to).map_or(layout.add, |index| layout.lefts[*index]);
+            let span = layout.span_of(moving.from);
+            let others: Vec<usize> = (span.start..span.end).filter(|index| *index != moving.from).collect();
+            let at = to - span.start;
+            let before = if at == 0 { span.left - GAP } else { layout.lefts[others[at - 1]] + layout.widths[others[at - 1]] };
+            let after = others.get(at).map_or(before + GAP, |index| layout.lefts[*index]);
             let x = start + (before + after) / 2.0;
             painter.vline(x, (top - 4.0)..=(top + THUMB_H + 4.0), (2.0, SHOWN));
             let width = layout.widths[moving.from];
@@ -340,26 +481,105 @@ impl Strip {
 }
 
 /// One thumbnail: its image at its proportions, with rounded corners, over
-/// squares where it is clear, outlined in blue when it is the one shown and
-/// with a hairline otherwise.
+/// squares where it is clear, outlined in blue when it is the one shown or
+/// the take chosen and with a hairline otherwise. A take not made yet is a
+/// striped tile with a spinner, or a pale one with a red mark. Over it go
+/// its badge at the bottom right, its mark at the top left, and the chosen
+/// take's star at the top right.
 fn paint_thumb(ui: &egui::Ui, painter: &egui::Painter, place: Rect, item: &FilmItem, shown: bool) {
-    let thumbnail = &item.thumbnail;
-    match crate::raster::raw_image(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false) {
-        Some((texture, opaque)) => {
-            if !opaque {
-                crate::raster::checker(ui.ctx(), painter, place);
-            }
-            let options = egui::ImageOptions { corner_radius: RADIUS.into(), ..Default::default() };
-            egui::widgets::paint_texture_at(painter, place, &options, &egui::load::SizedTexture::new(texture, place.size()));
+    match &item.pending {
+        Some(FilmPending::Running { since }) => paint_running(ui, painter, place, *since),
+        Some(FilmPending::Failed) => {
+            painter.rect_filled(place, RADIUS, FAILED_FILL);
+            widgets::disc(painter, place.center(), 8.0, FAILED);
+            painter.text(place.center(), egui::Align2::CENTER_CENTER, "!", egui::FontId::proportional(12.0), Color32::WHITE);
         }
-        None => crate::raster::checker(ui.ctx(), painter, place),
+        None => {
+            let thumbnail = &item.thumbnail;
+            match crate::raster::raw_image(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false) {
+                Some((texture, opaque)) => {
+                    if !opaque {
+                        crate::raster::checker(ui.ctx(), painter, place);
+                    }
+                    let options = egui::ImageOptions { corner_radius: RADIUS.into(), ..Default::default() };
+                    egui::widgets::paint_texture_at(painter, place, &options, &egui::load::SizedTexture::new(texture, place.size()));
+                }
+                None => crate::raster::checker(ui.ctx(), painter, place),
+            }
+        }
     }
-    if shown {
+    if shown || item.chosen {
         widgets::outlined(painter, place.expand(3.0), RADIUS + 3.0, Color32::TRANSPARENT, SHOWN);
         widgets::outlined(painter, place.expand(2.0), RADIUS + 2.0, Color32::TRANSPARENT, SHOWN);
     } else {
         widgets::outlined(painter, place, RADIUS, Color32::TRANSPARENT, widgets::BORDER);
     }
+    if !item.badge.is_empty() {
+        badge(painter, place, &item.badge);
+    }
+    if let Some(mark) = &item.mark {
+        // The canon seal, as vg-filmstrip-rounds shows: a white icon in a
+        // ring, on a dark disc so it reads on any image.
+        let center = pos2(place.left() + 11.0, place.top() + 11.0);
+        widgets::disc(painter, center, 8.0, BADGE_FILL);
+        widgets::ring(painter, center, 8.0, 1.2, Color32::WHITE);
+        crate::toolbar::paint_icon(painter, center, mark, 11.0, Color32::WHITE);
+    }
+    if item.chosen {
+        // The chosen take's star, as ig-candidate-chosen shows.
+        let center = pos2(place.right() - 10.0, place.top() + 10.0);
+        widgets::disc(painter, center, 7.5, SHOWN);
+        crate::toolbar::paint_icon(painter, center, "star-solid", 9.0, Color32::WHITE);
+    }
+}
+
+/// Words on a dark rounded badge at the tile's bottom right, such as a
+/// take's length or the minutes a take has been running.
+fn badge(painter: &egui::Painter, place: Rect, words: &str) {
+    let galley = painter.layout_no_wrap(words.to_string(), egui::FontId::proportional(BADGE_SIZE), Color32::WHITE);
+    let size = galley.size() + vec2(8.0, 3.0);
+    let spot = Rect::from_min_size(place.right_bottom() - size - vec2(4.0, 4.0), size);
+    painter.rect_filled(spot, 4.0, BADGE_FILL);
+    painter.galley(spot.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
+/// A take being made: a light-gray tile with diagonal stripes, a spinner
+/// in its middle, and, from `since`, the minutes it has been running.
+fn paint_running(ui: &egui::Ui, painter: &egui::Painter, place: Rect, since: Option<u64>) {
+    painter.rect_filled(place, RADIUS, PENDING_FILL);
+    let stripes = painter.with_clip_rect(place.shrink(1.0).intersect(painter.clip_rect()));
+    let mut x = place.left() - place.height();
+    while x < place.right() {
+        stripes.line_segment([pos2(x, place.bottom()), pos2(x + place.height(), place.top())], (1.0, STRIPE));
+        x += STRIPE_STEP;
+    }
+    let time = ui.input(|input| input.time);
+    spinner(painter, place.center(), 8.0, time);
+    if let Some(since) = since {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |now| now.as_secs());
+        badge(painter, place, &clock(now.saturating_sub(since)));
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+}
+
+/// A spinner of twelve short spokes, the one leading darkest, turning once
+/// a second.
+pub(crate) fn spinner(painter: &egui::Painter, center: egui::Pos2, radius: f32, time: f64) {
+    const SPOKES: usize = 12;
+    let lead = ((time.fract() * SPOKES as f64) as usize) % SPOKES;
+    for spoke in 0..SPOKES {
+        let angle = spoke as f32 / SPOKES as f32 * std::f32::consts::TAU;
+        let along = vec2(angle.sin(), -angle.cos());
+        let behind = (lead + SPOKES - spoke) % SPOKES;
+        let alpha = 1.0 - behind as f32 / SPOKES as f32 * 0.85;
+        let color = SPINNER.gamma_multiply(alpha);
+        painter.line_segment([center + along * radius * 0.45, center + along * radius], (1.6, color));
+    }
+}
+
+/// Seconds as minutes and seconds, such as "2:08".
+fn clock(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 #[cfg(test)]
@@ -405,5 +625,52 @@ mod tests {
         assert_eq!(landing(&layout, 1, middle(1)), 1);
         let reorder = with_fields(&Action::with_arg("reorder", json!({ "tab": "1" })), &[("from", json!(0)), ("to", json!(2))]);
         assert_eq!(reorder.arg, Some(json!({ "tab": "1", "from": 0, "to": 2 })));
+    }
+
+    /// Catches runs laid out as one strip: each group starts after a wider
+    /// gap with a hairline in it, the strip grows a line for the labels,
+    /// and a drag lands only inside its own run, its index still counted
+    /// along the whole strip.
+    #[test]
+    fn runs_keep_their_takes_and_their_drags() {
+        let mut strip = film(&[(16, 9); 5]);
+        strip.groups = vec![
+            protocol::FilmGroup { label: "Round 12".into(), count: 2, menu: Vec::new() },
+            protocol::FilmGroup { label: "Round 13".into(), count: 3, menu: Vec::new() },
+        ];
+        assert_eq!(height(&strip), HEIGHT + LABEL_H);
+        let layout = layout(&strip);
+        assert_eq!(layout.spans.len(), 2);
+        assert_eq!((layout.spans[1].start, layout.spans[1].end), (2, 5));
+        let first_right = layout.lefts[1] + layout.widths[1];
+        assert_eq!(layout.lefts[2], first_right + RUN_GAP);
+        assert_eq!(layout.dividers, vec![first_right + RUN_GAP / 2.0]);
+        // Dragged far left, the second run's last take lands first in its
+        // run, not first on the strip.
+        assert_eq!(landing(&layout, 4, 0.0), 2);
+        // Dragged far right, the first run's first take lands last in its run.
+        assert_eq!(landing(&layout, 0, layout.add), 1);
+        // A strip with no groups has no labels and one run.
+        let plain = film(&[(16, 9); 2]);
+        assert_eq!(height(&plain), HEIGHT);
+        assert_eq!(layout_spans(&plain), vec![(0, 2, None)]);
+        // Items past the groups make a run of their own.
+        let mut over = film(&[(16, 9); 3]);
+        over.groups = vec![protocol::FilmGroup { label: String::new(), count: 1, menu: Vec::new() }];
+        assert_eq!(height(&over), HEIGHT);
+        assert_eq!(layout_spans(&over), vec![(0, 1, Some(0)), (1, 3, None)]);
+    }
+
+    fn layout_spans(film: &Film) -> Vec<(usize, usize, Option<usize>)> {
+        layout(film).spans.iter().map(|span| (span.start, span.end, span.group)).collect()
+    }
+
+    /// Catches a running take's minutes read as seconds or unpadded.
+    #[test]
+    fn running_minutes_count_up_as_minutes_and_seconds() {
+        assert_eq!(clock(0), "0:00");
+        assert_eq!(clock(128), "2:08");
+        assert_eq!(clock(130), "2:10");
+        assert_eq!(clock(3600), "60:00");
     }
 }

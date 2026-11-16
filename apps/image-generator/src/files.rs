@@ -1,5 +1,5 @@
-//! Files: the image's own `.ipx` file, PNG and JPEG in and out, and the
-//! raw images the host reads. The `.ipx` format is described in this
+//! Files: the image's own `.ipx` file, PNG and JPEG in and out, WebP in,
+//! and the raw images the host reads. The `.ipx` format is described in this
 //! application's AGENTS.md.
 
 use crate::layered::{Blend, Curves, Grade, Kind, LayerMask, LinkState, Linked, Locks, Node, LayeredImage, Pixels};
@@ -52,6 +52,25 @@ struct Header {
     /// The cell and image the gallery was opened from as new work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<protocol::OpenedFrom>,
+    /// From 0.15: the tab's cells, each a pointer to a chain step or a
+    /// draft before its first run, and the one the Prompt page shows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cells: Vec<protocol::Cell>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cell: Option<String>,
+    /// From 0.15: the notes marked on takes, as editing state, each by its
+    /// take's file, as a link names it; never the take or its record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    take_notes: Vec<TakeNotesFile>,
+}
+
+/// Notes on a take, by the take's file: its path, relative to the
+/// project, and the sha256 of the bytes they were marked on.
+#[derive(Serialize, Deserialize)]
+struct TakeNotesFile {
+    path: String,
+    sha256: String,
+    notes: NotesFile,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -218,6 +237,75 @@ pub struct Read {
     pub images: Vec<ReadImage>,
     pub shown: usize,
     pub source: Option<protocol::OpenedFrom>,
+    pub cells: Vec<protocol::Cell>,
+    pub cell: Option<String>,
+    pub take_notes: Vec<TakeNotes>,
+}
+
+/// What a gallery's file keeps besides its images: where it was opened
+/// from as new work, its cells, the one shown first, and the notes marked
+/// on takes.
+#[derive(Clone, Default)]
+pub struct Extra {
+    pub source: Option<protocol::OpenedFrom>,
+    pub cells: Vec<protocol::Cell>,
+    pub cell: Option<String>,
+    pub take_notes: Vec<TakeNotes>,
+}
+
+/// The notes marked on a take, kept by the take's file: its link, the
+/// path and the sha256 of the bytes they were marked on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TakeNotes {
+    pub link: Link,
+    pub notes: Notes,
+}
+
+fn notes_file(notes: &Notes, hidden: bool) -> NotesFile {
+    NotesFile {
+        pins: notes.pins.iter().map(|pin| PinFile { number: pin.number, x: pin.x, y: pin.y, text: pin.text.clone() }).collect(),
+        marks: notes.marks.iter().map(|mark| MarkFile { points: mark.points.clone(), width: mark.width, colour: mark.colour }).collect(),
+        hidden,
+    }
+}
+
+/// Notes as read, with whether they are hidden, each value kept in range.
+fn read_notes(notes: NotesFile) -> (Notes, bool) {
+    (
+        Notes {
+            pins: notes.pins.into_iter().filter(|pin| pin.x.is_finite() && pin.y.is_finite()).map(|pin| Pin { number: pin.number, x: pin.x, y: pin.y, text: pin.text }).collect(),
+            marks: notes
+                .marks
+                .into_iter()
+                .map(|mark| Mark {
+                    points: mark.points.into_iter().filter(|point| point[0].is_finite() && point[1].is_finite()).collect(),
+                    width: if mark.width.is_finite() { mark.width.clamp(0.5, 500.0) } else { 4.0 },
+                    colour: mark.colour,
+                })
+                .collect(),
+        },
+        notes.hidden,
+    )
+}
+
+/// A cell as the file keeps it: a pointer to its step and nothing else,
+/// or a draft's own prompt, settings, model, and endpoint, with no run,
+/// result, or record of what made anything.
+pub fn stored_cell(cell: &protocol::Cell) -> protocol::Cell {
+    let mut kept = cell.clone();
+    kept.versions.clear();
+    kept.output.clear();
+    kept.current = None;
+    kept.error = None;
+    kept.state = protocol::CellState::Idle;
+    kept.effort = None;
+    if kept.step.is_some() {
+        kept.input.clear();
+        kept.settings = None;
+        kept.endpoint = None;
+        kept.model = None;
+    }
+    kept
 }
 
 /// An encoded layer, shared by an image's cache and the writes using it.
@@ -336,7 +424,7 @@ fn fingerprint(pixels: &Pixels) -> u64 {
 
 /// Writes a gallery: every image in order, and which is shown. Returns
 /// what was encoded for each image.
-pub fn write_ipx(path: &Path, images: Vec<Snapshot>, shown: usize, source: Option<protocol::OpenedFrom>) -> Result<Vec<Encoded>, String> {
+pub fn write_ipx(path: &Path, images: Vec<Snapshot>, shown: usize, extra: Extra) -> Result<Vec<Encoded>, String> {
     let mut blobs: Vec<u8> = Vec::new();
     let mut files = Vec::new();
     let mut encoded = Vec::new();
@@ -346,11 +434,7 @@ pub fn write_ipx(path: &Path, images: Vec<Snapshot>, shown: usize, source: Optio
         for node in &image.nodes {
             layers.push(node_file(node, &image.layers, &mut made, &mut blobs)?);
         }
-        let notes = (!image.notes.is_empty() || image.notes_hidden).then(|| NotesFile {
-            pins: image.notes.pins.iter().map(|pin| PinFile { number: pin.number, x: pin.x, y: pin.y, text: pin.text.clone() }).collect(),
-            marks: image.notes.marks.iter().map(|mark| MarkFile { points: mark.points.clone(), width: mark.width, colour: mark.colour }).collect(),
-            hidden: image.notes_hidden,
-        });
+        let notes = (!image.notes.is_empty() || image.notes_hidden).then(|| notes_file(&image.notes, image.notes_hidden));
         let previs = (image.previs != Settings::default()).then(|| PrevisFile {
             render: image.previs.render.as_ref().map(LinkFile::of),
             mode: if image.previs.see_through { PrevisMode::SeeThrough } else { PrevisMode::Edges },
@@ -360,7 +444,15 @@ pub fn write_ipx(path: &Path, images: Vec<Snapshot>, shown: usize, source: Optio
         files.push(ImageFile { name: image.name, width: image.width, height: image.height, active: image.active, layers, notes, previs });
         encoded.push(Encoded { uid: image.uid, generation: image.generation, layers: made });
     }
-    let header = Header { version: VERSION, shown, images: files, source };
+    let cells: Vec<protocol::Cell> = extra.cells.iter().map(stored_cell).collect();
+    let cell = extra.cell.filter(|id| cells.iter().any(|cell| cell.id == *id));
+    let take_notes = extra
+        .take_notes
+        .iter()
+        .filter(|kept| !kept.notes.is_empty())
+        .map(|kept| TakeNotesFile { path: kept.link.path.clone(), sha256: kept.link.sha256.clone(), notes: notes_file(&kept.notes, false) })
+        .collect();
+    let header = Header { version: VERSION, shown, images: files, source: extra.source, cells, cell, take_notes };
     let mut bytes = MAGIC.to_vec();
     bytes.extend(serde_json::to_vec(&header).map_err(|error| error.to_string())?);
     bytes.push(b'\n');
@@ -486,7 +578,7 @@ pub fn read_ipx_in(path: &Path, root: Option<&Path>) -> Result<Read, String> {
                 .filter(|stem| !stem.is_empty())
                 .unwrap_or_else(|| protocol::untitled(crate::session::ITEM));
             let file = ImageFile { name, width: header.width, height: header.height, active: header.active, layers: header.layers, notes: None, previs: None };
-            Ok(Read { images: vec![read_image(file, blobs, &root)?], shown: 0, source: None })
+            Ok(Read { images: vec![read_image(file, blobs, &root)?], shown: 0, source: None, cells: Vec::new(), cell: None, take_notes: Vec::new() })
         }
         2..=VERSION => {
             let header: Header = serde_json::from_slice(line).map_err(|_| damaged())?;
@@ -498,7 +590,16 @@ pub fn read_ipx_in(path: &Path, root: Option<&Path>) -> Result<Read, String> {
                 return Err(damaged());
             }
             let shown = header.shown.min(images.len() - 1);
-            Ok(Read { images, shown, source: header.source })
+            // A cell is read as the file may keep it, whatever was written.
+            let cells: Vec<protocol::Cell> = header.cells.iter().map(stored_cell).collect();
+            let cell = header.cell.filter(|id| cells.iter().any(|cell| cell.id == *id));
+            let take_notes = header
+                .take_notes
+                .into_iter()
+                .map(|kept| TakeNotes { link: Link { path: kept.path, sha256: kept.sha256 }, notes: read_notes(kept.notes).0 })
+                .filter(|kept| !kept.notes.is_empty())
+                .collect();
+            Ok(Read { images, shown, source: header.source, cells, cell, take_notes })
         }
         other => Err(format!(
             "It is version {other} of an image file, and this Image Generator reads versions 1 to {VERSION}."
@@ -522,21 +623,7 @@ fn read_image(file: ImageFile, blobs: &[u8], root: &Path) -> Result<ReadImage, S
     image.sync_texts();
     let active = file.active.filter(|id| image.find(*id).is_some());
     let (notes, notes_hidden) = match file.notes {
-        Some(notes) => (
-            Notes {
-                pins: notes.pins.into_iter().filter(|pin| pin.x.is_finite() && pin.y.is_finite()).map(|pin| Pin { number: pin.number, x: pin.x, y: pin.y, text: pin.text }).collect(),
-                marks: notes
-                    .marks
-                    .into_iter()
-                    .map(|mark| Mark {
-                        points: mark.points.into_iter().filter(|point| point[0].is_finite() && point[1].is_finite()).collect(),
-                        width: if mark.width.is_finite() { mark.width.clamp(0.5, 500.0) } else { 4.0 },
-                        colour: mark.colour,
-                    })
-                    .collect(),
-            },
-            notes.hidden,
-        ),
+        Some(notes) => read_notes(notes),
         None => (Notes::default(), false),
     };
     let previs = match file.previs {
@@ -682,22 +769,29 @@ fn reader(bytes: &[u8], format: Option<image::ImageFormat>) -> Result<image::Ima
         None => reader = reader.with_guessed_format().map_err(|error| error.to_string())?,
     }
     if reader.format().is_none() {
-        return Err("It is not a PNG or JPEG image.".into());
+        return Err("It is not a PNG, JPEG, or WebP image.".into());
     }
     Ok(reader)
 }
 
-/// A PNG or JPEG file as straight RGBA8.
+/// A PNG, JPEG, or WebP file as straight RGBA8.
 pub fn import(path: &Path) -> Result<Pixels, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     decode(&bytes, None)
 }
 
-/// A PNG or JPEG file as straight RGBA8, and the sha256 of its bytes, as a
-/// link records it.
+/// A PNG, JPEG, or WebP file as straight RGBA8, and the sha256 of its
+/// bytes, as a link records it.
 pub fn import_linked(path: &Path) -> Result<(Pixels, String), String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     Ok((decode(&bytes, None)?, layers::link::sha256(&bytes)))
+}
+
+/// A PNG, JPEG, or WebP file as straight RGBA8, and the fingerprint of its
+/// bytes, as an item declares it.
+pub fn import_printed(path: &Path) -> Result<(Pixels, String), String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    Ok((decode(&bytes, None)?, protocol::fingerprint(&bytes)))
 }
 
 pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
@@ -868,7 +962,7 @@ mod tests {
             Snapshot::take(3, "Red", &red, Some(red_id), 0, &none),
         ];
         let source = protocol::OpenedFrom { cell: "c1".into(), image: "images/a.png".into(), session: Some("s1".into()), recipe: None };
-        write_ipx(&path, writing, 1, Some(source.clone())).unwrap();
+        write_ipx(&path, writing, 1, Extra { source: Some(source.clone()), ..Extra::default() }).unwrap();
         assert!(is_ipx(&path));
         let read = read_ipx(&path).unwrap();
         assert_eq!(read.shown, 1);
@@ -1037,7 +1131,7 @@ mod tests {
         let path = dir.join("Kinds.ipx");
         let snapshot = Snapshot::take(1, "Kinds", &image, Some(text), 0, &PngCache::default());
         assert!(!snapshot.layers.contains_key(&text), "the text's pixels were taken for the file");
-        write_ipx(&path, vec![snapshot], 0, None).unwrap();
+        write_ipx(&path, vec![snapshot], 0, Extra::default()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let line = &bytes[MAGIC.len()..MAGIC.len() + bytes[MAGIC.len()..].iter().position(|byte| *byte == b'\n').unwrap()];
         let header: serde_json::Value = serde_json::from_slice(line).unwrap();
@@ -1068,7 +1162,7 @@ mod tests {
         let link = Link { path: "take.png".into(), sha256: sha256.clone() };
         let image = LayeredImage::linked("Take", pixels.clone(), link);
         let path = dir.join("Linked.ipx");
-        let write = |image: &LayeredImage| write_ipx(&path, vec![Snapshot::take(1, "Take", image, None, 0, &PngCache::default())], 0, None).unwrap();
+        let write = |image: &LayeredImage| write_ipx(&path, vec![Snapshot::take(1, "Take", image, None, 0, &PngCache::default())], 0, Extra::default()).unwrap();
         write(&image);
         let header = |path: &Path| -> serde_json::Value {
             let bytes = std::fs::read(path).unwrap();
@@ -1124,7 +1218,7 @@ mod tests {
         let settings = Settings { render: Some(Link { path: "previs.png".into(), sha256: "cd".into() }), see_through: true, opacity: 0.3, on: true };
         let path = dir.join("Notes.ipx");
         let snapshot = Snapshot::take(1, "Shot", &image, None, 0, &PngCache::default()).keeping(&notes, true, &settings);
-        write_ipx(&path, vec![snapshot], 0, None).unwrap();
+        write_ipx(&path, vec![snapshot], 0, Extra::default()).unwrap();
         let read = read_ipx(&path).unwrap();
         let back = &read.images[0];
         assert_eq!(back.notes, notes);
@@ -1164,7 +1258,7 @@ mod tests {
         image.nodes.push(Node::group(image.next_id, "Folder", vec![Node::layer(inner, "Inner")]));
         image.next_id += 1;
         let path = dir.join("Old.ipx");
-        write_ipx(&path, vec![Snapshot::take(1, "Old", &image, Some(id), 0, &PngCache::default())], 0, None).unwrap();
+        write_ipx(&path, vec![Snapshot::take(1, "Old", &image, Some(id), 0, &PngCache::default())], 0, Extra::default()).unwrap();
         // The same file as 0.12 wrote it: version 2, and no kinds.
         let bytes = std::fs::read(&path).unwrap();
         let end = MAGIC.len() + bytes[MAGIC.len()..].iter().position(|byte| *byte == b'\n').unwrap();
@@ -1187,6 +1281,50 @@ mod tests {
         let read = read_ipx(&path).unwrap();
         assert_eq!(read.images[0].image.nodes, image.nodes);
         assert_eq!(read.images[0].image.pixels, image.pixels);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Catches a run, a result, or a step's copy kept in the file: a draft
+    /// keeps its own prompt, settings, model, and endpoint and nothing a
+    /// run made, and a step's cell keeps only its pointer.
+    #[test]
+    fn a_file_keeps_only_a_drafts_prompt_or_a_steps_pointer() {
+        let dir = scratch("cells");
+        let mut draft = protocol::Cell::text("d1", "The keeper turns.");
+        draft.kind = protocol::IMAGE_KIND.into();
+        draft.settings = Some(serde_json::json!({ "size": "1536 × 864", "images": 4 }));
+        draft.model = Some("openai/gpt-image-2.5".into());
+        draft.output = vec![protocol::CellPart::Text { text: "a result".into() }];
+        draft.versions.push(protocol::CellVersion {
+            id: "v1".into(),
+            input: draft.input.clone(),
+            endpoint: None,
+            model: None,
+            effort: None,
+            output: Vec::new(),
+            state: protocol::CellState::Done,
+            error: None,
+            time: 1,
+            settings: None,
+            used: Vec::new(),
+        });
+        let mut step = protocol::Cell::text("s1", "a copy of the step");
+        step.kind = protocol::IMAGE_KIND.into();
+        step.step = Some(protocol::StepRef { chain: "shot-12".into(), step: "keyframe".into() });
+        step.model = Some("a copy".into());
+        let path = dir.join("Cells.ipx");
+        let extra = Extra { source: None, cells: vec![draft, step], cell: Some("s1".into()), take_notes: Vec::new() };
+        write_ipx(&path, vec![Snapshot::take(1, "One", &LayeredImage::blank(4, 4), None, 0, &PngCache::default())], 0, extra).unwrap();
+        let read = read_ipx(&path).unwrap();
+        assert_eq!(read.cell.as_deref(), Some("s1"));
+        let (draft, step) = (&read.cells[0], &read.cells[1]);
+        assert_eq!(draft.prompt(), "The keeper turns.");
+        assert_eq!(draft.model.as_deref(), Some("openai/gpt-image-2.5"));
+        assert!(draft.settings.is_some());
+        assert!(draft.versions.is_empty() && draft.output.is_empty(), "a run was kept");
+        assert!(step.step.is_some() && !step.copies_its_step(), "a step's copy was kept");
+        let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        assert!(!text.contains("a result") && !text.contains("a copy"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

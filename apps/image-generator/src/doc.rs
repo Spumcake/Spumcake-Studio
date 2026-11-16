@@ -2298,7 +2298,6 @@ impl Doc {
     }
 
     /// The pins' words, as a next round's prompt carries them.
-    #[allow(dead_code)] // For milestone 2's Next round from this.
     pub fn notes_words(&self) -> Vec<String> {
         self.notes.as_words()
     }
@@ -2306,7 +2305,6 @@ impl Doc {
     /// The image with its notes on it, as a next round sends it: the
     /// composite, every mark, and every pin with its number, whether or
     /// not the notes are hidden.
-    #[allow(dead_code)] // For milestone 2's Next round from this.
     pub fn marked_image(&mut self) -> Rgba {
         let (width, height) = (self.image.width, self.image.height);
         let notes = self.notes.clone();

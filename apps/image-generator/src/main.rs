@@ -12,6 +12,7 @@ mod paint;
 mod previs;
 mod layered;
 mod notes;
+mod rounds;
 mod session;
 mod text;
 

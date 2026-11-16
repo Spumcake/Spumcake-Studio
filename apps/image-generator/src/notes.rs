@@ -159,8 +159,8 @@ fn number(image: &mut Rgba, pin: &Pin, radius: f32) {
 }
 
 /// Straight RGBA pixels drawn onto `image` with their corner at `corner`,
-/// each by its alpha.
-fn paint(image: &mut Rgba, pixels: &Pixels, corner: [f32; 2]) {
+/// each by its alpha. The round views draw their words with it too.
+pub fn paint(image: &mut Rgba, pixels: &Pixels, corner: [f32; 2]) {
     let (cx, cy) = (corner[0].round() as i64, corner[1].round() as i64);
     for y in 0..pixels.height as i64 {
         let ty = cy + y;
@@ -183,7 +183,7 @@ fn paint(image: &mut Rgba, pixels: &Pixels, corner: [f32; 2]) {
 }
 
 /// A rectangle, `[x, y, width, height]`, filled with `colour`.
-fn fill(image: &mut Rgba, rect: [f32; 4], colour: [u8; 4]) {
+pub fn fill(image: &mut Rgba, rect: [f32; 4], colour: [u8; 4]) {
     let x0 = rect[0].round().max(0.0) as u32;
     let y0 = rect[1].round().max(0.0) as u32;
     let x1 = ((rect[0] + rect[2]).round().max(0.0) as u32).min(image.width);

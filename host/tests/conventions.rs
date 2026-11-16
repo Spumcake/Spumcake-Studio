@@ -24,7 +24,9 @@ const RETIRED_NAMES: &[&str] = &["simplesketch", "imageeditor", "missioncontrol"
 /// Lines that may keep a retired word: what reads an earlier spelling from
 /// disk, a manifest's former ids, the reference the shell came from, and
 /// a crate's `assets/` folder of fonts and icons.
-const KEPT: &[&str] = &["assets/", "rename = \"", "alias = \"", "formerly", "stored spelling", "simple sketch 1.0.1"];
+/// `"sketch"`, quoted, is the Prompt page's reference role "Sketch", which
+/// the guide approves, not Simple Sketch's retired word.
+const KEPT: &[&str] = &["assets/", "rename = \"", "alias = \"", "formerly", "stored spelling", "simple sketch 1.0.1", "\"sketch\""];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")

@@ -8,6 +8,7 @@ mod declare;
 mod decode;
 mod files;
 mod gallery;
+mod preview;
 mod session;
 mod view;
 

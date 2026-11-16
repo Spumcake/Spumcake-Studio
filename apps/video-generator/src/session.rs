@@ -15,8 +15,8 @@ use crate::gallery::{Gallery, Mode};
 use crate::view::{self, Look, Scene};
 use layers::link::Link;
 use protocol::{
-    AppMessage, Ask, AskButton, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, RasterGesture, RasterTool,
-    RasterView, Thumbnail,
+    AppMessage, Ask, AskButton, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, RasterCamera, RasterGesture,
+    RasterTool, RasterView, Thumbnail,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -53,14 +53,17 @@ pub struct Tab {
     /// to 1 across and down.
     pub focus: [f64; 2],
     pub dirty: bool,
+    /// The host's camera is put on the image, origin [0, 0] and zoom 1,
+    /// with the next view: the first, and after the area changes. With
+    /// the camera the workspace's, nothing else moves it, and a view with
+    /// no camera would leave the host fitting the image with its margin.
+    pub frame_camera: bool,
     /// Inside a project: when its change was first seen unwritten, and its
     /// last failed write, why and when.
     unwritten_since: Option<Instant>,
     write_failed: Option<(String, Instant)>,
     /// The image last written for the host.
     drawn: Option<Drawn>,
-    /// The host's camera is put back on the image with the next view.
-    send_camera: bool,
     /// The focus as the Move tool's drag began.
     drag: Option<[f64; 2]>,
 }
@@ -171,6 +174,8 @@ impl Session {
             messages.push(AppMessage::Contents { tab: tab.id.clone(), kind: ContentsKind::Raster });
         }
         messages.push(AppMessage::Tools { groups: crate::assist::tool_groups() });
+        // The host asks for a video reference's preview here.
+        messages.push(AppMessage::Edits { media_types: crate::preview::VIDEO_TYPES.iter().map(|kind| kind.to_string()).collect() });
         messages.push(AppMessage::End);
         if !self.tabs.is_empty() {
             messages.extend(self.emit());
@@ -213,6 +218,9 @@ impl Session {
             // A video's file from outside the project opens nothing.
             HostMessage::Open { path: Some(path) } if files::is_vgx(Path::new(&path)) && !self.in_project(Path::new(&path)) => {}
             HostMessage::Open { path } => self.open_path(path.map(PathBuf::from), &mut out),
+            // As `edits` declared: a new video called `name`, one take
+            // linking the file, never the file itself.
+            HostMessage::OpenAsNew { path, name, .. } => self.open_as_new(Path::new(&path), &name, &mut out),
             HostMessage::Command { id, tab, arg, viewport, .. } => {
                 self.set_viewport(viewport);
                 if let Some(tab) = &tab {
@@ -247,12 +255,16 @@ impl Session {
                     out.extend(self.raster());
                 }
             }
-            // The host's own camera is left as the person moved it: the
-            // image fills the working area and is framed when it first
-            // shows or the area changes, and the zoom menu and the drag
-            // choose what it shows, decoded at that size. The host zooming
-            // further only scales the image, until a raster tab can own
-            // its camera.
+            // The view is this workspace's own: the wheel, a pan, and the
+            // magnifier come as `view` gestures, and the zoom menu and the
+            // drag choose what it shows, decoded at that size. The host's
+            // camera, which it never moves, is not this workspace's.
+            HostMessage::RasterGesture { tab, gesture: RasterGesture::View { zoom_by, pan_by, at } } => {
+                self.activate(&tab);
+                if self.view_by(zoom_by, pan_by, at) {
+                    out.extend(self.emit());
+                }
+            }
             HostMessage::Camera { .. } => {}
             HostMessage::Viewport { viewport } => {
                 if self.set_viewport(viewport) {
@@ -290,6 +302,10 @@ impl Session {
             }
             // Items come with the lifecycle's video work.
             HostMessage::Render { id, .. } => out.push(protocol::no_items(id)),
+            HostMessage::Preview { id, path, media_type } => {
+                let root = self.project.clone().unwrap_or_default();
+                out.push(crate::preview::preview(id, &path, &media_type, &root, &self.cache, &mut self.next_revision));
+            }
             _ => {}
         }
         out
@@ -388,15 +404,15 @@ impl Session {
         self.tabs.get(self.active)
     }
 
-    /// The area's size changed: every tab's image is made again at it, and
-    /// the host's camera put back on it. Returns whether it changed.
+    /// The area's size changed: every tab's image is made again at it.
+    /// Returns whether it changed.
     fn set_viewport(&mut self, viewport: [f64; 2]) -> bool {
         if viewport[0] <= 0.0 || viewport[1] <= 0.0 || viewport == self.viewport {
             return false;
         }
         self.viewport = viewport;
         for tab in &mut self.tabs {
-            tab.send_camera = true;
+            tab.frame_camera = true;
         }
         true
     }
@@ -428,10 +444,10 @@ impl Session {
             zoom: None,
             focus: [0.5, 0.5],
             dirty: false,
+            frame_camera: true,
             unwritten_since: None,
             write_failed: None,
             drawn: None,
-            send_camera: true,
             drag: None,
         });
         self.active = self.tabs.len() - 1;
@@ -499,6 +515,60 @@ impl Session {
         let moved = focus != tab.focus;
         tab.focus = focus;
         moved
+    }
+
+    /// A `view` gesture: the shown take zoomed by `zoom_by` about `at`, a
+    /// point of the image, so the take's point there stays there, and moved
+    /// by `pan_by`, image pixels right and down. A fitted take starts from
+    /// the zoom it is fitted at; frame strips, and a pan of a fitted take,
+    /// change nothing. Each frame is then decoded at the size it is drawn,
+    /// as with the zoom menu. Returns whether the view changed.
+    fn view_by(&mut self, zoom_by: f64, pan_by: [f64; 2], at: [f64; 2]) -> bool {
+        let size = self.image_size();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        if !zoom_by.is_finite() || zoom_by <= 0.0 || !at.iter().chain(&pan_by).all(|value| value.is_finite()) {
+            return false;
+        }
+        if tab.gallery.view() == Mode::Strips || (tab.zoom.is_none() && zoom_by == 1.0) {
+            return false;
+        }
+        let scene = view::scene(&tab.gallery, size, tab.look());
+        let (Some(place), Some(info)) = (scene.places.first(), tab.gallery.take().and_then(|take| take.info)) else {
+            return false;
+        };
+        let (rect, cell) = (place.rect, place.clip);
+        let drawn = [f64::from(rect.w.max(1)), f64::from(rect.h.max(1))];
+        // The zoom a fitted take is drawn at, in the zoom menu's terms: side
+        // by side, the wider take's scale.
+        let widest = match tab.gallery.view() {
+            Mode::Side { .. } => [tab.gallery.take(), tab.gallery.other().map(|other| &tab.gallery.takes[other])]
+                .into_iter()
+                .flatten()
+                .filter_map(|take| take.info.map(|info| info.width))
+                .max()
+                .unwrap_or(info.width),
+            _ => info.width,
+        };
+        let now = tab.zoom.unwrap_or(drawn[0] / f64::from(widest.max(1)));
+        let zoom = (now * zoom_by).clamp(0.05, 8.0);
+        let factor = zoom / now;
+        // The take's point under `at`, from 0 to 1, is kept under it: the
+        // point at the cell's middle is worked out from it, then moved by
+        // the pan.
+        let middle = [f64::from(cell.x) + f64::from(cell.w) / 2.0, f64::from(cell.y) + f64::from(cell.h) / 2.0];
+        let corner = [f64::from(rect.x), f64::from(rect.y)];
+        let mut focus = [0.0; 2];
+        for axis in 0..2 {
+            let under = (at[axis] - corner[axis]) / drawn[axis];
+            let after = drawn[axis] * factor;
+            focus[axis] = (under + (middle[axis] - at[axis] - pan_by[axis]) / after).clamp(0.0, 1.0);
+        }
+        let changed = tab.zoom != Some(zoom) || tab.focus != focus;
+        tab.zoom = Some(zoom);
+        tab.focus = focus;
+        changed
     }
 
     fn command(&mut self, id: &str, tab: Option<&str>, arg: Value, out: &mut Vec<AppMessage>) {
@@ -757,6 +827,31 @@ impl Session {
         }
     }
 
+    /// Opens a video file as new work, as `open_as_new` asks: a new tab
+    /// called `name`, made safe as a file's, or after the file, whose
+    /// gallery is one take linking the file. Inside a project it is kept as
+    /// a new `.vgx`. A relative path is read from the project.
+    fn open_as_new(&mut self, path: &Path, name: &str, out: &mut Vec<AppMessage>) {
+        let path = match (&self.project, path.is_relative()) {
+            (Some(project), true) => project.join(path),
+            _ => path.to_path_buf(),
+        };
+        let name = safe_name(name);
+        let label = if name.is_empty() { file_title(&path) } else { name };
+        self.push_tab(Gallery::default(), None, Some(label));
+        match self.add_take(&path, None) {
+            Ok(_) => {
+                self.tabs[self.active].dirty = true;
+                self.declare_new(out);
+            }
+            Err(reason) => {
+                self.tabs.pop();
+                self.active = self.tabs.len().saturating_sub(1);
+                out.push(notice("This video could not be opened", &reason));
+            }
+        }
+    }
+
     /// Inside a project: writes a tab into the project's folder, to its file
     /// or, for one never written, to a new file named after it that
     /// replaces nothing. Returns the file, or none for an untouched tab.
@@ -971,8 +1066,8 @@ impl Session {
         let Some((width, height, revision)) = tab.drawn.as_ref().map(|drawn| (drawn.scene.width, drawn.scene.height, drawn.revision)) else {
             return Vec::new();
         };
-        let camera = std::mem::take(&mut tab.send_camera).then_some(DocumentCamera { origin: [0.0, 0.0], zoom: 1.0, rotation: 0.0, flip: false });
         let id = tab.id.clone();
+        let camera = std::mem::take(&mut tab.frame_camera).then_some(DocumentCamera { origin: [0.0, 0.0], zoom: 1.0, rotation: 0.0, flip: false });
         let view = RasterView {
             image: self.cache.join(format!("{id}-view.rgba")).display().to_string(),
             tab: id,
@@ -985,6 +1080,7 @@ impl Session {
             crop: None,
             bounds: None,
             camera,
+            camera_owner: RasterCamera::Workspace,
             film: Some(declare::film(self, &self.tabs[index])),
             text: None,
         };
@@ -1178,6 +1274,15 @@ fn new_file(tabs: &[Tab], index: usize, folder: &Path) -> Option<PathBuf> {
 }
 
 /// One line of the protocol, and the lines to write back.
+/// A name that is safe as a file's, as the Image Generator makes one: path
+/// separators, control characters, and line breaks become spaces, runs of
+/// spaces one, and no leading dot.
+fn safe_name(name: &str) -> String {
+    let spaced: String = name.chars().map(|c| if c == '/' || c == '\\' || c.is_control() { ' ' } else { c }).collect();
+    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined.trim_start_matches('.').trim().to_string()
+}
+
 pub fn respond(session: &mut Session, line: &str) -> Vec<String> {
     let Ok(message) = protocol::parse_host_message(line) else {
         return Vec::new();

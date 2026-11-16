@@ -225,8 +225,17 @@ fn a_gallery_of_takes_is_shown_kept_and_reopened() {
     assert_eq!(image.bytes.len(), 1200 * 800 * 4, "the image file is not the area's size");
     assert_eq!(image.at(600, 400), [255, 255, 255]);
     assert!(names(&empty).is_empty());
-    let camera = empty.camera.expect("the host's camera was never put on the image");
-    assert_eq!((camera.origin, camera.zoom), ([0.0, 0.0], 1.0));
+    assert_eq!(empty.camera_owner, protocol::RasterCamera::Workspace, "the view is not the workspace's own");
+    let camera = empty.camera.expect("the first view did not put the host's camera on the image");
+    assert_eq!((camera.origin, camera.zoom), ([0.0, 0.0], 1.0), "the host would fit the image with its margin");
+    // The area changing makes a new image, and its view puts the camera
+    // on it again; back at the area's first size, so does the next.
+    for (size, label) in [([1300.0, 900.0], "the view after the area grew"), (VIEWPORT, "the view back at the area's size")] {
+        program.send(HostMessage::Viewport { viewport: size });
+        let (resized, _) = program.view(label, |view, _| f64::from(view.width) == size[0] && view.camera.is_some());
+        let camera = resized.camera.unwrap();
+        assert_eq!((camera.origin, camera.zoom), ([0.0, 0.0], 1.0));
+    }
 
     // Two takes, each shown as it opens, with its thumbnail: its first
     // frame, 44 tall.
@@ -397,6 +406,135 @@ fn the_assistant_opens_shows_and_switches_takes() {
     // Each call that changed the gallery is a step of its history.
     program.command("undo", json!({}));
     program.view("side by side again", |_, image| is(image.at(RIGHT.0, RIGHT.1), dusk, DUSK_FRAMES, 9));
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Catches a video reference the host cannot show: `edits` names video
+/// files, so the host asks here; `preview` of a video in the project
+/// answers with its first frame, no larger than its own pixels, as a raw
+/// image of its size, and its length for the corner, "2.0 s"; a file that
+/// is no video answers with why, and no thumbnail.
+#[test]
+fn a_video_is_previewed_with_its_length() {
+    let (dir, _, _) = project("preview");
+    let mut program = Program::start(false);
+    let edits = program.wait("edits", |message| match message {
+        AppMessage::Edits { media_types } => Some(media_types.clone()),
+        _ => None,
+    });
+    assert!(edits.iter().any(|kind| kind == "video/mp4"), "{edits:?}");
+    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: true });
+    program.send(HostMessage::Preview { id: "p1".into(), path: "takes/Dawn.mp4".into(), media_type: "video/mp4".into() });
+    let (thumbnail, badge, error) = program.wait("the preview", |message| match message {
+        AppMessage::Previewed { id, thumbnail, badge, error, .. } if id == "p1" => Some((thumbnail.clone(), badge.clone(), error.clone())),
+        _ => None,
+    });
+    assert_eq!(error, None);
+    assert_eq!(badge, "2.0 s", "48 frames at 24 a second");
+    let thumbnail = thumbnail.expect("no thumbnail");
+    assert_eq!((thumbnail.width, thumbnail.height), SIZE);
+    let bytes = std::fs::read(&thumbnail.path).unwrap();
+    assert_eq!(bytes.len(), (SIZE.0 * SIZE.1 * 4) as usize);
+    let middle = (((SIZE.1 / 2) * SIZE.0 + SIZE.0 / 2) * 4) as usize;
+    assert!(is([bytes[middle], bytes[middle + 1], bytes[middle + 2]], dawn, DAWN_FRAMES, 0), "the preview is not the first frame");
+
+    std::fs::write(dir.join("notes.txt"), "not a video").unwrap();
+    program.send(HostMessage::Preview { id: "p2".into(), path: "notes.txt".into(), media_type: "video/mp4".into() });
+    let refused = program.wait("a refusal", |message| match message {
+        AppMessage::Previewed { id, thumbnail, error, .. } if id == "p2" => Some((thumbnail.is_none(), error.is_some())),
+        _ => None,
+    });
+    assert_eq!(refused, (true, true));
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Catches a video the host offers to edit here that opens nothing, or
+/// is written to: `open_as_new` with a name holding "/" makes a new tab
+/// called by a safe name, whose gallery is one take linking the file,
+/// kept as a new `.vgx` naming the file by its path in the project, the
+/// video's sha256 unchanged.
+#[test]
+fn a_video_opens_as_new_work() {
+    let (dir, first, _) = project("open-as-new");
+    let sum = layers::link::sha256_file(&first).unwrap();
+    let mut program = Program::start(false);
+    program.send(HostMessage::Viewport { viewport: VIEWPORT });
+    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(HostMessage::OpenAsNew { path: first.display().to_string(), name: "Dawn/take".into(), from: None });
+    let tab = program.wait("the new tab", |message| match message {
+        AppMessage::Tabs(tabs) => tabs.tabs.iter().find(|tab| tab.label == "Dawn take").map(|tab| tab.id.clone()),
+        _ => None,
+    });
+    let (view, _) = program.view("the take", |view, _| view.tab == tab && names(view) == ["Dawn"]);
+    assert_eq!(view.film.as_ref().unwrap().items.len(), 1);
+    program.send(HostMessage::Keep { tab: tab.clone() });
+    let kept = program.wait("kept", |message| match message {
+        AppMessage::Kept { tab: kept, path, error } if *kept == tab => Some((path.clone(), error.clone())),
+        _ => None,
+    });
+    assert_eq!(kept.1, None);
+    let file = PathBuf::from(kept.0.expect("no file"));
+    assert_eq!(file, dir.join("Dawn take.vgx"));
+    let text = String::from_utf8_lossy(&std::fs::read(&file).unwrap()).into_owned();
+    assert!(text.contains("\"takes/Dawn.mp4\""), "{text}");
+    assert_eq!(layers::link::sha256_file(&first).unwrap(), sum, "the video was written to");
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A take whose left half is one colour and right half another, 640 × 360,
+/// so where its middle is drawn shows how it was zoomed.
+fn write_halves(path: &Path) {
+    let (width, height) = (640u32, 360u32);
+    let settings = media::Settings { width, height, rate: (24, 1), keyframes: 12, sound: None };
+    let mut encoder = media::Encoder::create(path, settings).expect("an encoder");
+    let mut frame = Vec::with_capacity((width * height * 4) as usize);
+    for _ in 0..height {
+        for x in 0..width {
+            let rgb = if x < width / 2 { LEFT_HALF } else { RIGHT_HALF };
+            frame.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
+    }
+    for _ in 0..12 {
+        encoder.frame(&frame).expect("a frame");
+    }
+    encoder.finish().expect("the video");
+}
+
+const LEFT_HALF: [u8; 3] = [200, 40, 40];
+const RIGHT_HALF: [u8; 3] = [40, 60, 200];
+
+/// Catches a view the workspace does not move as the host asks, or a frame
+/// decoded at another size than it is drawn: fitted, the 640 × 360 take is
+/// drawn whole in the middle of the 1200 × 800 area; a `view` gesture zooming
+/// by 4 about the point a quarter of the way across and down keeps that
+/// point there, so the take's middle is drawn at 1080; zooming by an eighth
+/// about the middle draws it at 320 × 180 in the middle, decoded at that
+/// size, with white around it.
+#[test]
+fn a_view_gesture_zooms_about_its_point() {
+    let dir = scratch("view");
+    let file = dir.join("takes/Halves.mp4");
+    write_halves(&file);
+    let near = |pixel: [u8; 3], colour: [u8; 3]| distance(pixel, colour) <= 30;
+    let mut program = Program::start(false);
+    program.send(HostMessage::Viewport { viewport: VIEWPORT });
+    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.open_take(&file);
+    // Fitted at its own pixels: 280 to 920 across, 220 to 580 down.
+    program.view("the take fitted", |_, image| near(image.at(300, 400), LEFT_HALF) && near(image.at(900, 400), RIGHT_HALF) && image.at(260, 400) == [255, 255, 255]);
+    let view = |zoom_by: f64, at: [f64; 2]| HostMessage::RasterGesture { tab: "1".into(), gesture: protocol::RasterGesture::View { zoom_by, pan_by: [0.0, 0.0], at } };
+    program.send(view(4.0, [440.0, 310.0]));
+    program.view("zoomed by 4 about a quarter of the way", |_, image| {
+        near(image.at(1060, 400), LEFT_HALF) && near(image.at(1100, 400), RIGHT_HALF) && near(image.at(440, 310), LEFT_HALF)
+    });
+    program.send(view(0.125, [600.0, 400.0]));
+    // At 50%: 320 × 180, 440 to 760 across, 310 to 490 down.
+    program.view("zoomed out to 50%", |_, image| {
+        near(image.at(450, 400), LEFT_HALF) && near(image.at(750, 400), RIGHT_HALF) && image.at(420, 400) == [255, 255, 255] && image.at(600, 300) == [255, 255, 255]
+    });
     drop(program);
     let _ = std::fs::remove_dir_all(&dir);
 }

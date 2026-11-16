@@ -1,16 +1,18 @@
 //! What the Image Generator declares for the host to draw: the toolbar and its
 //! settings row, as the approved views show them, the panel's Layers,
-//! Properties, and Adjustments pages, the filmstrip, the menu, the keys,
-//! and the tab list.
+//! Properties, Adjustments, and Prompt pages, the filmstrip with its
+//! rounds, the menu, the keys, and the tab list.
 
 use crate::doc::Doc;
 use crate::paint::Combine;
 use crate::layered::{Blend, Kind, LinkState, Node};
+use crate::rounds::{self, View};
 use crate::session::{Image, Page, Session, ToolKind};
 use crate::text::{Align, Face};
 use protocol::{
-    Action, Binding, Chord, ChoicePreview, Film, FilmItem, FlagIcons, HeadingAction, IconToggle, Keys, LayerRow, Layers,
-    MenuEntry, PanelPage, PropValue, Properties, Row, RowKind, Section, TabEntry, Tabs, Thumbnail, ToolItem, Toolbar,
+    Action, Binding, CellSetting, Chord, ChoicePreview, Film, FilmGroup, FilmItem, FlagIcons, HeadingAction, IconToggle, Keys,
+    LayerRow, Layers, MenuEntry, PanelCell, PanelPage, PropValue, Properties, ReferenceRole, Row, RowKind, Section, TabEntry,
+    Tabs, Thumbnail, ToolItem, Toolbar,
 };
 use serde_json::json;
 
@@ -117,8 +119,17 @@ pub fn toolbar(session: &Session) -> Toolbar {
     }
     let zoom = image.and_then(|image| image.frame().camera.as_ref()).map_or(1.0, |camera| camera.zoom);
     let previs = image.map(|image| &image.doc().previs);
-    let trailing = vec![
-        ToolItem::Separator,
+    let mut trailing = vec![ToolItem::Separator];
+    // While the tab has rounds: the grid shows the shown take's round
+    // whole, and the two rectangles the take beside its references, as
+    // ig-round-grid and ig-references-sheet show them.
+    if let Some(image) = image.filter(|image| !image.rounds.tiles.is_empty()) {
+        let shown = image.rounds.shown.is_some();
+        let view = &image.rounds.view;
+        trailing.push(button("view-grid", "Round", Action::new("round_grid"), shown, *view == View::Grid));
+        trailing.push(button("view-columns-2", "references sheet", Action::new("round_sheet"), shown, *view == View::Sheet));
+    }
+    trailing.extend([
         // The pre-vis check, and beside it its chevron, as
         // ig-previs-overlay-settings shows.
         button("cube", "Pre-vis check", Action::new("previs_toggle"), image.is_some(), previs.is_some_and(|previs| previs.settings.on)),
@@ -148,7 +159,7 @@ pub fn toolbar(session: &Session) -> Toolbar {
         button("zoom-in", "Zoom in (Ctrl++)", Action::new("canvas.zoom_in"), true, false),
         button("frame", "Fit (Ctrl+0)", Action::new("canvas.fit"), true, false),
         ToolItem::Maximize { icon: "maximize".into(), restore_icon: "reduce".into(), tip: "Full screen".into() },
-    ];
+    ]);
     let (options, options_trailing) = settings_row(session);
     Toolbar { items, trailing, options, options_trailing }
 }
@@ -461,6 +472,7 @@ pub fn properties(session: &Session) -> Option<Properties> {
     let active = doc.active.and_then(|id| layered.find(id));
     let mut sections = Vec::new();
     let mut layers = None;
+    let mut cell = None;
     match session.page {
         Page::Layers => {
             if let Some(node) = active {
@@ -497,6 +509,7 @@ pub fn properties(session: &Session) -> Option<Properties> {
             });
         }
         Page::Properties => sections.push(chosen_settings(session)),
+        Page::Prompt => cell = image.gallery.current_cell().map(|own| prompt_cell(&own.id)),
         Page::Adjustments => sections.push(Section {
             title: String::new(),
             icon: None,
@@ -538,9 +551,35 @@ pub fn properties(session: &Session) -> Option<Properties> {
         back: None,
         layers,
         sections,
-        cell: None,
-        pages: vec![page("Layers", Page::Layers, 0), page("Properties", Page::Properties, 1), page("Adjustments", Page::Adjustments, 2)],
+        cell,
+        pages: vec![
+            page("Layers", Page::Layers, 0),
+            page("Properties", Page::Properties, 1),
+            page("Adjustments", Page::Adjustments, 2),
+            page("Prompt", Page::Prompt, 3),
+        ],
     })
+}
+
+/// The Prompt page's cell, as ig-request-anchor shows it: the host draws
+/// the card and runs it; this names the cell, the roles a reference can
+/// have, the references it takes, and the settings Size, Images, and Seed.
+/// A role's model input is the model's workflow skill's to pick.
+pub fn prompt_cell(cell: &str) -> PanelCell {
+    let number = |min: f64, max: f64| RowKind::Number { min, max, percent: false, places: 0, centered: false };
+    PanelCell {
+        cell: cell.to_string(),
+        hint: "Describe the image…".into(),
+        roles: rounds::ROLES.iter().map(|label| ReferenceRole { label: label.to_string(), field: None, slot: false }).collect(),
+        reference_types: rounds::IMAGE_TYPES.iter().map(|kind| kind.to_string()).collect(),
+        reference_menu: Vec::new(),
+        settings: vec![
+            CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Text },
+            CellSetting { key: "images".into(), label: "Images".into(), kind: number(1.0, 10.0) },
+            CellSetting { key: "seed".into(), label: "Seed".into(), kind: number(0.0, 2_147_483_647.0) },
+        ],
+        menu: Vec::new(),
+    }
 }
 
 /// The Layers page's rows for the active layer: its blend mode, opacity,
@@ -840,6 +879,10 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
     if node.mask.is_none() {
         menu.push(row("Add mask", Action::with_arg("add_mask", target.clone())));
     }
+    // A layer of pixels, such as a matte, as ig-layer-export shows it.
+    if matches!(node.kind, Kind::Pixels) && !node.is_group() {
+        menu.push(row("Write out as PNG…", Action::with_arg("layer_write_png", target.clone())));
+    }
     menu.push(row("Delete", Action::with_arg("delete_layer", target.clone())));
     let (icon, mark) = match &node.kind {
         _ if node.is_group() => ("folder", None),
@@ -880,12 +923,33 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
     }
 }
 
-/// The filmstrip, as the gallery views and their two menus show
-/// it: every image's thumbnail with its menu, the shown one, and the +
-/// tile's rows.
+/// The filmstrip, as the gallery views and their two menus show it, and
+/// ig-filmstrip-rounds with rounds: each round's takes first, under its
+/// label, then every image of the gallery, with its menu, the one shown,
+/// and the + tile's rows.
 pub fn film(image: &Image) -> Film {
     let count = image.gallery.frames.len();
-    let items = image
+    let rounds = &image.rounds;
+    let mut items: Vec<FilmItem> = rounds
+        .tiles
+        .iter()
+        .enumerate()
+        .map(|(index, tile)| FilmItem {
+            name: format!("Take {}", tile.take + 1),
+            thumbnail: rounds.thumbnail(tile),
+            menu: tile.path().map(take_menu).unwrap_or_default(),
+            badge: String::new(),
+            mark: tile.file.as_ref().filter(|file| file.canon).map(|_| String::from("badge-check")),
+            chosen: rounds.shown == Some(index),
+            pending: tile.pending.clone(),
+        })
+        .collect();
+    let mut groups: Vec<FilmGroup> = rounds.groups().into_iter().map(|(label, count)| FilmGroup { label, count, menu: Vec::new() }).collect();
+    if !groups.is_empty() {
+        // The gallery's own images are a run of their own, with no label.
+        groups.push(FilmGroup { label: String::new(), count, menu: Vec::new() });
+    }
+    let images = image
         .gallery
         .frames
         .iter()
@@ -914,17 +978,32 @@ pub fn film(image: &Image) -> Film {
                 chosen: false,
                 pending: None,
             }
-        })
-        .collect();
+        });
+    let takes = items.len();
+    items.extend(images);
     Film {
         items,
-        shown: image.gallery.shown,
+        shown: rounds.shown.unwrap_or(takes + image.gallery.shown),
         select: Action::new("film_select"),
         reorder: Action::new("film_reorder"),
         add: vec![row("New image", Action::new("film_new")), row("Open PNG or JPEG…", Action::new("film_open"))],
         focus: Action::new("film_focus"),
-        groups: Vec::new(),
+        groups,
     }
+}
+
+/// A take's menu, as ig-candidate-chosen shows it.
+fn take_menu(path: &str) -> Vec<MenuEntry> {
+    let target = json!({ "take": path });
+    let mut edit = row("Edit", Action::with_arg("take_edit", target.clone()));
+    edit.divider = true;
+    let report = row("Open report", Action::with_arg("take_report", target.clone()));
+    vec![
+        row("Next round from this", Action::with_arg("take_next_round", target.clone())),
+        row("Ask the assistant to use this take", Action::with_arg("take_ask", target)),
+        edit,
+        report,
+    ]
 }
 
 pub fn tabs(session: &Session) -> Option<Tabs> {
@@ -1085,9 +1164,10 @@ mod tests {
         assert!(reason(&session).is_some_and(|text| text.contains("adjustment")));
     }
 
-    /// Catches a Layers page that drifts from the mockup: three pages, all
-    /// enabled, Blend Mode, Opacity, Fill, and four locks above the list,
-    /// the heading's add, group, and delete, and thumbnails.
+    /// Catches a Layers page that drifts from the mockup: four pages, all
+    /// enabled, the Prompt page last as ig-request-anchor shows it, Blend
+    /// Mode, Opacity, Fill, and four locks above the list, the heading's
+    /// add, group, and delete, and thumbnails.
     #[test]
     fn the_layers_page_follows_the_mockup() {
         let mut session = Session::launch();
@@ -1096,7 +1176,12 @@ mod tests {
         let pages: Vec<(String, bool)> = panel.pages.iter().map(|page| (page.label.clone(), page.enabled)).collect();
         assert_eq!(
             pages,
-            [("Layers".to_string(), true), ("Properties".to_string(), true), ("Adjustments".to_string(), true)]
+            [
+                ("Layers".to_string(), true),
+                ("Properties".to_string(), true),
+                ("Adjustments".to_string(), true),
+                ("Prompt".to_string(), true)
+            ]
         );
         assert!(panel.pages[0].active);
         let labels: Vec<&str> = panel.sections[0].rows.iter().map(|row| row.label.as_str()).collect();
@@ -1221,6 +1306,29 @@ mod tests {
         assert_eq!(shown[1].name, "Layer 1");
         session.images[0].doc_mut().set_notes_hidden(true);
         assert!(!rows(&session)[0].visible);
+    }
+
+    /// Catches a Prompt page that drifts from ig-request-anchor and the
+    /// guide: it names the tab's cell, a draft image cell, with the hint
+    /// "Describe the image…", the guide's roles, `rounds::ROLES`, PNG,
+    /// JPEG, and WebP references, and Size, Images, and Seed.
+    #[test]
+    fn the_prompt_page_names_the_tabs_cell() {
+        let mut session = Session::launch();
+        let _ = session.emit();
+        session.page = Page::Prompt;
+        let panel = properties(&session).unwrap();
+        assert!(panel.pages[3].active && panel.layers.is_none() && panel.sections.is_empty());
+        let cell = panel.cell.expect("no cell on the Prompt page");
+        let own = session.images[0].gallery.current_cell().unwrap();
+        assert_eq!(cell.cell, own.id);
+        assert_eq!((own.kind.as_str(), own.step.is_none()), (protocol::IMAGE_KIND, true));
+        assert_eq!(cell.hint, "Describe the image…");
+        let roles: Vec<&str> = cell.roles.iter().map(|role| role.label.as_str()).collect();
+        assert_eq!(roles, rounds::ROLES);
+        assert_eq!(cell.reference_types, ["image/png", "image/jpeg", "image/webp"]);
+        let settings: Vec<(&str, &str)> = cell.settings.iter().map(|setting| (setting.key.as_str(), setting.label.as_str())).collect();
+        assert_eq!(settings, [("size", "Size"), ("images", "Images"), ("seed", "Seed")]);
     }
 
     /// Catches a key that the host keeps for itself, or two keys on one chord.

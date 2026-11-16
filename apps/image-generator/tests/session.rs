@@ -937,3 +937,493 @@ fn the_previs_check_is_drawn_only_where_it_is_shown() {
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+// Requests: the Prompt page's cell, rounds of takes, the round views, a
+// next round, previews, and a Skills project's `work/` folder.
+
+/// The takes' colours, each a flat image, and a reference's.
+const TEAL: [u8; 3] = [30, 160, 200];
+const GREEN: [u8; 3] = [40, 190, 70];
+const BLUE: [u8; 3] = [50, 60, 210];
+const GOLD: [u8; 3] = [230, 180, 20];
+const PLATE: [u8; 3] = [120, 110, 100];
+
+fn flat(colour: [u8; 3], width: u32, height: u32) -> Vec<u8> {
+    [colour[0], colour[1], colour[2], 255].repeat((width * height) as usize)
+}
+
+/// A Skills project with four takes in `library/`, 160 × 90, and a
+/// reference in `refs/`.
+fn skills_project(label: &str) -> PathBuf {
+    let folder = scratch(label);
+    std::fs::create_dir_all(folder.join("library")).unwrap();
+    std::fs::create_dir_all(folder.join("refs")).unwrap();
+    for (name, colour) in [("r1-1", TEAL), ("r1-2", GREEN), ("r2-1", BLUE), ("r2-2", GOLD)] {
+        write_png(&folder.join(format!("library/{name}.png")), 160, 90, &flat(colour, 160, 90));
+    }
+    write_png(&folder.join("refs/plate.png"), 160, 90, &flat(PLATE, 160, 90));
+    folder
+}
+
+fn take(path: &str, canon: bool) -> protocol::TakeFile {
+    protocol::TakeFile { path: path.into(), media_type: "image/png".into(), canon }
+}
+
+fn round(request: &str, number: u32, takes: Vec<protocol::TakeFile>) -> protocol::Round {
+    protocol::Round {
+        request: request.into(),
+        number,
+        model: "Model A".into(),
+        prompt: "The keeper turns from the window toward the radio as it crackles.".into(),
+        references: Vec::new(),
+        left_out: Vec::new(),
+        state: protocol::RoundState::Done,
+        started: Some(1_793_146_000),
+        count: None,
+        takes,
+        error: None,
+        report: None,
+    }
+}
+
+/// The tab's cell, from the first `cells` that names one.
+fn cell_of(program: &Program) -> String {
+    program.wait(|message| match message {
+        AppMessage::Cells { tab, selected: Some(cell), .. } if tab == "1" => Some(cell.clone()),
+        _ => None,
+    })
+}
+
+fn send_takes(program: &mut Program, cell: &str, rounds: Vec<protocol::Round>) {
+    let cell = protocol::ItemRef { path: "work/Untitled Image.ipx".into(), item: Some(cell.into()) };
+    program.send(HostMessage::Takes { cell, rounds });
+}
+
+/// The next view whose filmstrip `pick` takes.
+fn strip(program: &Program, mut pick: impl FnMut(&protocol::Film) -> bool) -> (RasterView, protocol::Film) {
+    program.wait(|message| match message {
+        AppMessage::Raster(view) => view.film.clone().filter(|film| pick(film)).map(|film| (view.clone(), film)),
+        _ => None,
+    })
+}
+
+fn runs(film: &protocol::Film) -> Vec<(String, usize)> {
+    film.groups.iter().map(|group| (group.label.clone(), group.count)).collect()
+}
+
+/// Where a flat colour is in an image: its box, `[left, top, right,
+/// bottom]`, or none.
+fn found(bytes: &[u8], width: u32, colour: [u8; 3]) -> Option<[u32; 4]> {
+    let mut boxed: Option<[u32; 4]> = None;
+    for (index, pixel) in bytes.chunks_exact(4).enumerate() {
+        if pixel[..3] == colour {
+            let (x, y) = (index as u32 % width, index as u32 / width);
+            let held = boxed.get_or_insert([x, y, x, y]);
+            *held = [held[0].min(x), held[1].min(y), held[2].max(x), held[3].max(y)];
+        }
+    }
+    boxed
+}
+
+/// Catches takes kept in the workspace's file, or a strip that does not
+/// follow the requests' records: `takes` fills the strip with each round
+/// under "Round N · model", a canon take sealed, a round being made as its
+/// waiting places, and the gallery's own images after them; sent again
+/// without a take, as when its report is deleted, its tile leaves, and
+/// with one added by hand, it appears; and the tab's file, in the Skills
+/// project's `work/` folder, names no take.
+#[test]
+fn takes_fill_the_strip_by_round_and_are_never_kept() {
+    let folder = skills_project("takes");
+    let mut program = Program::start(false);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    let cell = cell_of(&program);
+    let running = protocol::Round { state: protocol::RoundState::Running, count: Some(2), ..round("q2", 2, Vec::new()) };
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", true)]), running.clone()]);
+    let (_, film) = strip(&program, |film| !film.groups.is_empty());
+    assert_eq!(runs(&film), [("Round 1 · Model A".to_string(), 2), ("Round 2 · Model A".to_string(), 2), (String::new(), 1)]);
+    assert_eq!(film.items.len(), 5);
+    assert_eq!(film.items[1].mark.as_deref(), Some("badge-check"), "the canon take has no seal");
+    assert_eq!(film.items[0].mark, None);
+    assert!(matches!(film.items[2].pending, Some(protocol::FilmPending::Running { since: Some(1_793_146_000) })));
+    assert_eq!(film.shown, 4, "the gallery's image is not the one shown");
+    let thumbnail = &film.items[0].thumbnail;
+    assert_eq!((thumbnail.width, thumbnail.height), (78, 44));
+    assert_eq!(pixel(Path::new(&thumbnail.path), 78, 39, 22), [TEAL[0], TEAL[1], TEAL[2], 255], "the thumbnail is not the take's file");
+    let menu: Vec<&str> = film.items[0].menu.iter().map(|row| row.label.as_str()).collect();
+    assert_eq!(menu, ["Next round from this", "Ask the assistant to use this take", "Edit", "Open report"]);
+
+    // An image of the gallery's own, so there is something to keep.
+    program.command("film_new", json!({}));
+    strip(&program, |film| film.items.len() == 6);
+    // The first take's report is gone.
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-2.png", true)]), running.clone()]);
+    let (_, film) = strip(&program, |film| film.groups.first().is_some_and(|group| group.count == 1));
+    assert_eq!(runs(&film), [("Round 1 · Model A".to_string(), 1), ("Round 2 · Model A".to_string(), 2), (String::new(), 2)]);
+    assert_eq!(pixel(Path::new(&film.items[0].thumbnail.path), 78, 39, 22), [GREEN[0], GREEN[1], GREEN[2], 255]);
+    // A take added by hand.
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-2.png", true), take("library/r2-1.png", false)]), running]);
+    let (_, film) = strip(&program, |film| film.groups.first().is_some_and(|group| group.count == 2));
+    assert_eq!(pixel(Path::new(&film.items[1].thumbnail.path), 78, 39, 22), [BLUE[0], BLUE[1], BLUE[2], 255]);
+
+    let file = keep(&mut program, "1");
+    assert_eq!(file, folder.join("work/Untitled Image.ipx"), "a Skills project's image is not in work/");
+    let kept = header(&file).to_string();
+    assert!(!kept.contains("library/") && !kept.contains("\"q1\""), "a take was kept in the image's file: {kept}");
+    assert_eq!(header(&file)["cell"], json!(cell), "the Prompt page's cell was not kept");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches a next round that loses the notes or the take: with a pin's
+/// words typed on a take, Next round from this makes the tab's cell a
+/// draft whose prompt is the round's, then "Notes on the last round: 1.
+/// …"; whose references are the round's, in order, the take with the
+/// role Reference, and the marked image, an item of the tab's file with
+/// the role "Notes on the last round"; and that item is declared, and
+/// rendered for the runner as the take with the pin on it.
+#[test]
+fn next_round_from_a_take_carries_its_notes() {
+    let folder = skills_project("next-round");
+    let mut program = Program::start(false);
+    program.send(HostMessage::Viewport { viewport: [1200.0, 800.0] });
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    let cell = cell_of(&program);
+    let mut first = round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", false)]);
+    first.references = vec![protocol::SentReference { path: "refs/plate.png".into(), role: Some("Control, the room's layout".into()) }];
+    send_takes(&mut program, &cell, vec![first]);
+    strip(&program, |film| !film.groups.is_empty());
+
+    program.command("film_select", json!({ "value": 0 }));
+    let shown = program.wait(|message| match message {
+        AppMessage::Raster(view) if (view.width, view.height) == (160, 90) => Some(view.clone()),
+        _ => None,
+    });
+    assert_eq!(shown.film.as_ref().unwrap().shown, 0);
+    assert!(shown.film.as_ref().unwrap().items[0].chosen, "the take shown is not chosen");
+    assert_eq!(pixel(Path::new(&shown.image), 160, 80, 45), [TEAL[0], TEAL[1], TEAL[2], 255], "the take is not read from its file");
+    program.command("tool", json!({ "tool": "notes" }));
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Click { at: [40.0, 30.0] } });
+    program.wait(|message| match message {
+        AppMessage::Raster(view) if view.text.is_some() => Some(()),
+        _ => None,
+    });
+    program.send(HostMessage::RasterText { tab: "1".into(), input: protocol::TextInput::Insert { text: "less rain".into() } });
+    program.command("take_next_round", json!({ "take": "library/r1-1.png" }));
+    let draft = program.wait(|message| match message {
+        AppMessage::Cells { cells, selected: Some(selected), .. } => {
+            cells.iter().find(|own| own.id == *selected && own.prompt().contains("Notes on the last round")).cloned()
+        }
+        _ => None,
+    });
+    assert!(draft.step.is_none(), "a next round edited a step");
+    assert_eq!(draft.prompt(), "The keeper turns from the window toward the radio as it crackles. Notes on the last round: 1. less rain");
+    let paths: Vec<(String, Option<String>)> = draft
+        .input
+        .iter()
+        .filter_map(|part| match part {
+            protocol::CellPart::Path { path, role, .. } => Some((path.clone(), role.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ("refs/plate.png".to_string(), Some("Control, the room's layout".to_string())),
+            ("library/r1-1.png".to_string(), Some("Reference".to_string()))
+        ]
+    );
+    let (item, media_type) = draft
+        .input
+        .iter()
+        .find_map(|part| match part {
+            protocol::CellPart::Item { item, media_type, role, .. } if role.as_deref() == Some("Notes on the last round") => Some((item.clone(), media_type.clone())),
+            _ => None,
+        })
+        .expect("the marked image is not sent");
+    assert_eq!((item.path.as_str(), media_type.as_str()), ("work/Untitled Image.ipx", "image/png"));
+
+    let declared = program.wait(|message| match message {
+        AppMessage::Items { path, items } if *path == item.path => items.iter().find(|own| Some(&own.id) == item.item.as_ref()).cloned(),
+        _ => None,
+    });
+    program.send(HostMessage::Render { id: "r1".into(), item: item.clone(), media_type: "image/png".into(), part: None });
+    let (path, fingerprint, error) = program.wait(|message| match message {
+        AppMessage::Rendered { id, path, fingerprint, error } if id == "r1" => Some((path.clone(), fingerprint.clone(), error.clone())),
+        _ => None,
+    });
+    assert_eq!(error, None);
+    assert_eq!(fingerprint, Some(declared.fingerprint), "the render is not the item declared");
+    let marked = image::open(folder.join(path.unwrap())).unwrap().into_rgba8();
+    assert_eq!(marked.dimensions(), (160, 90));
+    assert_eq!(marked.get_pixel(140, 80).0, [TEAL[0], TEAL[1], TEAL[2], 255], "the marked image is not the take");
+    let near: Vec<[u8; 4]> = (36..45).map(|x| marked.get_pixel(x, 30).0).collect();
+    assert!(near.iter().any(|pixel| pixel[..3] != TEAL), "the marked image has no pin");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches a round view that draws the wrong takes, or in the wrong
+/// places: the grid shows the shown take's round, its reference to the
+/// left of its takes, the takes in order, the one shown outlined, and no
+/// take of another round; a take of another round chosen with Shift
+/// shows both rounds, the older above, each in order; the references
+/// sheet shows the reference beside the take.
+#[test]
+fn the_round_views_draw_the_right_takes_in_the_right_places() {
+    let folder = skills_project("round-views");
+    let mut program = Program::start(false);
+    program.send(HostMessage::Viewport { viewport: [1200.0, 800.0] });
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    let cell = cell_of(&program);
+    let mut first = round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", false)]);
+    first.references = vec![protocol::SentReference { path: "refs/plate.png".into(), role: Some("Control, the room's layout".into()) }];
+    first.left_out = vec![protocol::SentReference { path: "library/r2-2.png".into(), role: None }];
+    let second = round("q2", 2, vec![take("library/r2-1.png", false), take("library/r2-2.png", false)]);
+    send_takes(&mut program, &cell, vec![first, second]);
+    let (_, film) = strip(&program, |film| !film.groups.is_empty());
+    program.command("film_select", json!({ "value": 0 }));
+    program.command("round_grid", json!({}));
+    let grid = program.wait(|message| match message {
+        AppMessage::Raster(view) if (view.width, view.height) == (1200, 800) => Some(view.clone()),
+        _ => None,
+    });
+    assert!(matches!(grid.tool, protocol::RasterTool::Hand), "a round view can be drawn on");
+    let bytes = std::fs::read(&grid.image).unwrap();
+    let (teal, green, plate) = (found(&bytes, 1200, TEAL).unwrap(), found(&bytes, 1200, GREEN).unwrap(), found(&bytes, 1200, PLATE).unwrap());
+    assert!(plate[2] < teal[0] && plate[2] < green[0], "the references are not left of the takes");
+    assert!(teal[1] < green[1] || (teal[1] == green[1] && teal[2] < green[0]), "the takes are not in order");
+    assert!(found(&bytes, 1200, BLUE).is_none() && found(&bytes, 1200, GOLD).is_none(), "another round's take is in the grid");
+    let outline = ((teal[1] + teal[3]) / 2 * 1200 + teal[0] - 2) as usize * 4;
+    assert_eq!(bytes[outline..outline + 3], [37, 99, 235], "the take shown is not outlined");
+
+    program.send(HostMessage::Command { id: "film_select".into(), tab: Some("1".into()), arg: film.select_message(2, true).arg, node: None, viewport: [1200.0, 800.0] });
+    let pair = program.raster(grid.revision);
+    let bytes = std::fs::read(&pair.image).unwrap();
+    let [teal, green, blue, gold] = [TEAL, GREEN, BLUE, GOLD].map(|colour| found(&bytes, pair.width, colour).expect("a take is missing"));
+    assert!(teal[3] < blue[1] && green[3] < gold[1], "the older round is not above");
+    assert!(teal[2] < green[0] && blue[2] < gold[0], "a round's takes are not in order");
+
+    program.command("round_sheet", json!({}));
+    let sheet = program.raster(pair.revision);
+    let bytes = std::fs::read(&sheet.image).unwrap();
+    let (plate, teal) = (found(&bytes, sheet.width, PLATE).unwrap(), found(&bytes, sheet.width, TEAL).unwrap());
+    assert!(plate[2] < teal[0], "the references are not beside the take");
+    assert!(found(&bytes, sheet.width, GOLD).is_some_and(|gold| gold[1] > plate[3]), "the reference not sent is not under those sent");
+    assert!(found(&bytes, sheet.width, GREEN).is_none(), "another take is on the sheet");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches a reference the host cannot show: `edits` names PNG, JPEG, and
+/// WebP, and `preview` of each answers with a raw image of its size, no
+/// larger than a reference row needs, of the file's colour, and no words
+/// for its corner; a file that is no image answers with why.
+#[test]
+fn png_jpeg_and_webp_are_previewed() {
+    let folder = scratch("preview");
+    image::RgbaImage::from_pixel(40, 20, image::Rgba([TEAL[0], TEAL[1], TEAL[2], 255])).save(folder.join("small.png")).unwrap();
+    image::RgbImage::from_pixel(640, 360, image::Rgb(GOLD)).save(folder.join("wide.jpg")).unwrap();
+    image::RgbaImage::from_pixel(64, 64, image::Rgba([BLUE[0], BLUE[1], BLUE[2], 255])).save(folder.join("square.webp")).unwrap();
+    std::fs::write(folder.join("notes.txt"), "not an image").unwrap();
+    let mut program = Program::start(false);
+    let edits = program.wait(|message| match message {
+        AppMessage::Edits { media_types } => Some(media_types.clone()),
+        _ => None,
+    });
+    assert_eq!(edits, ["image/png", "image/jpeg", "image/webp"]);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    let mut preview = |id: &str, path: &str, media_type: &str| {
+        program.send(HostMessage::Preview { id: id.into(), path: path.into(), media_type: media_type.into() });
+        program.wait(|message| match message {
+            AppMessage::Previewed { id: answered, thumbnail, badge, error, .. } if answered == id => Some((thumbnail.clone(), badge.clone(), error.clone())),
+            _ => None,
+        })
+    };
+    for (path, media_type, size, colour, close) in [
+        ("small.png", "image/png", (40, 20), TEAL, 0),
+        ("wide.jpg", "image/jpeg", (160, 90), GOLD, 8),
+        ("square.webp", "image/webp", (64, 64), BLUE, 0),
+    ] {
+        let (thumbnail, badge, error) = preview(path, path, media_type);
+        assert_eq!((error, badge.as_str()), (None, ""), "{path}");
+        let thumbnail = thumbnail.expect("no thumbnail");
+        assert_eq!((thumbnail.width, thumbnail.height), size, "{path}");
+        let middle = pixel(Path::new(&thumbnail.path), size.0, size.0 / 2, size.1 / 2);
+        assert!((0..3).all(|channel| middle[channel].abs_diff(colour[channel]) <= close), "{path}: {middle:?}");
+    }
+    let (thumbnail, _, error) = preview("text", "notes.txt", "image/png");
+    assert!(thumbnail.is_none() && error.is_some(), "a file that is no image was previewed");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches a Skills project's image kept beside its activities, or with a
+/// record of what made it: opened as new work there, with where it came
+/// from, it is kept in the project's `work/` folder, with no `source`.
+#[test]
+fn a_skills_projects_image_is_kept_in_work_without_its_source() {
+    let folder = scratch("skills-work");
+    let source = folder.join("lamp.png");
+    image::RgbaImage::from_pixel(20, 10, image::Rgba([10, 120, 200, 255])).save(&source).unwrap();
+    let from = protocol::OpenedFrom { cell: "c7".into(), image: "lamp.png".into(), session: Some("s3".into()), recipe: None };
+    let mut program = Program::start(false);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    program.raster(0);
+    program.send(HostMessage::OpenAsNew { path: source.display().to_string(), name: "Lamp".into(), from: Some(from) });
+    let opened = program.wait(|message| match message {
+        AppMessage::Raster(view) if (view.width, view.height) == (20, 10) => Some(view.clone()),
+        _ => None,
+    });
+    let file = keep(&mut program, &opened.tab);
+    assert_eq!(file, folder.join("work/Lamp.ipx"));
+    assert!(header(&file).get("source").is_none(), "a Skills project's image keeps where it came from");
+    assert!(!folder.join("Lamp.ipx").exists());
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches notes on a take lost when the program ends, or a take kept in
+/// their place: a pin with its words on a take is kept in the tab's file
+/// by the take's path and sha256 alone, and a new program that opens the
+/// file and is sent the same rounds shows the take with its pin again.
+#[test]
+fn notes_on_a_take_survive_a_restart() {
+    let folder = skills_project("take-notes");
+    let rounds = || vec![round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", false)])];
+    let mut program = Program::start(false);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    let cell = cell_of(&program);
+    send_takes(&mut program, &cell, rounds());
+    strip(&program, |film| !film.groups.is_empty());
+    program.command("film_select", json!({ "value": 0 }));
+    program.command("tool", json!({ "tool": "notes" }));
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Click { at: [40.0, 30.0] } });
+    program.wait(|message| match message {
+        AppMessage::Raster(view) if view.text.is_some() => Some(()),
+        _ => None,
+    });
+    program.send(HostMessage::RasterText { tab: "1".into(), input: protocol::TextInput::Insert { text: "less rain".into() } });
+    // Another tool ends the typing, which makes the pin a step.
+    program.command("tool", json!({ "tool": "brush" }));
+    let file = keep(&mut program, "1");
+    drop(program);
+    let kept = header(&file);
+    let notes = &kept["take_notes"];
+    assert_eq!(notes.as_array().map(Vec::len), Some(1), "{kept}");
+    assert_eq!(notes[0]["path"], "library/r1-1.png");
+    assert_eq!(notes[0]["sha256"], json!(layers::link::sha256_file(&folder.join("library/r1-1.png")).unwrap()));
+    assert_eq!(notes[0]["notes"]["pins"][0]["text"], "less rain");
+    assert!(!kept.to_string().contains("\"q1\"") && !kept.to_string().contains("Model A"), "a take's record was kept");
+
+    let mut again = Program::start(true);
+    again.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    again.send(HostMessage::Open { path: Some(file.display().to_string()) });
+    assert_eq!(cell_of(&again), cell, "the tab's cell was not kept");
+    send_takes(&mut again, &cell, rounds());
+    strip(&again, |film| !film.groups.is_empty());
+    again.command("film_select", json!({ "value": 0 }));
+    let shown = again.wait(|message| match message {
+        AppMessage::Raster(view) if (view.width, view.height) == (160, 90) => Some(view.clone()),
+        _ => None,
+    });
+    let near: Vec<[u8; 4]> = (36..45).map(|x| pixel(Path::new(&shown.image), 160, x, 30)).collect();
+    assert!(near.iter().any(|pixel| pixel[..3] != TEAL), "the take's pin did not come back");
+    assert_eq!(pixel(Path::new(&shown.image), 160, 140, 80), [TEAL[0], TEAL[1], TEAL[2], 255]);
+    let rows = layer_rows(&again, |rows| rows.first().is_some_and(|row| row.name == "Notes"));
+    assert_eq!(rows.len(), 2, "the take's notes have no Notes row");
+    drop(again);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches a draft kept after it became a step, a report that cannot be
+/// opened, or a layer written out in a Skills project that the runner is
+/// not asked to file: Open report asks for the take's round's report; a
+/// layer written out is a PNG next to the tab's file in `work/`, and
+/// `file_resource` names it and that file; `cell_became_step` leaves the
+/// cell its pointer alone, and no undo brings its draft back, in the file
+/// too.
+#[test]
+fn a_draft_becomes_its_step_and_a_skills_project_files_what_leaves() {
+    let folder = skills_project("steps");
+    let mut program = Program::start(false);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    let cell = cell_of(&program);
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-1.png", false)])]);
+    let (_, film) = strip(&program, |film| !film.groups.is_empty());
+    let report = film.items[0].menu.iter().find(|row| row.label == "Open report").expect("no Open report");
+    assert!(report.enabled, "Open report is off");
+    program.command("take_report", report.action.as_ref().unwrap().arg.clone().unwrap());
+    let request = program.wait(|message| match message {
+        AppMessage::OpenReport { request } => Some(request.clone()),
+        _ => None,
+    });
+    assert_eq!(request, "q1");
+
+    // Two takes opened as layers, each linked to its file, r1-1 above
+    // r1-2, and a new layer above both, which is written out.
+    for (count, take) in [(2, "library/r1-2.png"), (3, "library/r1-1.png")] {
+        program.command("open_layer", json!({}));
+        let asked = program.wait(|message| match message {
+            AppMessage::File { id, kind: protocol::FileKind::Open, .. } => Some(id.clone()),
+            _ => None,
+        });
+        program.send(HostMessage::FileResult { id: asked, path: Some(folder.join(take).display().to_string()) });
+        layer_rows(&program, |rows| rows.len() == count && rows[0].mark.as_deref() == Some("link"));
+    }
+    program.command("add_layer", json!({}));
+    let rows = layer_rows(&program, |rows| rows.len() == 4);
+    assert!(rows[0].menu.iter().any(|row| row.label == "Write out as PNG…"));
+    let filed = |program: &Program| {
+        program.wait(|message| match message {
+            AppMessage::FileResource { tab, path, from } if tab == "1" => Some((path.clone(), from.clone())),
+            _ => None,
+        })
+    };
+    program.command("layer_write_png", json!({ "node": rows[0].id }));
+    let (path, from) = filed(&program);
+    assert!(path.starts_with("work/") && path.ends_with(".png"), "{path}");
+    assert_eq!(from, ["work/Untitled Image.ipx", "library/r1-2.png", "library/r1-1.png"], "the runner is not told what the layer came from, lowest first");
+    assert!(image::open(folder.join(&path)).is_ok(), "the layer was not written out as a PNG");
+    // The take r1-1 painted on, and written out: its own file comes
+    // second, before the take beneath it.
+    let linked = rows[1].id;
+    program.command("layer_click", json!({ "node": linked, "value": false }));
+    program.command("tool", json!({ "tool": "brush" }));
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Stroke { points: vec![[900.0, 540.0, 1.0], [1000.0, 540.0, 1.0]] } });
+    layer_rows(&program, |rows| rows.len() == 4 && rows[1].mark.as_deref() == Some("edit-pencil"));
+    program.command("layer_write_png", json!({ "node": linked }));
+    let (path, from) = filed(&program);
+    assert!(image::open(folder.join(&path)).is_ok(), "the painted layer was not written out as a PNG");
+    assert_eq!(from, ["work/Untitled Image.ipx", "library/r1-1.png", "library/r1-2.png"], "the painted take's own file is not second");
+
+    let words = "The keeper turns.";
+    program.send(HostMessage::EditCell {
+        tab: "1".into(),
+        cell: cell.clone(),
+        input: vec![protocol::CellPart::Text { text: words.into() }],
+        settings: None,
+        endpoint: None,
+        model: Some("a model".into()),
+    });
+    program.wait(|message| match message {
+        AppMessage::Cells { cells, .. } => cells.iter().any(|own| own.prompt() == words).then_some(()),
+        _ => None,
+    });
+    let step = protocol::StepRef { chain: "shot-12".into(), step: "keyframe".into() };
+    program.send(HostMessage::CellBecameStep { tab: "1".into(), cell: cell.clone(), step: step.clone() });
+    let pointed = program.wait(|message| match message {
+        AppMessage::Cells { cells, .. } => cells.iter().find(|own| own.id == cell && own.step.is_some()).cloned(),
+        _ => None,
+    });
+    assert_eq!(pointed.step, Some(step));
+    assert!(!pointed.copies_its_step(), "the step's cell kept its draft");
+    program.command("film_focus", json!({}));
+    program.command("undo", json!({}));
+    let file = keep(&mut program, "1");
+    let kept = header(&file);
+    assert_eq!(kept["cells"][0]["step"]["chain"], "shot-12", "{kept}");
+    assert!(!kept.to_string().contains(words) && !kept.to_string().contains("a model"), "a draft came back: {kept}");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
