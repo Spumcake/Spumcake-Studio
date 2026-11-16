@@ -203,6 +203,53 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
     pair.ok("clips__delete_layer", json!({"layer": folder}), r0)?;
     pair.ok("clips__select_layer", json!({"layer": base}), r0)?;
     pair.ok("clips__go_to_frame", json!({"frame": 1}), r0)?;
+    // The film's sound. With no project the sound stays where it is, and
+    // the animatic, which a project's exports folder holds, is refused.
+    let sounds = std::env::temp_dir().join(format!("storyboard-client-sound-{}", std::process::id()));
+    std::fs::create_dir_all(&sounds).map_err(|error| error.to_string())?;
+    let line = sounds.join("line.wav");
+    let samples = storyboard_generator::sounds::clicks(48, &[6]);
+    std::fs::write(&line, storyboard_generator::sounds::wav_bytes(storyboard_generator::sounds::RATE, &samples)).map_err(|error| error.to_string())?;
+    let path = line.display().to_string();
+    let imported = pair.ok("clips__import_sound", json!({"path": path, "frame": 1}), r0)?;
+    let sound = imported["made"]["sound"].as_u64().ok_or_else(|| format!("no sound was imported: {imported}"))?;
+    let again = pair.ok("clips__import_sound", json!({"path": path, "frame": 1}), r0)?;
+    let second_sound = again["made"]["sound"].as_u64().ok_or("no second sound")?;
+    let film = pair.ok("clips__read_film", json!({}), r0)?;
+    if film["sound_tracks"].as_array().map(Vec::len) != Some(2) {
+        return Err(format!("a sound overlapping another did not get a track of its own: {film}"));
+    }
+    let lower = film["sound_tracks"][1]["id"].as_u64().ok_or("no second Sound track")?;
+    let loud = pair.ok("clips__read_sound", json!({"start": 1, "end": 12}), r0)?;
+    let loudness = loud["loudness"].as_array().ok_or("read_sound gave no loudness")?;
+    if loudness.len() != 12 || loudness[6].as_f64().unwrap_or(0.0) < 0.5 || loudness[5].as_f64().unwrap_or(1.0) > 0.01 {
+        return Err(format!("read_sound did not hear the click on frame 7: {loud}"));
+    }
+    pair.ok("clips__move_sound", json!({"sound": second_sound, "frame": 60, "track": film["sound_tracks"][0]["id"]}), r0)?;
+    pair.ok("clips__trim_sound", json!({"sound": sound, "from": 3, "length": 20}), r0)?;
+    pair.ok("clips__set_sound_volume", json!({"sound": sound, "volume": 0.5}), r0)?;
+    pair.ok("clips__select_sounds", json!({"sounds": [sound]}), r0)?;
+    pair.ok("clips__rename_sound_track", json!({"track": lower, "name": "Dialogue"}), r0)?;
+    pair.ok("clips__set_track", json!({"track": lower, "muted": true}), r0)?;
+    pair.refused("clips__set_track", json!({"track": lower, "visible": false}), r0)?;
+    pair.ok("clips__set_track", json!({"track": "shots", "locked": true}), r0)?;
+    pair.refused("clips__add_clip", json!({}), r0)?;
+    pair.ok("clips__set_track", json!({"track": "shots", "locked": false}), r0)?;
+    pair.ok("clips__delete_sound", json!({"sound": second_sound}), r0)?;
+    let track = pair.ok("clips__add_sound_track", json!({}), r0)?;
+    pair.ok("clips__delete_sound_track", json!({"track": track["made"]}), r0)?;
+    pair.ok("clips__set_listening_volume", json!({"volume": 0.6}), r0)?;
+    pair.refused("clips__export_animatic", json!({}), r0)?;
+    pair.refused("clips__cancel_export", json!({}), r0)?;
+    pair.refused("clips__list_items", json!({}), r0)?;
+    pair.refused("clips__render_again", json!({"item": "animatic"}), r0)?;
+    for tool in [
+        "import_sound", "read_sound", "move_sound", "trim_sound", "set_sound_volume", "select_sounds", "rename_sound_track", "set_track",
+        "delete_sound", "add_sound_track", "delete_sound_track", "set_listening_volume", "export_animatic", "cancel_export", "list_items",
+        "render_again",
+    ] {
+        note(&format!("clips__{tool}"));
+    }
     for tool in [
         "read_film", "add_clip", "duplicate_clip", "retime_clip", "move_clips", "delete_clip", "set_clip", "select_clips",
         "set_storyboard", "go_to_frame", "edit_clip", "leave_clip", "add_layer", "move_layer", "set_layer", "insert_keyframe",

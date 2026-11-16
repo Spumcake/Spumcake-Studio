@@ -1784,6 +1784,7 @@ impl TextLook {
 }
 
 /// A visible text object, in paint order, for the frame to lay out with egui.
+#[derive(Clone)]
 pub struct TextView {
     pub id: NodeId,
     pub content: String,
@@ -1849,6 +1850,7 @@ pub struct TextFit {
     pub natural: f64,
 }
 
+#[derive(Clone)]
 pub enum SceneMark {
     Ink(InkPaint),
     Text(TextView),
@@ -2067,6 +2069,7 @@ pub struct LiveStroke {
     pub shapes: Shapes,
 }
 
+#[derive(Clone)]
 pub struct InkPaint {
     pub rgb: [u8; 3],
     pub opacity: f64,

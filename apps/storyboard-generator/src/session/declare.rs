@@ -186,6 +186,8 @@ impl Session {
             key("F6", true, "clear_keyframe"),
             key("Comma", false, "step_back"),
             key("Period", false, "step_forward"),
+            // Enter plays and pauses, as in Adobe Animate; Space pans the canvas.
+            key("Enter", false, "play"),
         ]);
         Keys {
             bindings,
@@ -215,6 +217,7 @@ impl Session {
                     rename: false,
                 },
             })
+            .chain(film_menu_rows())
             .collect()
     }
 
@@ -977,4 +980,19 @@ pub(crate) fn session_value(value: protocol::PropValue) -> PropValue {
         protocol::PropValue::Idle => PropValue::Idle,
         protocol::PropValue::Mixed => PropValue::Mixed,
     }
+}
+
+/// The film's rows of the workspace menu, as the approved menu-workspace
+/// shows them: sound arrives and the animatic leaves from here.
+fn film_menu_rows() -> Vec<MenuEntry> {
+    let row = |label: &str, id: &str, divider: bool| MenuEntry {
+        label: label.to_string(),
+        icon: None,
+        enabled: true,
+        divider,
+        action: Some(protocol::Action::new(id)),
+        submenu: Vec::new(),
+        rename: false,
+    };
+    vec![row("Import sound…", "import_sound", true), row("Export animatic video", "export_animatic", false)]
 }

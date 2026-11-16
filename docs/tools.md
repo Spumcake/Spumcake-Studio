@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-91 tools.
+107 tools.
 
 ## The host
 
@@ -65,7 +65,7 @@ No tools.
 
 ### Film and clips (`clips`)
 
-Make and time the film's clips, and inside a clip its layers, keyframes, holds, labels, and onion skin, as the timeline and its pages do.
+Make and time the film's clips and its sound, and inside a clip its layers, keyframes, holds, labels, and onion skin, as the timeline and its pages do; export the animatic.
 
 - **`storyboard-generator__clips__read_film`**: The film as data: where the person is, the storyboard's settings, the onion skin, the selection, and every clip with its timing, notes, items, layers, keys, and marks. Takes nothing.
 - **`storyboard-generator__clips__add_clip`**: Add a clip, with one blank layer. Clips it lands on move later. Takes `length` (integer), `start` (integer).
@@ -97,6 +97,22 @@ Make and time the film's clips, and inside a clip its layers, keyframes, holds, 
 - **`storyboard-generator__clips__remove_mark`**: Remove a label or a comment. Takes `layer` (integer, required), `mark` (integer, required).
 - **`storyboard-generator__clips__set_onion_skin`**: Turn onion skin on or off, and set how many keys before and after it shows, its starting opacity, how much it fades, and whether it counts keys only. A view aid: not an undo step. Takes `after` (integer), `before` (integer), `fade` (number), `keys_only` (boolean), `on` (boolean), `opacity` (number).
 - **`storyboard-generator__clips__set_storyboard`**: Set the storyboard's title and scene, which the sheet's header shows, and the film's frame size and paper. Takes `height` (integer), `paper` (integer), `scene` (string), `title` (string), `width` (integer).
+- **`storyboard-generator__clips__import_sound`**: Import a sound, or a video's sound, from a file: it is copied into the project's sounds folder and placed whole on a Sound track, a new one when none has room. Takes `path` (string, required), `frame` (integer), `track` (integer).
+- **`storyboard-generator__clips__add_sound_track`**: Add an empty Sound track under the others. Takes nothing.
+- **`storyboard-generator__clips__rename_sound_track`**: Rename a Sound track. Takes `name` (string, required), `track` (integer, required).
+- **`storyboard-generator__clips__delete_sound_track`**: Delete a Sound track and the sounds on it. Takes `track` (integer, required).
+- **`storyboard-generator__clips__set_track`**: Lock or unlock a track, show or hide the Shots track, or mute or unmute a Sound track, as its header's toggles do. Takes `track` (any, required), `locked` (boolean), `muted` (boolean), `visible` (boolean).
+- **`storyboard-generator__clips__select_sounds`**: Select sounds on the Sound tracks, as clicking them does. Takes `sounds` (array, required).
+- **`storyboard-generator__clips__move_sound`**: Move a sound to a frame of the film, and to another Sound track. Takes `frame` (integer, required), `sound` (integer, required), `push` (boolean), `track` (integer).
+- **`storyboard-generator__clips__trim_sound`**: Set where a sound starts on the film, where it starts inside its own sound, and its length, as dragging its edges and its page do. Takes `sound` (integer, required), `at` (integer), `from` (integer), `length` (integer).
+- **`storyboard-generator__clips__set_sound_volume`**: Set a sound's volume, as its page does. Takes `sound` (integer, required), `volume` (number, required).
+- **`storyboard-generator__clips__delete_sound`**: Take a sound off its track. Its file stays in the sounds folder. Takes `sound` (integer, required).
+- **`storyboard-generator__clips__set_listening_volume`**: Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step. Takes `volume` (number, required).
+- **`storyboard-generator__clips__read_sound`**: How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound. Takes `end` (integer, required), `start` (integer, required).
+- **`storyboard-generator__clips__export_animatic`**: Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done. Takes nothing.
+- **`storyboard-generator__clips__cancel_export`**: Cancel the export under way. Takes nothing.
+- **`storyboard-generator__clips__list_items`**: Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed. Takes nothing.
+- **`storyboard-generator__clips__render_again`**: Render an item again from what made it: the animatic is exported again. Takes `item` (string, required).
 
 ### Read and look at a storyboard (`look`)
 

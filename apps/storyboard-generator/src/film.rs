@@ -35,6 +35,12 @@ pub struct Film {
     pub paper: u8,
     /// The Shots track's clips, in the order they start.
     pub clips: Vec<Clip>,
+    /// The Shots track's lock and eye. A hidden Shots track is left out of
+    /// what plays and what is exported.
+    pub shots_locked: bool,
+    pub shots_visible: bool,
+    /// Under the Shots track, top to bottom.
+    pub sound_tracks: Vec<crate::soundtrack::SoundTrack>,
     /// Ids of clips, layers, keys, marks, and drawings. Never reused.
     pub next_id: u64,
 }
@@ -149,6 +155,9 @@ impl Film {
             size: [1920, 1080],
             paper: 0,
             clips: Vec::new(),
+            shots_locked: false,
+            shots_visible: true,
+            sound_tracks: Vec::new(),
             next_id: 1,
         }
     }
@@ -437,7 +446,7 @@ impl Film {
 
     /// The highest id the film holds.
     fn highest_id(&self) -> u64 {
-        let mut highest = 0;
+        let mut highest = self.highest_sound_id();
         for clip in &self.clips {
             highest = highest.max(clip.id);
             for layer in &clip.layers {
@@ -957,19 +966,24 @@ fn keep_first_key(row: &mut Layer, next: &mut u64, drawings: &mut Vec<NewDrawing
     drawings.push(NewDrawing { id: drawing, copy_of: None });
 }
 
-/// The film as `.smx` version 2 writes it, without its drawings.
+/// The film as `.smx` writes it, without its drawings: the Shots track,
+/// then its Sound tracks, which version 3 added.
 impl Film {
     pub fn to_value(&self) -> Value {
+        let mut tracks = vec![json!({
+            "kind": "shots",
+            "locked": self.shots_locked,
+            "visible": self.shots_visible,
+            "clips": self.clips.iter().map(clip_value).collect::<Vec<_>>(),
+        })];
+        tracks.extend(self.sound_tracks.iter().map(crate::soundtrack::track_value));
         json!({
             "title": self.title,
             "scene": self.scene,
             "size": self.size,
             "paper": self.paper,
             "next_id": self.next_id,
-            "tracks": [{
-                "kind": "shots",
-                "clips": self.clips.iter().map(clip_value).collect::<Vec<_>>(),
-            }],
+            "tracks": tracks,
         })
     }
 
@@ -984,11 +998,17 @@ impl Film {
         }
         film.paper = number(object, "paper").unwrap_or(0).min(PAPER_NAMES.len() as u64 - 1) as u8;
         for track in object.get("tracks")?.as_array()? {
-            if track.get("kind").and_then(Value::as_str) != Some("shots") {
-                continue;
-            }
-            for clip in track.get("clips")?.as_array()? {
-                film.clips.push(clip_from(clip)?);
+            match track.get("kind").and_then(Value::as_str) {
+                Some("shots") => {
+                    let flags = track.as_object()?;
+                    film.shots_locked = flag(flags, "locked", false);
+                    film.shots_visible = flag(flags, "visible", true);
+                    for clip in track.get("clips")?.as_array()? {
+                        film.clips.push(clip_from(clip)?);
+                    }
+                }
+                Some("sound") => film.sound_tracks.push(crate::soundtrack::track_from(track)?),
+                _ => {}
             }
         }
         film.sort();

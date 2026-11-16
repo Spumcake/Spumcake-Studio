@@ -39,6 +39,11 @@ const WRITE_AFTER: Duration = Duration::from_secs(1);
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// How often the loop wakes with no message, to write what is due.
 const TICK: Duration = Duration::from_millis(250);
+/// How often it wakes while the film plays, to show the frame the clock names.
+const PLAY_TICK: Duration = Duration::from_millis(5);
+/// While playing, the timeline, whose playhead moves, is declared at most
+/// this often; the stage gets every frame.
+const PLAYING_TIMELINE: Duration = Duration::from_millis(83);
 
 /// A file dialog Storyboard Generator asked the host for, and is waiting on.
 enum Waiting {
@@ -48,6 +53,7 @@ enum Waiting {
         close_after: bool,
     },
     Open,
+    ImportSound,
 }
 
 /// What was last sent of each declaration, so only a change is sent again.
@@ -63,6 +69,7 @@ struct Sent {
     canvas: Option<Canvas>,
     timeline: Option<protocol::Timeline>,
     stage: Option<protocol::Stage>,
+    notices: Option<(String, Vec<protocol::Notice>)>,
     /// The level shown last: the film's, or a clip's. A change brings the camera.
     level: Option<(DrawingId, Option<u64>)>,
     /// Each file's items as last declared, by its path in the project.
@@ -102,6 +109,10 @@ pub struct Server {
     unwritten_since: HashMap<DrawingId, Instant>,
     /// Storyboards whose last write failed: why, and when.
     write_failed: HashMap<DrawingId, (String, Instant)>,
+    /// When the last full tick ran, which writes what is due.
+    full_tick: Instant,
+    /// When the timeline was last declared while playing.
+    played_timeline: Instant,
 }
 
 impl Server {
@@ -145,6 +156,8 @@ impl Server {
             project: None,
             unwritten_since: HashMap::new(),
             write_failed: HashMap::new(),
+            full_tick: Instant::now(),
+            played_timeline: Instant::now(),
         }
     }
 
@@ -190,6 +203,10 @@ impl Server {
         if is_hand(&message) {
             // A change by hand ends a request's undo step.
             self.session.close_groups();
+        }
+        if pauses(&message) {
+            // Every change to the storyboard, by hand or by a tool, pauses first.
+            self.session.stop_playing();
         }
         if self.hidden && is_tab_work(&message) {
             return Some(Vec::new());
@@ -297,12 +314,15 @@ impl Server {
                 activate(&mut self.session, Some(&tab));
                 crate::timeline::gesture(&mut self.session, gesture);
             }
-            HostMessage::Seek { tab, frame, .. } => {
+            HostMessage::Seek { tab, frame, live } => {
                 activate(&mut self.session, Some(&tab));
-                crate::timeline::seek(&mut self.session, frame);
+                self.session.scrub(frame, live);
             }
-            // Kept in step with the image once the storyboard plays sound.
-            HostMessage::Shown { .. } => {}
+            // Not the person's input: it keeps the image's lead on the sound.
+            HostMessage::Shown { revision, at, .. } => {
+                self.session.frame_shown(revision, at as f64);
+                return Some(Vec::new());
+            }
             HostMessage::Gesture { tab, gesture } => {
                 // A gesture is always answered with the document, even when
                 // it changed nothing, so the host's preview of it can end.
@@ -526,9 +546,60 @@ impl Server {
 
     /// The loop's wake with no message: writes what is due, and sends what
     /// that changed, such as a tab's new name.
-    pub fn tick(&mut self) -> Vec<AppMessage> {
-        if self.project.is_none() {
+    /// How long the loop may wait for a message before its next tick.
+    pub fn interval(&self) -> Duration {
+        if self.session.is_playing() { PLAY_TICK } else { TICK }
+    }
+
+    /// A tick while playing: the frame the clock names on the stage, and
+    /// now and then the timeline's playhead. What is due is written on the
+    /// full tick, as ever.
+    fn play_tick(&mut self) -> Vec<AppMessage> {
+        if !self.session.playback_tick() && self.session.is_playing() {
             return Vec::new();
+        }
+        let mut out = Vec::new();
+        let tab = tab_id(self.session.active_id());
+        let stage = self.session.playing_stage(crate::sheet::stage(self.session.active_storyboard(), tab.clone()));
+        if self.sent.stage.as_ref() != Some(&stage) {
+            out.push(AppMessage::Stage(stage.clone()));
+            self.sent.stage = Some(stage);
+        }
+        if self.played_timeline.elapsed() >= PLAYING_TIMELINE || !self.session.is_playing() {
+            self.played_timeline = Instant::now();
+            let timeline = crate::timeline::declare(&self.session, &mut self.boards, &mut self.looker, tab);
+            if self.sent.timeline.as_ref() != Some(&timeline) {
+                out.push(AppMessage::Timeline(timeline.clone()));
+                self.sent.timeline = Some(timeline);
+            }
+        }
+        if !self.session.is_playing() {
+            // Playing ended: everything else catches up.
+            out.extend(self.updates(false));
+        }
+        out
+    }
+
+    pub fn tick(&mut self) -> Vec<AppMessage> {
+        if self.session.is_playing() {
+            let mut out = self.play_tick();
+            if self.full_tick.elapsed() < TICK {
+                return out;
+            }
+            self.full_tick = Instant::now();
+            if self.project.is_some() {
+                self.write_due(Instant::now());
+            }
+            self.session.poll_imports();
+            self.session.poll_export();
+            self.notice_updates(&mut out);
+            return out;
+        }
+        self.full_tick = Instant::now();
+        // Imports and exports finish on threads of their own.
+        let finished = self.session.poll_imports() | self.session.poll_export();
+        if self.project.is_none() {
+            return if finished { self.updates(false) } else { Vec::new() };
         }
         self.write_due(Instant::now());
         self.updates(false)
@@ -636,10 +707,27 @@ impl Server {
         let Some(project) = self.project.clone() else {
             return failed(id, "The storyboard is not in a project.");
         };
+        let path = project.join(&item.path);
+        if item.item.as_deref() == Some(crate::board::ANIMATIC) {
+            // The exported file, checked and copied; never exported again here.
+            let open = self.session.tabs().into_iter().find(|tab| {
+                self.session.file_path(tab.id).is_some_and(|file| crate::store::same_file(&file, &path))
+            });
+            let exported = match open {
+                Some(tab) => self.session.record(tab.id).and_then(|record| record.exported().cloned()),
+                None => crate::store::read_smx(&path).ok().and_then(|stored| {
+                    let mut ids = draw::document::Allocator::new();
+                    stored.into_record(&mut ids, &[]).exported().cloned()
+                }),
+            };
+            return match exported.ok_or_else(|| "The animatic has not been exported yet.".to_string()).and_then(|exported| crate::export::render(&project, &exported)) {
+                Ok((path, fingerprint)) => AppMessage::Rendered { id, path: Some(path), fingerprint: Some(fingerprint), error: None },
+                Err(error) => failed(id, &error),
+            };
+        }
         let Some((clip, which)) = item.item.as_deref().and_then(crate::board::parse_item) else {
             return failed(id, "That is not a clip's frame.");
         };
-        let path = project.join(&item.path);
         let open = self.session.tabs().into_iter().find(|tab| {
             self.session.file_path(tab.id).is_some_and(|file| crate::store::same_file(&file, &path))
         });
@@ -733,6 +821,19 @@ impl Server {
                     filter,
                 }
             }
+            FileIntent::ImportSound => {
+                self.waiting = Some((request.clone(), Waiting::ImportSound));
+                AppMessage::File {
+                    id: request,
+                    kind: FileKind::Open,
+                    name: None,
+                    folder,
+                    filter: Some(FileFilter {
+                        name: "Sound and video".to_string(),
+                        extensions: crate::sounds::EXTENSIONS.iter().map(|extension| extension.to_string()).collect(),
+                    }),
+                }
+            }
             FileIntent::Open => {
                 self.waiting = Some((request.clone(), Waiting::Open));
                 AppMessage::File {
@@ -765,6 +866,11 @@ impl Server {
             }
             return false;
         };
+        // A sound comes from anywhere: importing copies it into the project.
+        if let Waiting::ImportSound = wait {
+            self.session.start_import(path);
+            return false;
+        }
         if !self.allowed_project_path(&path) {
             if let Waiting::Save {
                 close_after: true, ..
@@ -800,6 +906,7 @@ impl Server {
                 false
             }
             Waiting::Open => session.open_path(&path),
+            Waiting::ImportSound => false,
         }
     }
 
@@ -895,12 +1002,14 @@ impl Server {
             self.sent.canvas = Some(canvas);
         }
         let tab = tab_id(active);
+        self.session.load_sounds();
         let timeline = crate::timeline::declare(&self.session, &mut self.boards, &mut self.looker, tab.clone());
         if self.sent.timeline.as_ref() != Some(&timeline) {
             out.push(AppMessage::Timeline(timeline.clone()));
             self.sent.timeline = Some(timeline);
         }
-        let stage = crate::sheet::stage(self.session.active_storyboard(), tab);
+        self.notice_updates(&mut out);
+        let stage = self.session.playing_stage(crate::sheet::stage(self.session.active_storyboard(), tab));
         if self.sent.stage.as_ref() != Some(&stage) {
             out.push(AppMessage::Stage(stage.clone()));
             self.sent.stage = Some(stage);
@@ -910,7 +1019,7 @@ impl Server {
             && let Ok(relative) = path.strip_prefix(&project)
         {
             let relative = relative.to_string_lossy().replace('\\', "/");
-            let items = self.boards.items(&mut self.looker, self.session.active_storyboard());
+            let items = self.session.items(&mut self.boards, &mut self.looker, &relative);
             if self.sent.items.get(&relative) != Some(&items) {
                 out.push(AppMessage::Items { path: relative.clone(), items: items.clone() });
                 self.sent.items.insert(relative, items);
@@ -918,6 +1027,23 @@ impl Server {
         }
         self.chrome_updates(&mut out);
         out
+    }
+
+    /// The cards at the stage's bottom right, when they changed.
+    /// Sent only when they change: never an empty list for a tab that had
+    /// none. Cards follow the tab shown, and leave the tab they were on.
+    fn notice_updates(&mut self, out: &mut Vec<AppMessage>) {
+        let tab = tab_id(self.session.active_id());
+        let notices = self.session.sound_notices();
+        let (sent_tab, sent) = self.sent.notices.clone().unwrap_or_else(|| (tab.clone(), Vec::new()));
+        if sent_tab != tab && !sent.is_empty() {
+            out.push(AppMessage::Notices { tab: sent_tab.clone(), notices: Vec::new(), corner: protocol::NoticeCorner::default() });
+        }
+        let had = if sent_tab == tab { sent } else { Vec::new() };
+        if had != notices {
+            out.push(AppMessage::Notices { tab: tab.clone(), notices: notices.clone(), corner: protocol::NoticeCorner::default() });
+        }
+        self.sent.notices = Some((tab, notices));
     }
 
     fn chrome_updates(&mut self, out: &mut Vec<AppMessage>) {
@@ -964,9 +1090,9 @@ pub fn run() {
     // `shown` arrives with each frame drawn and would otherwise starve it.
     let mut ticked = Instant::now();
     loop {
-        let wait = TICK.saturating_sub(ticked.elapsed());
+        let wait = server.interval().saturating_sub(ticked.elapsed());
         let received = incoming.recv_timeout(wait);
-        if ticked.elapsed() >= TICK {
+        if ticked.elapsed() >= server.interval() {
             ticked = Instant::now();
             for reply in &server.tick() {
                 send(reply);
@@ -1044,6 +1170,25 @@ fn is_hand(message: &HostMessage) -> bool {
 }
 
 /// A message about a tab, which waits for one while none is open.
+/// Whether a message may change the storyboard, so playing pauses first.
+/// Seeking, playing, looping, the listening volume, and the host's own
+/// reports leave it playing.
+fn pauses(message: &HostMessage) -> bool {
+    match message {
+        HostMessage::Command { id, .. } => !matches!(id.as_str(), "play" | "toggle_loop" | "set_volume" | "finish_volume" | "close_notice"),
+        HostMessage::Invoke { .. }
+        | HostMessage::Gesture { .. }
+        | HostMessage::TimelineGesture { .. }
+        | HostMessage::Select { .. }
+        | HostMessage::Property { .. }
+        | HostMessage::FileResult { .. }
+        | HostMessage::Answer { .. }
+        | HostMessage::Open { .. }
+        | HostMessage::Quit => true,
+        _ => false,
+    }
+}
+
 fn is_tab_work(message: &HostMessage) -> bool {
     matches!(
         message,
