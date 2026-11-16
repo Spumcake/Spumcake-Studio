@@ -372,6 +372,10 @@ mod tests {
                     name: String::new(),
                     thumbnail: Thumbnail { path: String::new(), width: *width, height: *height, revision: 1 },
                     menu: Vec::new(),
+                    badge: String::new(),
+                    mark: None,
+                    chosen: false,
+                    pending: None,
                 })
                 .collect(),
             shown: 0,
@@ -379,6 +383,7 @@ mod tests {
             reorder: Action::new("reorder"),
             add: Vec::new(),
             focus: Action::new("focus"),
+            groups: Vec::new(),
         }
     }
 

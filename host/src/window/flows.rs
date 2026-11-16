@@ -1395,6 +1395,7 @@ impl HostWindow {
                 if let Some(folder) = folder {
                     running.send(&HostMessage::Project {
                         folder: folder.display().to_string(),
+                        skills: false,
                     });
                 }
                 Started {

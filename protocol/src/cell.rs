@@ -50,6 +50,20 @@ pub struct Cell {
     /// differ, as an edit not yet run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<usize>,
+    /// In a Skills project, the chain step this cell is. The step lives in
+    /// `canon.sql` alone, so a cell with a step has empty `input`,
+    /// `versions`, and `output`, and no `settings`, `endpoint`, or `model`:
+    /// the host reads the step and never sends it to the workspace. Without
+    /// one, the cell is a draft that carries its own prompt until it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepRef>,
+}
+
+/// One chain step in a Skills project's `canon.sql`, by its chain and step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepRef {
+    pub chain: String,
+    pub step: String,
 }
 
 /// One run of a cell, kept for good.
@@ -100,14 +114,30 @@ pub const VIDEO_KIND: &str = "video";
 #[serde(untagged)]
 pub enum CellPart {
     Text { text: String },
-    Path { path: String, media_type: String },
+    /// A file. As a reference, `role` is what it is
+    /// for, as "<menu word>, <the user's words>", such as "Start frame, the
+    /// keeper", and `field` the model's input it fills, which the role's
+    /// menu word picked.
+    Path {
+        path: String,
+        media_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
     /// An item of the project, resolved into a file of `media_type` when the
     /// cell runs. For a cell, `use` says whether its prompt or its result.
+    /// `role` and `field` are as a path's.
     Item {
         item: ItemRef,
         media_type: String,
         #[serde(default, rename = "use", skip_serializing_if = "Option::is_none")]
         part: Option<CellUse>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
     },
     /// A part of a shape a later version adds. It is kept as it was, so a
     /// cells message or a recipe holding one never fails to read.
@@ -148,6 +178,7 @@ impl Cell {
             versions: Vec::new(),
             settings: None,
             current: None,
+            step: None,
         }
     }
 
@@ -189,6 +220,19 @@ impl Cell {
         true
     }
 
+    /// A cell with a step that also carries a copy of the step: a prompt,
+    /// versions, a result, settings, an endpoint, or a model. Such a cell
+    /// is refused when its message is read.
+    pub fn copies_its_step(&self) -> bool {
+        self.step.is_some()
+            && (!self.input.is_empty()
+                || !self.versions.is_empty()
+                || !self.output.is_empty()
+                || self.settings.is_some()
+                || self.endpoint.is_some()
+                || self.model.is_some())
+    }
+
     /// The text parts of the prompt, joined.
     pub fn prompt(&self) -> String {
         parts_text(&self.input)
@@ -223,4 +267,75 @@ pub fn cell_id() -> String {
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
         bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
     )
+}
+
+/// One request a cell made, in a Skills project, read from `requests/` and
+/// its pending records. The host sends a cell's rounds with `takes`; the
+/// workspace shows them on its filmstrip and never stores them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Round {
+    /// The request's id.
+    pub request: String,
+    /// Counted from 1 among the cell's rounds, as "Round 14" shows it.
+    pub number: u32,
+    pub model: String,
+    /// The prompt as it was sent.
+    #[serde(default)]
+    pub prompt: String,
+    /// The references in the order they were sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<SentReference>,
+    /// References the step lists that the request did not send, when its
+    /// report records them: the references sheet's "Not sent".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_out: Vec<SentReference>,
+    pub state: RoundState,
+    /// When it started, in seconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
+    /// While it runs, how many takes it makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<TakeFile>,
+    /// A sentence when it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Its report, relative to the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+}
+
+/// One reference of a round: its file, relative to the project, and its role.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SentReference {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundState {
+    /// Being made.
+    Running,
+    /// Waiting at the endpoint, to be collected or cancelled.
+    Pending,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// One take a round made: its file, relative to the project, and whether
+/// `canon.sql` names it as canon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TakeFile {
+    pub path: String,
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub canon: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

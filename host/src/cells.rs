@@ -241,7 +241,7 @@ fn editable(ctx: &egui::Context, media_type: &str) -> bool {
 /// The image a cell's output names, with its media type.
 pub(crate) fn image_part(parts: &[CellPart]) -> Option<(&str, &str)> {
     parts.iter().find_map(|part| match part {
-        CellPart::Path { path, media_type } if media_type.starts_with("image/") => Some((path.as_str(), media_type.as_str())),
+        CellPart::Path { path, media_type, .. } if media_type.starts_with("image/") => Some((path.as_str(), media_type.as_str())),
         _ => None,
     })
 }
@@ -276,7 +276,7 @@ const IMAGE_NAME: usize = 32;
 /// The image a part names, if it is one.
 fn image_path(parts: &[CellPart]) -> Option<&str> {
     parts.iter().find_map(|part| match part {
-        CellPart::Path { path, media_type } if media_type.starts_with("image/") => Some(path.as_str()),
+        CellPart::Path { path, media_type, .. } if media_type.starts_with("image/") => Some(path.as_str()),
         _ => None,
     })
 }

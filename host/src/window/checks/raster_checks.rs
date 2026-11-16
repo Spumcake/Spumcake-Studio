@@ -186,6 +186,9 @@ fn layer_row(dir: &Path, id: u64, parent: Option<u64>, depth: u32, name: &str, g
         colors: Vec::new(),
         thumbnail: (!group).then(|| Thumbnail { path: dir.join("thumb.rgba").display().to_string(), width: W, height: H, revision: 1 }),
         mark: None,
+        detail: None,
+        toggle_icon: None,
+        value: None,
     }
 }
 
@@ -246,6 +249,7 @@ fn properties(rows: Vec<LayerRow>) -> Properties {
                 icon: None,
             },
         ],
+        cell: None,
         pages: vec![
             PanelPage { label: String::from("Layers"), active: true, enabled: true, action: None },
             PanelPage { label: String::from("Properties"), active: false, enabled: false, action: Some(Action::new("page_properties")) },
@@ -260,6 +264,7 @@ fn adjusting(sections: Vec<Section>) -> Properties {
     Properties {
         layers: None,
         sections,
+        cell: None,
         pages: vec![
             PanelPage { label: String::from("Layers"), active: false, enabled: true, action: Some(Action::new("page_layers")) },
             PanelPage { label: String::from("Properties"), active: true, enabled: true, action: None },
@@ -359,6 +364,10 @@ fn film(dir: &Path) -> Film {
                     row("Rename", "rename_item", Some(json!({ "item": index }))),
                     row("Delete", "remove_item", Some(json!({ "item": index }))),
                 ],
+                badge: String::new(),
+                mark: None,
+                chosen: false,
+                pending: None,
             })
             .collect(),
         shown: 1,
@@ -366,6 +375,7 @@ fn film(dir: &Path) -> Film {
         reorder: Action::with_arg("order_items", json!({ "strip": true })),
         add: vec![row("New image", "new_item", None), row("Open PNG or JPEG…", "open_item", None)],
         focus: Action::new("strip_focus"),
+        groups: Vec::new(),
     }
 }
 

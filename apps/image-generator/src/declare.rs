@@ -473,6 +473,7 @@ pub fn properties(session: &Session) -> Option<Properties> {
         back: None,
         layers,
         sections,
+        cell: None,
         pages: vec![page("Layers", Page::Layers, 0), page("Properties", Page::Properties, 1), page("Adjustments", Page::Adjustments, 2)],
     })
 }
@@ -698,6 +699,9 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
             colors: Vec::new(),
             thumbnail: image.frame().thumbs.get(&mask.id).map(|(_, thumb)| thumb.clone()),
             mark: Some("link".into()),
+            detail: None,
+            toggle_icon: None,
+            value: None,
         });
     }
     let mut menu = vec![rename];
@@ -734,6 +738,9 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
         // A text shows its icon in the image's frame.
         thumbnail: if node.text().is_some() { None } else { image.frame().thumbs.get(&id).map(|(_, thumb)| thumb.clone()) },
         mark,
+        detail: None,
+        toggle_icon: None,
+        value: None,
     });
     if let Some(children) = &node.children {
         for child in children.iter().rev() {
@@ -771,6 +778,10 @@ pub fn film(image: &Image) -> Film {
                     revision: 0,
                 }),
                 menu: vec![row("Duplicate", Action::with_arg("film_duplicate", target)), rename, delete],
+                badge: String::new(),
+                mark: None,
+                chosen: false,
+                pending: None,
             }
         })
         .collect();
@@ -781,6 +792,7 @@ pub fn film(image: &Image) -> Film {
         reorder: Action::new("film_reorder"),
         add: vec![row("New image", Action::new("film_new")), row("Open PNG or JPEG…", Action::new("film_open"))],
         focus: Action::new("film_focus"),
+        groups: Vec::new(),
     }
 }
 
