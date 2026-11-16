@@ -11,6 +11,7 @@ use crate::gallery::Frame;
 use crate::notes;
 use crate::text::{self, Style, Text};
 use layers::Rgba;
+use layers::label;
 use layers::layout::{self, Rect};
 use protocol::{FilmPending, Item, Round, RoundState, SentReference, TakeFile, Thumbnail};
 use std::collections::HashMap;
@@ -353,7 +354,7 @@ impl Rounds {
     }
 
     /// The takes' size: the first read's.
-    fn shape(&self) -> Option<(u32, u32)> {
+    pub fn shape(&self) -> Option<(u32, u32)> {
         self.tiles.iter().filter_map(Tile::path).filter_map(|path| self.reads.get(path)).find(|read| !read.failed).map(|read| read.size)
     }
 
@@ -505,12 +506,12 @@ impl Rounds {
         let (width, height) = (canvas.width, canvas.height);
         let label = format!("Round {} · {} · {}", round.number, round.model, takes_word(tiles.len()));
         let mut top = MARGIN as f32;
-        top += words(canvas, &label, [MARGIN as f32, top], TITLE, MUTED, false, None) + 12.0;
+        top += line(canvas, &label, [MARGIN as f32, top], TITLE, MUTED, false) + 12.0;
         let column = if round.references.is_empty() { 0 } else { (width as f32 * 0.16).clamp(110.0, 220.0) as u32 };
         if column > 0 {
             let x = MARGIN as f32;
             let mut y = top;
-            y += words(canvas, "References", [x, y], LABEL, MUTED, false, None) + 8.0;
+            y += line(canvas, "References", [x, y], LABEL, MUTED, false) + 8.0;
             for reference in &round.references {
                 let image = self.preview(&reference.path);
                 let (w, h) = layout::fit(column, column * 3 / 4, aspect_of(image));
@@ -542,8 +543,8 @@ impl Rounds {
         for (place, (round, tiles)) in pair.iter().enumerate() {
             let top = MARGIN + place as u32 * (section + GAP);
             let mut y = top as f32;
-            y += words(canvas, &format!("Round {} · {}", round.number, round.model), [MARGIN as f32, y], TITLE, INK, true, None) + 2.0;
-            y += words(canvas, &first_words(&round.prompt), [MARGIN as f32, y], LABEL, MUTED, false, Some(wide as f32)) + 10.0;
+            y += line(canvas, &format!("Round {} · {}", round.number, round.model), [MARGIN as f32, y], TITLE, INK, true) + 2.0;
+            y += line(canvas, &first_words(&round.prompt), [MARGIN as f32, y], LABEL, MUTED, false) + 10.0;
             let area = Rect { x: MARGIN as i32, y: y as i32, w: wide, h: ((top + section) as f32 - y).max(1.0) as u32 };
             let rects = layout::cells(area, 1, tiles.len().max(1) as u32, 8, self.aspect());
             for (number, (index, rect)) in tiles.iter().zip(&rects).enumerate() {
@@ -562,7 +563,7 @@ impl Rounds {
         let half = (width as f32 * 0.45) as u32;
         let x = MARGIN as f32;
         let mut y = MARGIN as f32;
-        y += words(canvas, &format!("Round {} · the references sent", round.number), [x, y], LABEL, MUTED, false, None) + 14.0;
+        y += line(canvas, &format!("Round {} · the references sent", round.number), [x, y], LABEL, MUTED, false) + 14.0;
         let thumb = ((half.saturating_sub(2 * MARGIN)) as f32 * 0.42).max(40.0) as u32;
         let text_x = x + thumb as f32 + 14.0;
         let text_w = (half as f32 - MARGIN as f32 - text_x).max(40.0);
@@ -579,7 +580,7 @@ impl Rounds {
         if !round.left_out.is_empty() {
             notes::fill(canvas, [x, y, half.saturating_sub(2 * MARGIN) as f32, 1.0], LINE);
             y += 12.0;
-            y += words(canvas, "Not sent", [x, y], LABEL, MUTED, false, None) + 8.0;
+            y += line(canvas, "Not sent", [x, y], LABEL, MUTED, false) + 8.0;
             for reference in &round.left_out {
                 row(&mut *canvas, &mut y, reference.path.as_str(), format!("{}, left out", file_name(&reference.path)).as_str(), MUTED);
             }
@@ -596,7 +597,7 @@ impl Rounds {
         let (w, h) = layout::fit(area.w, area.h, image.map_or(self.aspect(), |image| aspect_of(Some(image))));
         let rect = Rect { x: area.x + ((area.w - w) / 2) as i32, y: area.y + ((area.h - h) / 2) as i32, w, h };
         let number = self.tiles.get(shown).map_or(1, |tile| tile.take + 1);
-        words(canvas, &format!("Take {number}"), [rect.x as f32, rect.y as f32 - 24.0], LABEL, MUTED, false, None);
+        line(canvas, &format!("Take {number}"), [rect.x as f32, rect.y as f32 - 24.0], LABEL, MUTED, false);
         draw_image(canvas, image, rect);
     }
 }
@@ -666,8 +667,20 @@ fn aspect_of(image: Option<&Rgba>) -> f32 {
     image.map_or(16.0 / 9.0, |image| image.width as f32 / image.height.max(1) as f32)
 }
 
+/// One line of words with its top left at `at`, drawn by `layers::label`,
+/// as both workspaces draw their views' labels. Returns how far the next
+/// line goes below it.
+fn line(canvas: &mut Rgba, words: &str, at: [f32; 2], size: f32, colour: [u8; 3], bold: bool) -> f32 {
+    if words.trim().is_empty() {
+        return 0.0;
+    }
+    let look = label::Look { size, colour: [colour[0], colour[1], colour[2], 255], bold };
+    label::draw(canvas, words, at, look, label::Anchor::Left);
+    label::height(size) * 1.2
+}
+
 /// Words drawn with their box's corner at `at`, wrapped to `width` when
-/// given. Returns how tall they are.
+/// given, with the image's own text layout. Returns how tall they are.
 fn words(canvas: &mut Rgba, words: &str, at: [f32; 2], size: f32, colour: [u8; 3], bold: bool, width: Option<f32>) -> f32 {
     if words.trim().is_empty() {
         return 0.0;
@@ -693,11 +706,10 @@ fn draw_take(canvas: &mut Rgba, image: Option<&Rgba>, rect: Rect, number: usize,
     let side = (rect.h as f32 * 0.14).clamp(16.0, 28.0).round();
     let corner = [rect.x as f32 + 8.0, rect.y as f32 + 8.0];
     notes::fill(canvas, [corner[0], corner[1], side, side], BADGE);
-    let label = number.to_string();
-    let text = Text { words: label, style: Style { size: side * 0.62, color: [255, 255, 255], bold: true, ..Style::default() }, width: None };
-    let layout = text::lay(&text);
-    let at = [corner[0] + (side - layout.width) / 2.0, corner[1] + (side - layout.height) / 2.0];
-    notes::paint(canvas, &text::draw(&text), at);
+    let size = side * 0.62;
+    let look = label::Look { size, colour: [255, 255, 255, 255], bold: true };
+    let at = [corner[0] + side / 2.0, corner[1] + (side - label::height(size)) / 2.0];
+    label::draw(canvas, &number.to_string(), at, look, label::Anchor::Centre);
     if chosen {
         let [x, y, w, h] = [rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32];
         let edge = 3.0;

@@ -31,13 +31,17 @@ pub(crate) fn show_in(ui: &mut egui::Ui, notices: &[Notice], corner: NoticeCorne
     let area = above_strip(area, crate::film::drawn(ui.ctx()));
     let mut bottom = area.bottom() - MARGIN;
     for notice in notices.iter().rev() {
-        let height = card_height(notice);
+        let width = match corner {
+            NoticeCorner::BottomRight => WIDTH,
+            NoticeCorner::BottomLeft => fitted_width(ui, notice).min(area.width() - 2.0 * MARGIN),
+        };
+        // Words longer than the card wrap, and the card grows with them; a
+        // line that fits draws as it always has.
+        let lines = text_galley(ui, notice, width).size().y;
+        let height = card_height(notice) + (lines - S.of(20.0)).max(0.0);
         let rect = match corner {
             NoticeCorner::BottomRight => Rect::from_min_size(pos2(area.right() - MARGIN - WIDTH, bottom - height), vec2(WIDTH, height)),
-            NoticeCorner::BottomLeft => {
-                let width = fitted_width(ui, notice).min(area.width() - 2.0 * MARGIN);
-                Rect::from_min_size(pos2(area.left() + MARGIN, bottom - height), vec2(width, height))
-            }
+            NoticeCorner::BottomLeft => Rect::from_min_size(pos2(area.left() + MARGIN, bottom - height), vec2(width, height)),
         };
         if rect.top() < area.top() {
             break;
@@ -75,6 +79,19 @@ fn fitted_width(ui: &egui::Ui, notice: &Notice) -> f32 {
     }
     let buttons: f32 = notice.actions.iter().map(|button| action_width(&button.label) + GAP).sum();
     fit(words.max(buttons) + 2.0 * PAD)
+}
+
+/// The card's words laid out to wrap within a card `width` wide, beside its
+/// mark and its close mark.
+fn text_galley(ui: &egui::Ui, notice: &Notice, width: f32) -> std::sync::Arc<egui::Galley> {
+    let mark = match notice.state {
+        NoticeState::Done => S.of(20.0),
+        NoticeState::Failed => S.of(16.0),
+        NoticeState::Working => 0.0,
+    };
+    let close = if notice.close.is_some() { 24.0 } else { 0.0 };
+    let wrap = (width - 2.0 * PAD - mark - close).max(40.0);
+    ui.painter().layout(notice.text.clone(), widgets::body(S), widgets::TEXT, wrap)
 }
 
 /// A width held between `FIT_MIN` and `FIT_MAX`.
@@ -122,8 +139,14 @@ fn card(ui: &mut egui::Ui, notice: &Notice, rect: Rect, locked: bool, chosen: &m
         }
         NoticeState::Working => {}
     }
-    painter.text(pos2(x, inner.top() + S.of(10.0)), Align2::LEFT_CENTER, &notice.text, widgets::body(S), widgets::TEXT);
-    let mut y = inner.top() + S.of(20.0);
+    let galley = text_galley(ui, notice, rect.width());
+    let lines = galley.size().y;
+    if lines <= S.of(20.0) {
+        painter.text(pos2(x, inner.top() + S.of(10.0)), Align2::LEFT_CENTER, &notice.text, widgets::body(S), widgets::TEXT);
+    } else {
+        painter.galley(pos2(x, inner.top()), galley, widgets::TEXT);
+    }
+    let mut y = inner.top() + lines.max(S.of(20.0));
     if !notice.detail.is_empty() {
         painter.text(pos2(inner.left(), y + S.of(9.0)), Align2::LEFT_CENTER, &notice.detail, widgets::body(S), widgets::MUTED);
         y += S.of(18.0);

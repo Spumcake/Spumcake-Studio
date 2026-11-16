@@ -1,9 +1,11 @@
 //! What the Image Generator and the Video Generator do alike: a layer's
 //! link to a file it never writes, notes marked on an image, the pre-vis
-//! check's edges, and laying out a round's takes. Images here are straight
+//! check's edges, laying out a round's takes, and drawing the views' small
+//! labels in Inter, which ships here. Images here are straight
 //! RGBA, rows top to bottom, as both workspaces keep them.
 
 pub mod edges;
+pub mod label;
 pub mod layout;
 pub mod link;
 pub mod notes;

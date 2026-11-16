@@ -566,7 +566,8 @@ pub fn properties(session: &Session) -> Option<Properties> {
 /// have, the references it takes, and the settings Size, Images, and Seed.
 /// A role's model input is the model's workflow skill's to pick.
 pub fn prompt_cell(cell: &str) -> PanelCell {
-    let number = |min: f64, max: f64| RowKind::Number { min, max, percent: false, places: 0, centered: false };
+    // Plain fields, as ig-request-anchor shows them, not sliders.
+    let number = |min: f64, max: f64| RowKind::Field { min, max, places: 0 };
     PanelCell {
         cell: cell.to_string(),
         hint: "Describe the image…".into(),

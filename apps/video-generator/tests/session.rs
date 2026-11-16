@@ -189,9 +189,10 @@ const LEFT: (u32, u32) = (316, 400);
 const RIGHT: (u32, u32) = (884, 400);
 
 /// The middle of the frame strips' row `row`, column `column`: eight cells
-/// of 133 × 75 across 1120 with 8 between them, each take's row 356 tall.
+/// of 133 × 75 across 1120 with 8 between them, the rows packed from the
+/// top, each 75 tall with 18 for its times and 8 between.
 fn strip(row: u32, column: u32) -> (u32, u32) {
-    (40 + 141 * column + 2 + 64, 40 + 364 * row + 140 + 1 + 36)
+    (40 + 141 * column + 2 + 64, 40 + 101 * row + 1 + 36)
 }
 
 /// Catches a gallery that loses a take, a frame drawn from the wrong take

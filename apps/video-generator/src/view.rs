@@ -6,7 +6,8 @@
 //! shown small. At 100% and more, the takes are drawn at that zoom about a
 //! point the Move tool's drag moves; side by side, both show the same
 //! region, the larger take at its own pixels, which is the before/after
-//! crop.
+//! crop. The strips' times and the names over two takes side by side are
+//! drawn with `layers::label`.
 
 use crate::decode::{Key, even};
 use crate::gallery::{Gallery, Mode, Take};
@@ -20,6 +21,12 @@ pub const SIDE_GAP: u32 = 16;
 pub const STRIP_GAP: u32 = 8;
 /// How many frames each take's strip shows, at equal times.
 pub const STRIP_FRAMES: u32 = 8;
+/// The room under each strip for its times, and their size, and a take's
+/// name over it side by side, in gray, as vg-frame-strips and
+/// vg-takes-compare show them.
+pub const TIME_ROOM: u32 = 18;
+const CAPTION: f32 = 12.0;
+const CAPTION_COLOUR: [u8; 4] = [110, 110, 118, 255];
 /// The working area's white, as the host draws around an image.
 const GROUND: [u8; 4] = [255, 255, 255, 255];
 /// A take whose file could not be read: the host's light checker grey.
@@ -48,6 +55,17 @@ pub struct Scene {
     /// While zoomed, the point of the first take kept in the middle, as
     /// far as its edges let it be.
     pub focus: Option<[f64; 2]>,
+    /// Words over the frames: each strip's times, or the takes' names.
+    pub captions: Vec<Caption>,
+}
+
+/// Words drawn over the view in gray: their line's top at `at[1]`, and
+/// their left end, or with `centre` their middle, at `at[0]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Caption {
+    pub words: String,
+    pub at: [f32; 2],
+    pub centre: bool,
 }
 
 impl Scene {
@@ -75,7 +93,7 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
         w: width.saturating_sub(2 * MARGIN).max(2),
         h: height.saturating_sub(2 * MARGIN).max(2),
     };
-    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None };
+    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None, captions: Vec::new() };
     match gallery.view() {
         Mode::Single => {
             if let Some(take) = gallery.take() {
@@ -95,6 +113,9 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
             for (index, take) in [left, right].into_iter().enumerate() {
                 let cell = Rect { x: area.x + (index as u32 * (half + SIDE_GAP)) as i32, y: area.y, w: half.max(2), h: area.h };
                 let (place, focus) = shown(take, cell, look, widest);
+                // Its name, small, over it.
+                let top = place.rect.y.max(place.clip.y) as f32 - CAPTION - 8.0;
+                scene.captions.push(Caption { words: take.name.clone(), at: [place.rect.x.max(place.clip.x) as f32, top.max(2.0)], centre: false });
                 scene.places.push(place);
                 if index == 0 {
                     scene.focus = focus;
@@ -105,7 +126,7 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
             scene.live = false;
             let count = gallery.takes.len() as u32;
             let aspect = gallery.takes.iter().find_map(|take| take.info.map(aspect_of)).unwrap_or(WIDE);
-            let cells = layout::cells(area, count, STRIP_FRAMES, STRIP_GAP, aspect);
+            let cells = strip_cells(area, count, aspect);
             for (row, take) in gallery.takes.iter().enumerate() {
                 for column in 0..STRIP_FRAMES {
                     let Some(cell) = cells.get(row * STRIP_FRAMES as usize + column as usize) else {
@@ -113,11 +134,45 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
                     };
                     let index = strip_frame(take.info.map_or(0, |info| info.frames), column);
                     scene.places.push(fitted(take, *cell, index));
+                    // The time each frame is at, under it: the end of its
+                    // eighth of the take.
+                    if let Some(seconds) = take.seconds() {
+                        let at = f64::from(column + 1) * seconds / f64::from(STRIP_FRAMES);
+                        let under = [cell.x as f32 + cell.w as f32 / 2.0, (cell.y + cell.h as i32) as f32 + 3.0];
+                        scene.captions.push(Caption { words: format!("{at:.1} s"), at: under, centre: true });
+                    }
                 }
             }
         }
     }
     scene
+}
+
+/// The frame strips' cells, row by row: eight across the area, each row
+/// under the last with room for its times and the strips' gap, packed from
+/// the top as vg-frame-strips shows them; when the rows would not fit, they
+/// share the area's height.
+pub fn strip_cells(area: Rect, rows: u32, aspect: f32) -> Vec<Rect> {
+    if rows == 0 {
+        return Vec::new();
+    }
+    let aspect = if aspect > 0.0 { aspect } else { WIDE };
+    let mut w = area.w.saturating_sub(STRIP_GAP * (STRIP_FRAMES - 1)) / STRIP_FRAMES;
+    let mut h = ((w as f32) / aspect).round() as u32;
+    if rows * (h + TIME_ROOM + STRIP_GAP) > area.h + STRIP_GAP {
+        h = ((area.h + STRIP_GAP) / rows).saturating_sub(TIME_ROOM + STRIP_GAP).max(2);
+        w = (((h as f32) * aspect).round() as u32).min(w).max(2);
+    }
+    let step = h + TIME_ROOM + STRIP_GAP;
+    let across = w * STRIP_FRAMES + STRIP_GAP * (STRIP_FRAMES - 1);
+    let left = area.x + (area.w.saturating_sub(across) / 2) as i32;
+    let mut cells = Vec::new();
+    for row in 0..rows {
+        for column in 0..STRIP_FRAMES {
+            cells.push(Rect { x: left + (column * (w + STRIP_GAP)) as i32, y: area.y + (row * step) as i32, w, h });
+        }
+    }
+    cells
 }
 
 /// The frame of a take's strip at `column`, of eight at equal times: the
@@ -185,6 +240,11 @@ pub fn compose(scene: &Scene, frames: &std::collections::HashMap<Key, Rgba>) -> 
             Some(frame) => draw(&mut image, frame, place.rect, place.clip),
             None => fill(&mut image, place.rect, place.clip, EMPTY),
         }
+    }
+    for caption in &scene.captions {
+        let look = layers::label::Look { size: CAPTION, colour: CAPTION_COLOUR, bold: false };
+        let anchor = if caption.centre { layers::label::Anchor::Centre } else { layers::label::Anchor::Left };
+        layers::label::draw(&mut image, &caption.words, caption.at, look, anchor);
     }
     image
 }
@@ -290,6 +350,13 @@ mod tests {
         assert_eq!(&indices[8..], [2, 5, 8, 11, 14, 17, 20, 23]);
         assert!(strips.places[8].rect.y > strips.places[7].rect.y);
         assert!(strips.places[0].key.as_ref().unwrap().file.ends_with("a.mp4"));
+        // Packed from the top, as vg-frame-strips shows: the second row
+        // under the first, with room for its times and the strips' gap.
+        assert_eq!(strips.places[0].rect.y, 40 + 1);
+        assert_eq!(strips.places[8].rect.y - strips.places[0].rect.y, (75 + TIME_ROOM + STRIP_GAP) as i32);
+        let times: Vec<&str> = strips.captions.iter().map(|caption| caption.words.as_str()).collect();
+        assert_eq!((times.len(), times[1], times[3], times[7], times[15]), (16, "0.5 s", "1.0 s", "2.0 s", "1.0 s"));
+        assert!(strips.captions.iter().all(|caption| caption.centre));
     }
 
     /// Catches side by side drawing different regions at 100%: a 720p and
@@ -327,6 +394,7 @@ mod tests {
             places: vec![Place { key: Some(key), rect: Rect { x: 0, y: 0, w: 40, h: 40 }, clip }],
             live: true,
             focus: None,
+            captions: Vec::new(),
         };
         let image = compose(&scene, &frames);
         assert_eq!(image.pixel(5, 5), GROUND);
