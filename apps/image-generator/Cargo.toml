@@ -14,3 +14,6 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # Text layers' glyphs, from the fonts in assets/fonts/, as the owner
 # approved on 2026-10-31. Already in the lockfile through egui.
 ab_glyph = "=0.2.32"
+# What it shares with the Video Generator: linked files, notes, the pre-vis
+# check's edges, and round layouts, as Studio 0.15's plan approved.
+layers = { path = "../../layers" }

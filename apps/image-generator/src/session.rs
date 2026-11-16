@@ -61,12 +61,14 @@ pub enum ToolKind {
     Text,
     Hand,
     Zoom,
+    Notes,
 }
 
 impl ToolKind {
     /// In the mockup's order: healing and the stamp after the eyedropper,
-    /// and text after the eraser.
-    pub const ALL: [ToolKind; 12] = [
+    /// text after the eraser, and notes after the magnifier, as
+    /// ig-notes-pin shows.
+    pub const ALL: [ToolKind; 13] = [
         ToolKind::Move,
         ToolKind::Marquee,
         ToolKind::Lasso,
@@ -79,6 +81,7 @@ impl ToolKind {
         ToolKind::Text,
         ToolKind::Hand,
         ToolKind::Zoom,
+        ToolKind::Notes,
     ];
 
     pub fn key(self) -> &'static str {
@@ -95,6 +98,7 @@ impl ToolKind {
             ToolKind::Text => "text",
             ToolKind::Hand => "hand",
             ToolKind::Zoom => "zoom",
+            ToolKind::Notes => "notes",
         }
     }
 
@@ -139,6 +143,10 @@ pub struct Tools {
     pub stroke: Option<[f64; 2]>,
     /// The style a new text takes, and the edited text's as it changes.
     pub text: Style,
+    /// The notes tool makes freehand marks, Draw, rather than pins, Pin,
+    /// and its marks' colour.
+    pub notes_draw: bool,
+    pub notes_rgb: [u8; 3],
 }
 
 impl Default for Tools {
@@ -161,6 +169,8 @@ impl Default for Tools {
             kept: None,
             stroke: None,
             text: Style::default(),
+            notes_draw: false,
+            notes_rgb: [layers::notes::RED[0], layers::notes::RED[1], layers::notes::RED[2]],
         }
     }
 }
@@ -234,6 +244,8 @@ enum Purpose {
     OpenImage { tab: String },
     Export { jpeg: bool },
     Save { tab: String, then_quit: bool },
+    /// The pre-vis check's render, for the image shown in this tab.
+    PrevisRender { tab: String },
 }
 
 pub struct Session {
@@ -396,7 +408,7 @@ impl Session {
             | HostMessage::Claim { .. }
             | HostMessage::Answer { .. } => true,
             HostMessage::RasterGesture { gesture: RasterGesture::Click { .. } | RasterGesture::Rect { .. } | RasterGesture::TextBox { .. }, .. } => {
-                self.tools.tool == ToolKind::Text
+                matches!(self.tools.tool, ToolKind::Text | ToolKind::Notes)
             }
             HostMessage::Command { id, .. } => {
                 matches!(id.as_str(), "text_style" | "undo" | "redo" | "toggle_panel" | "panel_page") || id.starts_with("canvas.")
@@ -490,6 +502,11 @@ impl Session {
                     && let Some(image) = self.images.get_mut(self.active)
                 {
                     image.doc_mut().sample_live(from, &points, &sampler);
+                    self.live_due = true;
+                } else if let Some((width, colour)) = self.mark_pen()
+                    && let Some(image) = self.images.get_mut(self.active)
+                {
+                    image.doc_mut().mark_live(from, &points, width, colour);
                     self.live_due = true;
                 }
             }
@@ -645,7 +662,7 @@ impl Session {
                     continue;
                 }
                 let file = cache.join(format!("{}-{}.rgba", image.id, frame.uid));
-                if files::write_atomic(&file, frame.doc.composite()).is_ok() {
+                if files::write_atomic(&file, &frame.doc.shown()).is_ok() {
                     caught_up(frame);
                     shown |= index == self.active && frame.uid == shown_uid;
                 }
@@ -937,6 +954,55 @@ impl Session {
                 self.tools.aligned = !self.tools.aligned;
                 self.tools.kept = None;
             }
+            // The notes tool's settings row: Pin or Draw, and the marks'
+            // colour.
+            "notes_mode" => {
+                if let Some(index) = number("value") {
+                    self.tools.notes_draw = index >= 1.0;
+                    self.change(Doc::end_typing);
+                }
+            }
+            "notes_colour" => {
+                if let Some(rgb) = arg.get("value").and_then(rgb_of) {
+                    self.tools.notes_rgb = rgb;
+                }
+            }
+            // The Notes row: a click chooses the notes tool, its eye shows
+            // or hides them, and its menu's Delete takes them all away.
+            "notes_click" => self.choose_tool(ToolKind::Notes),
+            "notes_visible" => {
+                self.change(|doc| {
+                    let hidden = !doc.notes_hidden;
+                    doc.set_notes_hidden(hidden);
+                });
+            }
+            "notes_delete" => {
+                self.change(Doc::clear_notes);
+            }
+            // The pre-vis check's button turns it on and off for the image
+            // shown; with no render chosen yet, it asks for one first.
+            "previs_toggle" => {
+                let Some(image) = self.active_image() else {
+                    return;
+                };
+                if image.doc().previs.settings.render.is_none() {
+                    let purpose = Purpose::PrevisRender { tab: image.id.clone() };
+                    self.ask_file(FileKind::Open, None, purpose, image_filter(false), out);
+                    return;
+                }
+                self.change(|doc| {
+                    doc.previs.settings.on = !doc.previs.settings.on;
+                    doc.touch_previs();
+                });
+            }
+            "previs_choose" => {
+                let Some(image) = self.active_image() else {
+                    return;
+                };
+                let purpose = Purpose::PrevisRender { tab: image.id.clone() };
+                self.ask_file(FileKind::Open, None, purpose, image_filter(false), out);
+                return;
+            }
             "text_style" => self.text_style(&arg),
             "add_mask" => {
                 let target = node.or_else(|| self.active_image().and_then(|image| image.doc().active));
@@ -1095,7 +1161,15 @@ impl Session {
             }
             "reorder" => {
                 if let (Some(node), Some(to)) = (node, number("value")) {
-                    let to = to.max(0.0) as usize;
+                    // The Notes row sits at the top among the top-level
+                    // rows, and is no layer: a top-level place counts
+                    // from below it.
+                    let notes_row = self.active_image().is_some_and(|image| declare::shows_notes_row(image.doc()));
+                    let top = match arg.get("parent") {
+                        Some(parent) => parent.is_null(),
+                        None => self.active_image().and_then(|image| image.doc().image.place(node)).is_some_and(|place| place.parent.is_none()),
+                    };
+                    let to = if notes_row && top { (to.max(0.0) as usize).saturating_sub(1) } else { to.max(0.0) as usize };
                     // With `parent`, null for the top level, the layer goes
                     // into that group or out of its own; without it, it
                     // stays among its siblings.
@@ -1227,6 +1301,19 @@ impl Session {
         })
     }
 
+    /// The notes tool's Draw, as the settings row sets it: a mark's width,
+    /// about four pixels on the screen at the zoom the image is shown at,
+    /// and its colour.
+    fn mark_pen(&self) -> Option<(f32, [u8; 4])> {
+        if self.tools.tool != ToolKind::Notes || !self.tools.notes_draw {
+            return None;
+        }
+        let zoom = self.active_image().and_then(|image| image.frame().camera.as_ref()).map_or(1.0, |camera| camera.zoom);
+        let width = (f64::from(crate::notes::MARK_WIDTH) / zoom.max(0.01)).clamp(1.0, 64.0) as f32;
+        let [r, g, b] = self.tools.notes_rgb;
+        Some((width, [r, g, b, 255]))
+    }
+
     /// The clone stamp or the healing brush chosen, as the toolbar sets it,
     /// with the offset of the stroke being drawn. `first`, the first point
     /// of a stroke beginning, sets that offset: kept from the last stroke
@@ -1346,6 +1433,21 @@ impl Session {
     fn gesture(&mut self, gesture: RasterGesture) {
         let tools = self.tools.clone();
         match gesture {
+            RasterGesture::Stroke { points } if tools.tool == ToolKind::Notes => {
+                if let Some((width, colour)) = self.mark_pen() {
+                    self.change(|doc| doc.add_mark(&points, width, colour));
+                }
+            }
+            RasterGesture::Click { at } if tools.tool == ToolKind::Notes => {
+                if !tools.notes_draw {
+                    self.change(|doc| doc.note_click(at));
+                }
+            }
+            RasterGesture::Rect { from, to } if tools.tool == ToolKind::Notes => {
+                if !tools.notes_draw {
+                    self.change(|doc| doc.note_drag(from, to));
+                }
+            }
             RasterGesture::Stroke { points } => {
                 if let Some(brush) = self.brush() {
                     // A stroke on a locked or hidden layer changes nothing.
@@ -1439,6 +1541,30 @@ impl Session {
             return;
         };
         let value = serde_json::from_value::<PropValue>(value.clone()).ok();
+        // The pre-vis check's own rows, under its chevron.
+        match (name, &value) {
+            ("previs_mode", Some(PropValue::Index(index))) => {
+                let see_through = *index == 1;
+                self.change(|doc| {
+                    if doc.previs.settings.see_through != see_through {
+                        doc.previs.settings.see_through = see_through;
+                        doc.touch_previs();
+                    }
+                });
+                return;
+            }
+            ("previs_opacity", Some(PropValue::Number(number))) => {
+                let opacity = if number.is_finite() { number.clamp(0.0, 1.0) as f32 } else { return };
+                self.change(|doc| {
+                    if doc.previs.settings.opacity != opacity {
+                        doc.previs.settings.opacity = opacity;
+                        doc.touch_previs();
+                    }
+                });
+                return;
+            }
+            _ => {}
+        }
         let Some(active) = self.active_image().and_then(|image| image.doc().active) else {
             return;
         };
@@ -1567,10 +1693,11 @@ impl Session {
                 }
                 self.open_path(Some(path), out);
             }
-            Purpose::OpenLayer => match files::import(&path) {
-                Ok(pixels) => {
+            Purpose::OpenLayer => match files::import_linked(&path) {
+                Ok((pixels, sha256)) => {
                     let name = file_title(&path);
-                    let result = self.change(|doc| doc.add_image(&name, pixels));
+                    let link = self.link_to(&path, sha256);
+                    let result = self.change(|doc| doc.add_linked(&name, pixels, Some(link)));
                     if let Some(Err(reason)) = result {
                         out.push(notice("The image could not be added", &reason));
                     }
@@ -1578,14 +1705,14 @@ impl Session {
                 }
                 Err(reason) => out.push(notice("This image could not be opened", &reason)),
             },
-            Purpose::OpenImage { tab } => match files::import(&path) {
-                Ok(pixels) => {
+            Purpose::OpenImage { tab } => match files::import_linked(&path) {
+                Ok((pixels, sha256)) => {
                     let Some(index) = self.image_index(&tab) else {
                         return;
                     };
                     self.active = index;
                     let title = file_title(&path);
-                    let doc = Doc::new(LayeredImage::from_pixels(&title, pixels));
+                    let doc = Doc::new(LayeredImage::linked(&title, pixels, self.link_to(&path, sha256)));
                     self.film(|gallery| gallery.add(&title, doc, None));
                     out.extend(self.emit());
                 }
@@ -1612,7 +1739,34 @@ impl Session {
                     self.write_at(index, &path, then_quit, out);
                 }
             }
+            // The render chosen turns the check on.
+            Purpose::PrevisRender { tab } => match files::import_linked(&path) {
+                Ok((pixels, sha256)) => {
+                    let Some(index) = self.image_index(&tab) else {
+                        return;
+                    };
+                    self.active = index;
+                    let link = self.link_to(&path, sha256);
+                    let image = layers::Rgba { width: pixels.width, height: pixels.height, data: pixels.data };
+                    self.change(|doc| {
+                        doc.previs.set_render(link, image);
+                        doc.previs.settings.on = true;
+                        doc.touch_previs();
+                    });
+                    out.extend(self.emit());
+                }
+                Err(reason) => out.push(notice("This image could not be opened", &reason)),
+            },
         }
+    }
+
+    /// A link to a file a layer or the pre-vis check is made from: its
+    /// path relative to the project's folder when it is inside it, or
+    /// else whole.
+    fn link_to(&self, path: &Path, sha256: String) -> layers::link::Link {
+        let whole = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let inside = self.project.as_ref().and_then(|project| whole.strip_prefix(project).ok()).map(|relative| relative.to_string_lossy().replace('\\', "/"));
+        layers::link::Link { path: inside.unwrap_or_else(|| whole.display().to_string()), sha256 }
     }
 
     /// Opens a file in a new tab: an image file as itself, or a PNG or JPEG
@@ -1629,7 +1783,7 @@ impl Session {
             return;
         }
         if files::is_ipx(&path) {
-            match files::read_ipx(&path) {
+            match files::read_ipx_in(&path, self.project.as_deref()) {
                 Ok(read) => {
                     let images = read
                         .images
@@ -1639,6 +1793,9 @@ impl Session {
                             if read.active.is_some() {
                                 doc.active = read.active;
                             }
+                            doc.notes = read.notes;
+                            doc.notes_hidden = read.notes_hidden;
+                            doc.previs = read.previs;
                             (read.name, doc)
                         })
                         .collect();
@@ -1651,10 +1808,11 @@ impl Session {
             }
             return;
         }
-        match files::import(&path) {
-            Ok(pixels) => {
+        match files::import_linked(&path) {
+            Ok((pixels, sha256)) => {
                 let title = file_title(&path);
-                let gallery = Gallery::one(&title, Doc::new(LayeredImage::from_pixels(&title, pixels)));
+                let link = self.link_to(&path, sha256);
+                let gallery = Gallery::one(&title, Doc::new(LayeredImage::linked(&title, pixels, link)));
                 let index = self.push_image(gallery, None, Some(title));
                 // It is new work, so it is kept in the project as an image.
                 self.images[index].dirty = true;
@@ -1670,9 +1828,10 @@ impl Session {
     fn open_as_new(&mut self, path: &Path, name: &str, from: Option<protocol::OpenedFrom>, out: &mut Vec<AppMessage>) {
         let name = safe_name(name);
         let name = if name.is_empty() { file_title(path) } else { name };
-        match files::import(path) {
-            Ok(pixels) => {
-                let mut gallery = Gallery::one(&name, Doc::new(LayeredImage::from_pixels(&name, pixels)));
+        match files::import_linked(path) {
+            Ok((pixels, sha256)) => {
+                let link = self.link_to(path, sha256);
+                let mut gallery = Gallery::one(&name, Doc::new(LayeredImage::linked(&name, pixels, link)));
                 gallery.source = from;
                 let index = self.push_image(gallery, None, Some(name));
                 self.images[index].dirty = true;
@@ -2049,13 +2208,9 @@ impl Session {
                 let rows = match (earlier, rect) {
                     (Some((_, since)), Some(rect)) if live => {
                         let path = cache.join(format!("{image_id}-{}-{next}.patch", frame.uid));
-                        let width = frame.doc.image.width as usize;
-                        let composite = frame.doc.composite();
-                        let mut bytes = Vec::with_capacity(rect[2] as usize * rect[3] as usize * 4);
-                        for y in rect[1] as usize..(rect[1] + rect[3]) as usize {
-                            let start = (y * width + rect[0] as usize) * 4;
-                            bytes.extend_from_slice(&composite[start..start + rect[2] as usize * 4]);
-                        }
+                        // The rows as shown, with the notes and the pre-vis
+                        // check over them.
+                        let bytes = frame.doc.shown_rows(crate::layered::Rect::new(rect[0] as i32, rect[1] as i32, rect[2] as i32, rect[3] as i32));
                         files::write_atomic(&path, &bytes).ok().map(|()| (since, rect, path))
                     }
                     _ => None,
@@ -2075,7 +2230,7 @@ impl Session {
                         }
                     }
                     None => {
-                        if files::write_atomic(&file, frame.doc.composite()).is_err() {
+                        if files::write_atomic(&file, &frame.doc.shown()).is_err() {
                             self.display_failed = true;
                         }
                         caught_up(frame);
@@ -2162,6 +2317,19 @@ impl Session {
             ToolKind::Text => RasterTool::Text,
             ToolKind::Hand => RasterTool::Hand,
             ToolKind::Zoom => RasterTool::Zoom,
+            // Draw makes marks as the brush paints; Pin clicks, and drags
+            // a pin, as the T tool does, and its words are typed as a
+            // text's are.
+            ToolKind::Notes => match self.mark_pen() {
+                Some((width, colour)) => RasterTool::Brush {
+                    rgb: [colour[0], colour[1], colour[2]],
+                    size: f64::from(width),
+                    hardness: 1.0,
+                    opacity: 1.0,
+                    pressure: false,
+                },
+                None => RasterTool::Text,
+            },
         }
     }
 
@@ -2430,6 +2598,7 @@ fn snapshot(gallery: &mut Gallery) -> (Vec<files::Snapshot>, usize) {
         .map(|frame| {
             frame.doc.finish_edit();
             files::Snapshot::take(frame.uid, &frame.name, &frame.doc.image, frame.doc.active, frame.doc.generation, &frame.pngs)
+                .keeping(&frame.doc.notes, frame.doc.notes_hidden, &frame.doc.previs.settings)
         })
         .collect();
     (images, gallery.shown)
@@ -2908,6 +3077,24 @@ mod tests {
         assert_eq!(strong_labels(&options(&messages)), ["Layer 1 is locked."], "moving a group with a locked layer gave no reason");
         let messages = command(&mut session, "tool", json!({ "tool": "eraser" }));
         assert_eq!(strong_labels(&options(&messages)), ["Choose a layer to paint on; a group holds layers."]);
+    }
+
+    /// Catches the Notes row taken for a layer's place: with notes, the
+    /// row sits above the top layer, so a drop just under it puts a layer
+    /// on top, and a drop at its own place too.
+    #[test]
+    fn the_notes_row_is_not_a_place_among_the_layers() {
+        let mut session = Session::launch();
+        let _ = session.greeting();
+        let bottom = session.images[0].doc().active.unwrap();
+        command(&mut session, "add_layer", json!({}));
+        session.images[0].doc_mut().add_mark(&[[10.0, 10.0, 1.0], [40.0, 10.0, 1.0]], 4.0, layers::notes::RED);
+        command(&mut session, "reorder", json!({ "node": bottom, "value": 1, "parent": null }));
+        assert_eq!(session.images[0].doc().image.place(bottom).unwrap().index, 1, "the layer did not go on top");
+        command(&mut session, "reorder", json!({ "node": bottom, "value": 2 }));
+        assert_eq!(session.images[0].doc().image.place(bottom).unwrap().index, 0);
+        command(&mut session, "reorder", json!({ "node": bottom, "value": 0 }));
+        assert_eq!(session.images[0].doc().image.place(bottom).unwrap().index, 1);
     }
 
     /// Catches the Layers list's drop into or out of a group not reaching

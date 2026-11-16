@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-80 tools.
+83 tools.
 
 ## The host
 
@@ -130,8 +130,11 @@ Change the properties of objects, text, and palette colors, as the properties pa
 
 ## Video Generator
 
-### Tab name (`tab`)
+### Video Generator (`takes`)
 
-Rename this application's tab.
+See the takes in a Video Generator tab's gallery, open a video file into it as a take, show a take at a frame, and show the takes alone, as frame strips, or two side by side.
 
-- **`video-generator__tab__rename_tab`**: Set the tab's label. Takes `label` (string, required).
+- **`video-generator__takes__list_takes`**: List the gallery's takes in filmstrip order, with each one's position, name, file, size, frames, frames per second, and length in seconds, and which is shown, the view, and the frame shown. Takes nothing.
+- **`video-generator__takes__open_video`**: Add a video file to the end of the filmstrip as a take, linked and never copied, and show it. Returns its position, name, and length. Takes `path` (string, required), `name` (string).
+- **`video-generator__takes__show_take`**: Show a take, as a click on its thumbnail does, at a frame. Takes `take` (integer, required), `frame` (integer).
+- **`video-generator__takes__set_view`**: Show the shown take alone, every take as frame strips, or the shown take side by side with another at the same frame. Takes `view` (string, required), `with` (integer).

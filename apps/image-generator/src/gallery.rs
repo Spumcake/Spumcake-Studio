@@ -167,6 +167,9 @@ impl Gallery {
         source.doc.finish_edit();
         let mut doc = Doc::new(source.doc.image.clone());
         doc.active = source.doc.active;
+        doc.notes = source.doc.notes.clone();
+        doc.notes_hidden = source.doc.notes_hidden;
+        doc.previs = source.doc.previs.clone();
         let name = format!("{} copy", source.name);
         Ok(self.add(&name, doc, Some(index + 1)))
     }

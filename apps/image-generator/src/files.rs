@@ -2,8 +2,11 @@
 //! raw images the host reads. The `.ipx` format is described in this
 //! application's AGENTS.md.
 
-use crate::layered::{Blend, Curves, Grade, Kind, LayerMask, Locks, Node, LayeredImage, Pixels};
+use crate::layered::{Blend, Curves, Grade, Kind, LayerMask, LinkState, Linked, Locks, Node, LayeredImage, Pixels};
+use crate::previs::{Previs, Settings};
 use crate::text::Text;
+use layers::link::Link;
+use layers::notes::{Mark, Notes, Pin};
 use image::{ImageDecoder, ImageEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,9 +14,10 @@ use std::path::{Path, PathBuf};
 
 /// The first line of every `.ipx` file.
 const MAGIC: &[u8] = b"IPX1\n";
-/// Version 3 keeps each layer's kind and settings, and masks; version 2,
-/// from 0.11, a gallery of images; version 1, from 0.10, one.
-const VERSION: u32 = 3;
+/// Version 4 keeps linked layers, notes, and the pre-vis check; version 3
+/// each layer's kind and settings, and masks; version 2, from 0.11, a
+/// gallery of images; version 1, from 0.10, one.
+const VERSION: u32 = 4;
 /// The largest image read or made: about 100 megapixels, so a damaged or
 /// huge file cannot take all the memory.
 const MOST_PIXELS: u64 = 100_000_000;
@@ -59,6 +63,86 @@ struct ImageFile {
     active: Option<u64>,
     /// Bottom to top.
     layers: Vec<NodeFile>,
+    /// From version 4: the image's notes, and its pre-vis check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notes: Option<NotesFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previs: Option<PrevisFile>,
+}
+
+/// A file a layer or the pre-vis check links to: its path, relative to the
+/// project when it is inside it, and its sha256 when linked.
+#[derive(Serialize, Deserialize)]
+struct LinkFile {
+    path: String,
+    sha256: String,
+}
+
+impl LinkFile {
+    fn of(link: &Link) -> Self {
+        Self { path: link.path.clone(), sha256: link.sha256.clone() }
+    }
+
+    fn link(self) -> Link {
+        Link { path: self.path, sha256: self.sha256 }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct NotesFile {
+    #[serde(default)]
+    pins: Vec<PinFile>,
+    #[serde(default)]
+    marks: Vec<MarkFile>,
+    /// The Notes row's eye hides them.
+    #[serde(default, skip_serializing_if = "is_false")]
+    hidden: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PinFile {
+    number: u32,
+    x: f32,
+    y: f32,
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MarkFile {
+    points: Vec<[f32; 2]>,
+    width: f32,
+    colour: [u8; 4],
+}
+
+/// The pre-vis check: its render, `edges` or `see_through`, the
+/// see-through opacity, and whether it is on.
+#[derive(Serialize, Deserialize)]
+struct PrevisFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    render: Option<LinkFile>,
+    #[serde(default)]
+    mode: PrevisMode,
+    #[serde(default = "most")]
+    opacity: f32,
+    #[serde(default)]
+    on: bool,
+}
+
+#[derive(Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum PrevisMode {
+    #[default]
+    Edges,
+    SeeThrough,
+}
+
+fn most() -> f32 {
+    Settings::default().opacity
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,6 +176,13 @@ struct NodeFile {
     grade: Option<Grade>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mask: Option<MaskFile>,
+    /// From version 4: the file a pixel layer was made from. Unedited, the
+    /// layer has no `png` and is read from the file; `edited`, its pixels
+    /// are kept as any layer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link: Option<LinkFile>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    edited: bool,
 }
 
 /// A node's mask: its own id and settings, and its grey PNG among the bytes
@@ -111,11 +202,15 @@ fn shown() -> bool {
     true
 }
 
-/// One image read from a file: its name, layers, and active layer.
+/// One image read from a file: its name, layers, and active layer, its
+/// notes, and its pre-vis check with its render read.
 pub struct ReadImage {
     pub name: String,
     pub image: LayeredImage,
     pub active: Option<u64>,
+    pub notes: Notes,
+    pub notes_hidden: bool,
+    pub previs: Previs,
 }
 
 /// A gallery read from its file, never empty, and which image is shown.
@@ -167,6 +262,9 @@ pub struct Snapshot {
     nodes: Vec<Node>,
     layers: HashMap<u64, LayerSnapshot>,
     generation: u64,
+    notes: Notes,
+    notes_hidden: bool,
+    previs: Settings,
 }
 
 impl Snapshot {
@@ -175,8 +273,11 @@ impl Snapshot {
     /// document's, says.
     pub fn take(uid: u64, name: &str, image: &LayeredImage, active: Option<u64>, generation: u64, cache: &PngCache) -> Self {
         let unchanged = cache.made_at == Some(generation);
+        // An unedited linked layer is read from its file, so its pixels
+        // are not kept.
+        let linked: Vec<u64> = image.every_node().iter().filter(|node| node.link.as_ref().is_some_and(|linked| !linked.edited)).map(|node| node.id).collect();
         let mut layers = HashMap::new();
-        for id in image.buffers() {
+        for id in image.buffers().into_iter().filter(|id| !linked.contains(id)) {
             let kept = cache.layers.get(&id).cloned();
             let pixels = if unchanged && kept.is_some() { None } else { image.pixels.get(&id).cloned() };
             layers.insert(id, LayerSnapshot { pixels, kept });
@@ -190,7 +291,18 @@ impl Snapshot {
             nodes: image.nodes.clone(),
             layers,
             generation,
+            notes: Notes::default(),
+            notes_hidden: false,
+            previs: Settings::default(),
         }
+    }
+
+    /// The image's notes and pre-vis check, written with it.
+    pub fn keeping(mut self, notes: &Notes, notes_hidden: bool, previs: &Settings) -> Self {
+        self.notes = notes.clone();
+        self.notes_hidden = notes_hidden;
+        self.previs = previs.clone();
+        self
     }
 }
 
@@ -234,7 +346,18 @@ pub fn write_ipx(path: &Path, images: Vec<Snapshot>, shown: usize, source: Optio
         for node in &image.nodes {
             layers.push(node_file(node, &image.layers, &mut made, &mut blobs)?);
         }
-        files.push(ImageFile { name: image.name, width: image.width, height: image.height, active: image.active, layers });
+        let notes = (!image.notes.is_empty() || image.notes_hidden).then(|| NotesFile {
+            pins: image.notes.pins.iter().map(|pin| PinFile { number: pin.number, x: pin.x, y: pin.y, text: pin.text.clone() }).collect(),
+            marks: image.notes.marks.iter().map(|mark| MarkFile { points: mark.points.clone(), width: mark.width, colour: mark.colour }).collect(),
+            hidden: image.notes_hidden,
+        });
+        let previs = (image.previs != Settings::default()).then(|| PrevisFile {
+            render: image.previs.render.as_ref().map(LinkFile::of),
+            mode: if image.previs.see_through { PrevisMode::SeeThrough } else { PrevisMode::Edges },
+            opacity: image.previs.opacity,
+            on: image.previs.on,
+        });
+        files.push(ImageFile { name: image.name, width: image.width, height: image.height, active: image.active, layers, notes, previs });
         encoded.push(Encoded { uid: image.uid, generation: image.generation, layers: made });
     }
     let header = Header { version: VERSION, shown, images: files, source };
@@ -285,6 +408,8 @@ fn node_file(node: &Node, layers: &HashMap<u64, LayerSnapshot>, made: &mut HashM
         curves: None,
         grade: None,
         mask: None,
+        link: node.link.as_ref().map(|linked| LinkFile::of(&linked.link)),
+        edited: node.link.as_ref().is_some_and(|linked| linked.edited),
     };
     if let Some(mask) = &node.mask {
         let png = buffer_png(mask.id, true, layers, made, blobs)?;
@@ -298,6 +423,10 @@ fn node_file(node: &Node, layers: &HashMap<u64, LayerSnapshot>, made: &mut HashM
             }
             file.children = Some(inner);
             file.kind = Some("group".into());
+        }
+        // An unedited linked layer is read from its file.
+        (None, Kind::Pixels) if node.link.as_ref().is_some_and(|linked| !linked.edited) => {
+            file.kind = Some("pixels".into());
         }
         (None, Kind::Pixels) => {
             file.png = Some(buffer_png(node.id, false, layers, made, blobs)?);
@@ -329,7 +458,17 @@ pub fn is_ipx(path: &Path) -> bool {
         .is_ok_and(|_| start == MAGIC)
 }
 
+/// Reads a gallery, its links' relative paths read from the folder its
+/// file is in.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_ipx(path: &Path) -> Result<Read, String> {
+    read_ipx_in(path, None)
+}
+
+/// Reads a gallery, its links' relative paths read from `root`, the
+/// project, or else from the folder its file is in.
+pub fn read_ipx_in(path: &Path, root: Option<&Path>) -> Result<Read, String> {
+    let root = root.map(Path::to_path_buf).or_else(|| path.parent().map(Path::to_path_buf)).unwrap_or_default();
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let damaged = || String::from("It is not an image file, or it is damaged.");
     let rest = bytes.strip_prefix(MAGIC).ok_or_else(damaged)?;
@@ -346,14 +485,14 @@ pub fn read_ipx(path: &Path) -> Result<Read, String> {
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .filter(|stem| !stem.is_empty())
                 .unwrap_or_else(|| protocol::untitled(crate::session::ITEM));
-            let file = ImageFile { name, width: header.width, height: header.height, active: header.active, layers: header.layers };
-            Ok(Read { images: vec![read_image(file, blobs)?], shown: 0, source: None })
+            let file = ImageFile { name, width: header.width, height: header.height, active: header.active, layers: header.layers, notes: None, previs: None };
+            Ok(Read { images: vec![read_image(file, blobs, &root)?], shown: 0, source: None })
         }
-        2 | VERSION => {
+        2..=VERSION => {
             let header: Header = serde_json::from_slice(line).map_err(|_| damaged())?;
             let mut images = Vec::new();
             for file in header.images {
-                images.push(read_image(file, blobs)?);
+                images.push(read_image(file, blobs, &root)?);
             }
             if images.is_empty() {
                 return Err(damaged());
@@ -367,14 +506,14 @@ pub fn read_ipx(path: &Path) -> Result<Read, String> {
     }
 }
 
-fn read_image(file: ImageFile, blobs: &[u8]) -> Result<ReadImage, String> {
+fn read_image(file: ImageFile, blobs: &[u8], root: &Path) -> Result<ReadImage, String> {
     let damaged = || String::from("It is not an image file, or it is damaged.");
     if file.width == 0 || file.height == 0 || u64::from(file.width) * u64::from(file.height) > MOST_PIXELS {
         return Err(damaged());
     }
     let mut image = LayeredImage::empty(file.width, file.height);
     for layer in file.layers {
-        let node = read_node(layer, blobs, &mut image)?;
+        let node = read_node(layer, blobs, &mut image, root)?;
         image.nodes.push(node);
     }
     if image.nodes.is_empty() {
@@ -382,10 +521,44 @@ fn read_image(file: ImageFile, blobs: &[u8]) -> Result<ReadImage, String> {
     }
     image.sync_texts();
     let active = file.active.filter(|id| image.find(*id).is_some());
-    Ok(ReadImage { name: file.name, image, active })
+    let (notes, notes_hidden) = match file.notes {
+        Some(notes) => (
+            Notes {
+                pins: notes.pins.into_iter().filter(|pin| pin.x.is_finite() && pin.y.is_finite()).map(|pin| Pin { number: pin.number, x: pin.x, y: pin.y, text: pin.text }).collect(),
+                marks: notes
+                    .marks
+                    .into_iter()
+                    .map(|mark| Mark {
+                        points: mark.points.into_iter().filter(|point| point[0].is_finite() && point[1].is_finite()).collect(),
+                        width: if mark.width.is_finite() { mark.width.clamp(0.5, 500.0) } else { 4.0 },
+                        colour: mark.colour,
+                    })
+                    .collect(),
+            },
+            notes.hidden,
+        ),
+        None => (Notes::default(), false),
+    };
+    let previs = match file.previs {
+        Some(previs) => {
+            let render = previs.render.map(LinkFile::link);
+            // The render is read as it is now; one gone draws nothing.
+            let image = render.as_ref().and_then(|link| import(&resolve(root, &link.path)).ok()).map(|pixels| layers::Rgba { width: pixels.width, height: pixels.height, data: pixels.data });
+            let opacity = if previs.opacity.is_finite() { previs.opacity.clamp(0.0, 1.0) } else { most() };
+            Previs::new(Settings { render, see_through: previs.mode == PrevisMode::SeeThrough, opacity, on: previs.on }, image)
+        }
+        None => Previs::default(),
+    };
+    Ok(ReadImage { name: file.name, image, active, notes, notes_hidden, previs })
 }
 
-fn read_node(file: NodeFile, blobs: &[u8], image: &mut LayeredImage) -> Result<Node, String> {
+/// Where a link's path is: itself when whole, or else inside `root`.
+pub fn resolve(root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() { path.to_path_buf() } else { root.join(path) }
+}
+
+fn read_node(file: NodeFile, blobs: &[u8], image: &mut LayeredImage, root: &Path) -> Result<Node, String> {
     let damaged = || String::from("It is not an image file, or it is damaged.");
     if image.find(file.id).is_some() || image.pixels.contains_key(&file.id) {
         return Err(damaged());
@@ -398,6 +571,7 @@ fn read_node(file: NodeFile, blobs: &[u8], image: &mut LayeredImage) -> Result<N
     node.fill = file.fill.clamp(0.0, 1.0);
     node.locks = file.locks;
     node.offset = file.offset;
+    node.link = file.link.map(|link| Linked { link: link.link(), edited: file.edited, state: LinkState::Holds, read: None });
     let read_png = |place: [u64; 2]| -> Result<Pixels, String> {
         let start = usize::try_from(place[0]).map_err(|_| damaged())?;
         let length = usize::try_from(place[1]).map_err(|_| damaged())?;
@@ -440,12 +614,39 @@ fn read_node(file: NodeFile, blobs: &[u8], image: &mut LayeredImage) -> Result<N
         (Some(children), _) => {
             let mut inner = Vec::new();
             for child in children {
-                inner.push(read_node(child, blobs, image)?);
+                inner.push(read_node(child, blobs, image, root)?);
             }
             node.children = Some(inner);
+            node.link = None;
         }
         (None, Some(place)) => {
             image.pixels.insert(file.id, read_png(place)?);
+        }
+        // An unedited linked layer is read from its file: as it is when it
+        // is still the one linked or has changed, and empty, the image's
+        // size, when it cannot be read.
+        (None, None) if node.link.as_ref().is_some_and(|linked| !linked.edited) => {
+            let width = image.width;
+            let height = image.height;
+            let Some(linked) = node.link.as_mut() else {
+                return Err(damaged());
+            };
+            let pixels = match import_linked(&resolve(root, &linked.link.path)) {
+                Ok((pixels, sha256)) => {
+                    if sha256 == linked.link.sha256 {
+                        linked.state = LinkState::Holds;
+                    } else {
+                        linked.state = LinkState::Changed;
+                        linked.read = Some(sha256);
+                    }
+                    pixels
+                }
+                Err(_) => {
+                    linked.state = LinkState::Missing;
+                    Pixels::clear(width, height)
+                }
+            };
+            image.pixels.insert(file.id, pixels);
         }
         (None, None) => return Err(damaged()),
     }
@@ -490,6 +691,13 @@ fn reader(bytes: &[u8], format: Option<image::ImageFormat>) -> Result<image::Ima
 pub fn import(path: &Path) -> Result<Pixels, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     decode(&bytes, None)
+}
+
+/// A PNG or JPEG file as straight RGBA8, and the sha256 of its bytes, as a
+/// link records it.
+pub fn import_linked(path: &Path) -> Result<(Pixels, String), String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    Ok((decode(&bytes, None)?, layers::link::sha256(&bytes)))
 }
 
 pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
@@ -833,7 +1041,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let line = &bytes[MAGIC.len()..MAGIC.len() + bytes[MAGIC.len()..].iter().position(|byte| *byte == b'\n').unwrap()];
         let header: serde_json::Value = serde_json::from_slice(line).unwrap();
-        assert_eq!(header["version"], 3);
+        assert_eq!(header["version"], 4);
         let saved = &header["pictures"][0]["layers"][1]; // The stored spelling of the images.
         assert_eq!(saved["kind"], "text");
         assert_eq!(saved["text"]["words"], "Golden hour");
@@ -842,6 +1050,104 @@ mod tests {
         let back = &mut read.images[0].image;
         assert_eq!(back.nodes, image.nodes);
         assert_eq!(back.composite(), composite, "the image read back looks different");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Catches a linked layer whose pixels are kept though its file holds
+    /// them, or that does not open from its file: unedited, it is written
+    /// with its link and no PNG and reads its file, as it is now; with the
+    /// file changed it opens with the new pixels, marked changed; with the
+    /// file gone, empty and marked missing; edited, its own pixels are
+    /// kept and it opens with them, whatever the file holds.
+    #[test]
+    fn a_linked_layer_is_read_from_its_file_until_edited() {
+        let dir = scratch("linked");
+        let take = dir.join("take.png");
+        std::fs::write(&take, encode_png(4, 2, &[200u8; 32]).unwrap()).unwrap();
+        let (pixels, sha256) = import_linked(&take).unwrap();
+        let link = Link { path: "take.png".into(), sha256: sha256.clone() };
+        let image = LayeredImage::linked("Take", pixels.clone(), link);
+        let path = dir.join("Linked.ipx");
+        let write = |image: &LayeredImage| write_ipx(&path, vec![Snapshot::take(1, "Take", image, None, 0, &PngCache::default())], 0, None).unwrap();
+        write(&image);
+        let header = |path: &Path| -> serde_json::Value {
+            let bytes = std::fs::read(path).unwrap();
+            let end = MAGIC.len() + bytes[MAGIC.len()..].iter().position(|byte| *byte == b'\n').unwrap();
+            serde_json::from_slice(&bytes[MAGIC.len()..end]).unwrap()
+        };
+        let saved = &header(&path)["pictures"][0]["layers"][0]; // the stored spelling
+        assert_eq!(saved["link"], serde_json::json!({ "path": "take.png", "sha256": sha256 }));
+        assert!(saved.get("png").is_none() && saved.get("edited").is_none(), "an unedited linked layer kept its pixels");
+        let read = read_ipx(&path).unwrap();
+        assert_eq!(read.images[0].image.pixels[&1], pixels);
+        assert_eq!(read.images[0].image.nodes, image.nodes);
+
+        std::fs::write(&take, encode_png(4, 2, &[90u8; 32]).unwrap()).unwrap();
+        let read = read_ipx(&path).unwrap();
+        assert_eq!(read.images[0].image.pixels[&1].data, vec![90u8; 32], "the layer was not read from its file");
+        assert_eq!(read.images[0].image.nodes[0].link.as_ref().unwrap().state, LinkState::Changed);
+
+        std::fs::remove_file(&take).unwrap();
+        let read = read_ipx(&path).unwrap();
+        let back = &read.images[0].image;
+        assert_eq!(back.nodes[0].link.as_ref().unwrap().state, LinkState::Missing);
+        assert!(back.pixels[&1].data.iter().all(|byte| *byte == 0), "a missing file's layer is not empty");
+
+        let mut edited = image.clone();
+        edited.nodes[0].link.as_mut().unwrap().edited = true;
+        edited.pixels.insert(1, Pixels::filled(4, 2, [1, 2, 3, 255]));
+        write(&edited);
+        let saved = &header(&path)["pictures"][0]["layers"][0]; // the stored spelling
+        assert_eq!(saved["edited"], true);
+        assert!(saved.get("png").is_some(), "an edited linked layer lost its pixels");
+        let read = read_ipx(&path).unwrap();
+        assert_eq!(read.images[0].image.pixels[&1], Pixels::filled(4, 2, [1, 2, 3, 255]));
+        assert_eq!(read.images[0].image.nodes, edited.nodes);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Catches notes or a pre-vis check lost when written, or kept as
+    /// pixels: a version 4 file keeps the pins with their words, the marks,
+    /// and whether they are hidden, and the check's render, mode, opacity,
+    /// and whether it is on, with the render read again from its file.
+    /// A version 3 file, with none of them, still opens.
+    #[test]
+    fn notes_and_the_check_round_trip() {
+        let dir = scratch("notes");
+        let render = dir.join("previs.png");
+        std::fs::write(&render, encode_png(2, 2, &[50u8; 16]).unwrap()).unwrap();
+        let image = LayeredImage::blank(20, 10);
+        let notes = Notes {
+            pins: vec![Pin { number: 2, x: 4.5, y: 3.0, text: "less rain".into() }],
+            marks: vec![Mark { points: vec![[1.0, 1.0], [9.0, 2.0]], width: 4.0, colour: layers::notes::RED }],
+        };
+        let settings = Settings { render: Some(Link { path: "previs.png".into(), sha256: "cd".into() }), see_through: true, opacity: 0.3, on: true };
+        let path = dir.join("Notes.ipx");
+        let snapshot = Snapshot::take(1, "Shot", &image, None, 0, &PngCache::default()).keeping(&notes, true, &settings);
+        write_ipx(&path, vec![snapshot], 0, None).unwrap();
+        let read = read_ipx(&path).unwrap();
+        let back = &read.images[0];
+        assert_eq!(back.notes, notes);
+        assert!(back.notes_hidden);
+        assert_eq!(back.previs.settings, settings);
+        assert_eq!(back.previs.image.as_ref().map(|image| (image.width, image.height)), Some((2, 2)), "the render was not read");
+
+        let bytes = std::fs::read(&path).unwrap();
+        let end = MAGIC.len() + bytes[MAGIC.len()..].iter().position(|byte| *byte == b'\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_slice(&bytes[MAGIC.len()..end]).unwrap();
+        assert_eq!(header["pictures"][0]["notes"]["pins"][0]["text"], "less rain"); // the stored spelling
+        header["version"] = serde_json::json!(3);
+        let entry = header["pictures"][0].as_object_mut().unwrap(); // the stored spelling
+        entry.remove("notes");
+        entry.remove("previs");
+        let mut old = MAGIC.to_vec();
+        old.extend(serde_json::to_vec(&header).unwrap());
+        old.extend_from_slice(&bytes[end..]);
+        std::fs::write(&path, old).unwrap();
+        let read = read_ipx(&path).unwrap();
+        assert!(read.images[0].notes.is_empty());
+        assert_eq!(read.images[0].previs.settings, Settings::default());
+        assert_eq!(read.images[0].image.pixels, image.pixels);
         let _ = std::fs::remove_dir_all(dir);
     }
 

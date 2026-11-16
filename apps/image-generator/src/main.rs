@@ -9,7 +9,9 @@ mod doc;
 mod files;
 mod gallery;
 mod paint;
+mod previs;
 mod layered;
+mod notes;
 mod session;
 mod text;
 

@@ -264,7 +264,10 @@ impl Strip {
                 response = response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(&item.name);
             }
             if acts && response.clicked() {
-                out.push(film.select.with_value(json!(index)));
+                // A Ctrl-, Cmd-, or Shift-click shows a second item beside
+                // the one shown.
+                let extend = strip.input(|input| input.modifiers.ctrl || input.modifiers.command || input.modifiers.shift);
+                out.push(film.select_message(index, extend));
             }
             if acts
                 && self.moving.is_none()

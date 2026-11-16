@@ -679,3 +679,261 @@ fn an_image_file_from_0_13_opens_with_its_source() {
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+/// Writes straight RGBA as a PNG file.
+fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {
+    let mut png = Vec::new();
+    image::ImageEncoder::write_image(image::codecs::png::PngEncoder::new(&mut png), rgba, width, height, image::ExtendedColorType::Rgba8).unwrap();
+    std::fs::write(path, png).unwrap();
+}
+
+/// The Layers page's rows as the next panel declares them, once `pick`
+/// takes them.
+fn layer_rows(program: &Program, mut pick: impl FnMut(&[protocol::LayerRow]) -> bool) -> Vec<protocol::LayerRow> {
+    program.wait(|message| match message {
+        AppMessage::Properties(properties) => properties.layers.as_ref().map(|layers| layers.rows.clone()).filter(|rows| pick(rows)),
+        _ => None,
+    })
+}
+
+/// Keeps the tab, and returns its file.
+fn keep(program: &mut Program, tab: &str) -> PathBuf {
+    program.send(HostMessage::Keep { tab: tab.into() });
+    let kept = program.wait(|message| match message {
+        AppMessage::Kept { tab: kept, path, error } if kept == tab => Some((path.clone(), error.clone())),
+        _ => None,
+    });
+    assert_eq!(kept.1, None, "the image was not kept");
+    PathBuf::from(kept.0.expect("no file"))
+}
+
+/// Catches a linked file written, a linked layer kept twice, or a painted
+/// one that loses its painting: a PNG inside the project opens as a layer
+/// linked to it by its path in the project, marked with the link, and is
+/// kept with no pixels of its own; opened again after the file changed, it
+/// shows the file as it is now; painted, its file's sha256 stays, the row
+/// shows the pencil, and its pixels are kept; opened again after the file
+/// changed once more, it shows its painting.
+#[test]
+fn a_linked_layer_keeps_its_file_and_its_painting() {
+    let folder = scratch("linked");
+    std::fs::create_dir_all(folder.join("takes")).unwrap();
+    let take = folder.join("takes/take.png");
+    write_png(&take, 40, 30, &[200u8; 40 * 30 * 4]);
+    let linked = layers::link::sha256_file(&take).unwrap();
+
+    let mut program = Program::start(true);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(HostMessage::Open { path: Some(take.display().to_string()) });
+    let opened = program.raster(0);
+    assert_eq!((opened.width, opened.height), (40, 30));
+    let rows = layer_rows(&program, |rows| !rows.is_empty());
+    assert_eq!(rows[0].mark.as_deref(), Some("link"), "the linked layer has no link mark");
+    let file = keep(&mut program, &opened.tab);
+    let saved = header(&file)["pictures"][0]["layers"][0].clone(); // the stored spelling
+    assert_eq!(saved["link"], json!({ "path": "takes/take.png", "sha256": linked }));
+    assert!(saved.get("png").is_none(), "an unedited linked layer kept its pixels");
+    drop(program);
+
+    // Opened again, it is read from the file as it is now.
+    write_png(&take, 40, 30, &[90u8; 40 * 30 * 4]);
+    let changed = layers::link::sha256_file(&take).unwrap();
+    let mut program = Program::start(true);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(HostMessage::Open { path: Some(file.display().to_string()) });
+    let reopened = program.raster(0);
+    assert_eq!(pixel(Path::new(&reopened.image), 40, 20, 15), [90, 90, 90, 90], "the layer was not read from its file");
+
+    program.command("tool", json!({ "tool": "brush" }));
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Stroke { points: vec![[5.0, 15.0, 1.0], [35.0, 15.0, 1.0]] } });
+    let painted = program.raster(reopened.revision);
+    assert_eq!(pixel(Path::new(&painted.image), 40, 20, 15), [0, 0, 0, 255]);
+    let rows = layer_rows(&program, |rows| rows[0].mark.as_deref() == Some("edit-pencil"));
+    assert_eq!(rows.len(), 1);
+    let file = keep(&mut program, "1");
+    assert_eq!(layers::link::sha256_file(&take).unwrap(), changed, "painting wrote the linked file");
+    let saved = header(&file)["pictures"][0]["layers"][0].clone(); // the stored spelling
+    assert_eq!(saved["edited"], true);
+    assert!(saved.get("png").is_some(), "the painting was not kept");
+    assert_eq!(saved["link"]["path"], "takes/take.png", "the layer forgot what it was edited from");
+    assert_eq!(saved["link"]["sha256"], json!(changed), "the link names bytes the painting was not made on");
+    drop(program);
+
+    // Without Studio's own folder, as a harness would leave the project,
+    // the image still opens with its link and its painting.
+    let _ = std::fs::remove_dir_all(folder.join(protocol::PROJECT_DIR));
+    write_png(&take, 40, 30, &[10u8; 40 * 30 * 4]);
+    let mut program = Program::start(true);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(HostMessage::Open { path: Some(file.display().to_string()) });
+    let again = program.raster(0);
+    assert_eq!(pixel(Path::new(&again.image), 40, 20, 15), [0, 0, 0, 255], "the painting was lost");
+    assert_eq!(pixel(Path::new(&again.image), 40, 20, 2), [90, 90, 90, 90], "the edited layer was read from its file");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches notes that are not shown, kept, or reopened, or that reach an
+/// export: with the notes tool, a click puts pin 1, its words are typed
+/// in, and Draw makes a mark as it is drawn; the image shown has the mark
+/// in red and the pin, the PNG exported is the image without them, the
+/// file keeps them, and opened again they are shown and the Notes row
+/// sits above the layers.
+#[test]
+fn notes_are_shown_and_kept_but_never_exported() {
+    let folder = scratch("notes");
+    let plate = folder.join("plate.png");
+    let white = vec![255u8; 200 * 120 * 4];
+    write_png(&plate, 200, 120, &white);
+    let mut program = Program::start(true);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(HostMessage::Open { path: Some(plate.display().to_string()) });
+    let opened = program.raster(0);
+    program.command("tool", json!({ "tool": "notes" }));
+    assert!(matches!(program.raster(0).tool, protocol::RasterTool::Text), "Pin does not click as the T tool does");
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Click { at: [60.0, 40.0] } });
+    let typing = program.wait(|message| match message {
+        AppMessage::Raster(view) if view.text.is_some() => Some(view.clone()),
+        _ => None,
+    });
+    assert_ne!(pixel(Path::new(&typing.image), 200, 54, 40), [255, 255, 255, 255], "the pin is not shown");
+    program.send(HostMessage::RasterText { tab: "1".into(), input: protocol::TextInput::Insert { text: "less rain".into() } });
+    program.send(HostMessage::RasterText { tab: "1".into(), input: protocol::TextInput::Key { key: protocol::TextKey::Escape, shift: false, word: false } });
+    program.wait(|message| match message {
+        AppMessage::Raster(view) if view.text.is_none() && view.revision > typing.revision => Some(()),
+        _ => None,
+    });
+
+    program.command("notes_mode", json!({ "value": 1 }));
+    let points = vec![[20.0, 100.5, 1.0], [180.0, 100.5, 1.0]];
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::StrokePart { from: 0, points: points.clone() } });
+    let part = program.wait(|message| match message {
+        AppMessage::Raster(view) if view.patch.as_ref().is_some_and(|patch| patch.file.is_some()) => Some(view.clone()),
+        _ => None,
+    });
+    let patch = part.patch.unwrap();
+    let rows = std::fs::read(patch.file.unwrap()).unwrap();
+    let at = (((100 - patch.rect[1]) * patch.rect[2] + (100 - patch.rect[0])) * 4) as usize;
+    assert_eq!(&rows[at..at + 4], layers::notes::RED, "the mark is not shown as it is drawn");
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Stroke { points } });
+    let marked = program.wait(|message| match message {
+        AppMessage::Raster(view) if view.revision > part.revision && view.patch.as_ref().is_none_or(|patch| patch.file.is_none()) => Some(view.clone()),
+        _ => None,
+    });
+    assert_eq!(pixel(Path::new(&marked.image), 200, 100, 100), layers::notes::RED, "the mark is not shown");
+    let rows = layer_rows(&program, |rows| rows.len() == 2);
+    assert_eq!(rows[0].name, "Notes");
+
+    program.command("export_png", json!({}));
+    let asked = program.wait(|message| match message {
+        AppMessage::File { id, kind: protocol::FileKind::Save, .. } => Some(id.clone()),
+        _ => None,
+    });
+    let exported = folder.join("Out.png");
+    program.send(HostMessage::FileResult { id: asked, path: Some(exported.display().to_string()) });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !exported.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(image::open(&exported).unwrap().into_rgba8().into_raw(), white, "the export has the notes");
+
+    let file = keep(&mut program, &opened.tab);
+    let notes = header(&file)["pictures"][0]["notes"].clone(); // the stored spelling
+    assert_eq!(notes["pins"][0]["number"], 1);
+    assert_eq!(notes["pins"][0]["text"], "less rain");
+    assert_eq!(notes["marks"].as_array().map(Vec::len), Some(1));
+    drop(program);
+
+    let mut program = Program::start(true);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(HostMessage::Open { path: Some(file.display().to_string()) });
+    let reopened = program.raster(0);
+    assert_eq!(pixel(Path::new(&reopened.image), 200, 100, 100), layers::notes::RED, "the notes were not kept");
+    let rows = layer_rows(&program, |_| true);
+    assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Notes", "plate"]);
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches a pre-vis check drawn into the image itself, or not as
+/// `layers::edges` draws it: its button with no render asks for one; once
+/// chosen, the image shown is the plate with `layers::edges::check`'s cyan
+/// edges, the PNG exported is the plate alone, See-through at 40% is
+/// `see_through`'s blend, and the file keeps the check's render, by its
+/// path in the project, its mode, its opacity, and that it is on.
+#[test]
+fn the_previs_check_is_drawn_only_where_it_is_shown() {
+    let folder = scratch("previs");
+    let (width, height) = (120u32, 80u32);
+    let mut plate = layers::Rgba::new(width, height, [0, 0, 0, 255]);
+    for y in 0..height {
+        for x in 0..width {
+            plate.set(x, y, [(x * 2) as u8, 140, (y * 3) as u8, 255]);
+        }
+    }
+    let mut render = layers::Rgba::new(60, 40, [20, 20, 20, 255]);
+    for y in 10..30 {
+        for x in 15..45 {
+            render.set(x, y, [230, 230, 230, 255]);
+        }
+    }
+    write_png(&folder.join("plate.png"), width, height, &plate.data);
+    write_png(&folder.join("render.png"), 60, 40, &render.data);
+
+    let mut program = Program::start(true);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(HostMessage::Open { path: Some(folder.join("plate.png").display().to_string()) });
+    let opened = program.raster(0);
+    program.command("previs_toggle", json!({}));
+    let asked = program.wait(|message| match message {
+        AppMessage::File { id, kind: protocol::FileKind::Open, .. } => Some(id.clone()),
+        _ => None,
+    });
+    program.send(HostMessage::FileResult { id: asked, path: Some(folder.join("render.png").display().to_string()) });
+    let checked = program.raster(opened.revision);
+    let mut edges = plate.clone();
+    layers::edges::check(&mut edges, &render, layers::edges::CYAN);
+    assert_ne!(edges, plate, "the render has no edges");
+    assert!(std::fs::read(&checked.image).unwrap() == edges.data, "the image shown is not the plate with the render's edges");
+    let on = program.wait(|message| match message {
+        AppMessage::Toolbar(toolbar) => toolbar.trailing.iter().find_map(|item| match item {
+            protocol::ToolItem::Button { icon, selected, .. } if icon == "cube" => Some(*selected),
+            _ => None,
+        }),
+        _ => None,
+    });
+    assert!(on, "the check's button is not shown on");
+
+    program.command("export_png", json!({}));
+    let asked = program.wait(|message| match message {
+        AppMessage::File { id, kind: protocol::FileKind::Save, .. } => Some(id.clone()),
+        _ => None,
+    });
+    let exported = folder.join("Out.png");
+    program.send(HostMessage::FileResult { id: asked, path: Some(exported.display().to_string()) });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !exported.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(image::open(&exported).unwrap().into_rgba8().into_raw() == plate.data, "the export has the check");
+
+    let property = |prop: &str, value: protocol::PropValue| HostMessage::Property { prop: json!(prop), value: serde_json::to_value(value).unwrap(), preview: false };
+    program.send(property("previs_opacity", protocol::PropValue::Number(0.4)));
+    program.send(property("previs_mode", protocol::PropValue::Index(1)));
+    let mut through = plate.clone();
+    layers::edges::see_through(&mut through, &render, 0.4);
+    let seen = program.wait(|message| match message {
+        AppMessage::Raster(view) if std::fs::read(&view.image).is_ok_and(|bytes| bytes == through.data) => Some(view.clone()),
+        _ => None,
+    });
+    assert!(seen.revision > checked.revision);
+
+    let file = keep(&mut program, &opened.tab);
+    let saved = header(&file)["pictures"][0]["previs"].clone(); // the stored spelling
+    assert_eq!(saved["render"]["path"], "render.png");
+    assert_eq!(saved["mode"], "see_through");
+    assert_eq!(saved["on"], true);
+    assert!((saved["opacity"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}

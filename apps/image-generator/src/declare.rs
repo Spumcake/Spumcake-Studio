@@ -3,8 +3,9 @@
 //! Properties, and Adjustments pages, the filmstrip, the menu, the keys,
 //! and the tab list.
 
+use crate::doc::Doc;
 use crate::paint::Combine;
-use crate::layered::{Blend, Kind, Node};
+use crate::layered::{Blend, Kind, LinkState, Node};
 use crate::session::{Image, Page, Session, ToolKind};
 use crate::text::{Align, Face};
 use protocol::{
@@ -35,6 +36,10 @@ const LOCK_ICONS: [(&str, &str); 4] = [
 
 const SLIDER_W: f32 = 110.0;
 
+/// The Notes row's id: no layer or mask of an image has it, as theirs
+/// count up from 1.
+pub const NOTES_ROW: u64 = 1 << 48;
+
 /// Each tool's icon, name, and key.
 fn tool_look(tool: ToolKind) -> (&'static str, &'static str, &'static str) {
     match tool {
@@ -52,6 +57,8 @@ fn tool_look(tool: ToolKind) -> (&'static str, &'static str, &'static str) {
         ToolKind::Text => ("text", "Text", "T"),
         ToolKind::Hand => ("drag-hand-gesture", "Hand", "H"),
         ToolKind::Zoom => ("search", "Zoom", "Z"),
+        // A speech bubble, as ig-notes-pin shows; it has no key.
+        ToolKind::Notes => ("chat-bubble", "Notes", ""),
     }
 }
 
@@ -102,14 +109,27 @@ pub fn toolbar(session: &Session) -> Toolbar {
         let (icon, name, key) = tool_look(tool);
         items.push(button(
             icon,
-            &format!("{name} ({key})"),
+            &if key.is_empty() { name.to_string() } else { format!("{name} ({key})") },
             Action::with_arg("tool", json!({ "tool": tool.key() })),
             true,
             session.tools.tool == tool,
         ));
     }
     let zoom = image.and_then(|image| image.frame().camera.as_ref()).map_or(1.0, |camera| camera.zoom);
+    let previs = image.map(|image| &image.doc().previs);
     let trailing = vec![
+        ToolItem::Separator,
+        // The pre-vis check, and beside it its chevron, as
+        // ig-previs-overlay-settings shows.
+        button("cube", "Pre-vis check", Action::new("previs_toggle"), image.is_some(), previs.is_some_and(|previs| previs.settings.on)),
+        ToolItem::Popover {
+            icon: "nav-arrow-down".into(),
+            tip: "Pre-vis check".into(),
+            rows: previs_rows(image.map(Image::doc)),
+            action: None,
+            selected: false,
+            enabled: true,
+        },
         ToolItem::Separator,
         ToolItem::Menu {
             icon: String::new(),
@@ -133,8 +153,34 @@ pub fn toolbar(session: &Session) -> Toolbar {
     Toolbar { items, trailing, options, options_trailing }
 }
 
+/// The pre-vis check's rows: its render, opened as a PNG or JPEG, Edges or
+/// See-through, and the see-through opacity.
+fn previs_rows(doc: Option<&Doc>) -> Vec<Row> {
+    let settings = doc.map(|doc| doc.previs.settings.clone()).unwrap_or_default();
+    let render = match (&settings.render, doc.is_some_and(|doc| doc.previs.image.is_some())) {
+        (Some(link), true) => link.file_name().to_string(),
+        (Some(link), false) => format!("Missing: {}", link.file_name()),
+        (None, _) => "Open PNG or JPEG…".to_string(),
+    };
+    vec![
+        push_button("previs_render", &render, Action::new("previs_choose")),
+        Row {
+            prop: json!("previs_mode"),
+            label: String::new(),
+            kind: RowKind::Choice { options: vec!["Edges".into(), "See-through".into()], segmented: true, preview: ChoicePreview::Label },
+            value: PropValue::Index(u8::from(settings.see_through)),
+        },
+        Row {
+            prop: json!("previs_opacity"),
+            label: "Opacity".into(),
+            kind: RowKind::Number { min: 0.0, max: 1.0, percent: true, places: 0, centered: false },
+            value: PropValue::Number(f64::from(settings.opacity)),
+        },
+    ]
+}
+
 /// The chosen tool's settings, as brush.png, selection.png, crop.png,
-/// clone.png, heal.png, and text.png show them.
+/// clone.png, heal.png, text.png, and ig-notes-pin show them.
 fn settings_row(session: &Session) -> (Vec<ToolItem>, Vec<ToolItem>) {
     let tools = &session.tools;
     let slider = |caption: &str, value: u32, min: i32, max: i32, suffix: &str, tool: &str, setting: &str| ToolItem::Slider {
@@ -325,6 +371,19 @@ fn settings_row(session: &Session) -> (Vec<ToolItem>, Vec<ToolItem>) {
             row.push(toggle("text-size", "All caps", "caps", style.all_caps));
             (row, Vec::new())
         }
+        // The marks' colour, and Pin or Draw.
+        ToolKind::Notes => (
+            vec![
+                ToolItem::Color { rgb: tools.notes_rgb, tip: "Colour".into(), set: Action::new("notes_colour") },
+                ToolItem::Separator,
+                ToolItem::Segmented {
+                    options: vec!["Pin".into(), "Draw".into()],
+                    selected: usize::from(tools.notes_draw),
+                    set: Action::new("notes_mode"),
+                },
+            ],
+            Vec::new(),
+        ),
         ToolKind::Eyedropper => (caption("Click the image to take its colour for the brush."), Vec::new()),
         ToolKind::Hand => (caption("Drag to pan."), Vec::new()),
         ToolKind::Zoom => (caption("Click to zoom in, Alt-click to zoom out."), Vec::new()),
@@ -384,6 +443,9 @@ pub fn keys() -> Keys {
     ];
     for tool in ToolKind::ALL {
         let (_, _, key) = tool_look(tool);
+        if key.is_empty() {
+            continue;
+        }
         bindings.push(bind(chord(key, false, Some(false)), Action::with_arg("tool", json!({ "tool": tool.key() }))));
     }
     Keys { bindings, copy: None, cut: None, paste: None }
@@ -405,6 +467,9 @@ pub fn properties(session: &Session) -> Option<Properties> {
                 sections.push(Section { title: String::new(), rows: layer_settings(node), icon: None });
             }
             let mut rows = Vec::new();
+            if shows_notes_row(doc) {
+                rows.push(notes_row(doc));
+            }
             for node in layered.nodes.iter().rev() {
                 layer_rows(session, node, None, 0, &mut rows);
             }
@@ -658,6 +723,70 @@ fn chosen_settings(session: &Session) -> Section {
     }
 }
 
+/// Whether the Layers page shows the Notes row: while the image has notes.
+pub fn shows_notes_row(doc: &Doc) -> bool {
+    !doc.notes.is_empty()
+}
+
+/// The Notes row, at the top of the list, as ig-notes-marks shows it. It
+/// is no layer: it cannot be painted, moved, or masked. Its eye shows and
+/// hides the notes, a click chooses the notes tool, and its menu's Delete
+/// takes every note away.
+fn notes_row(doc: &Doc) -> LayerRow {
+    LayerRow {
+        id: NOTES_ROW,
+        parent: None,
+        depth: 0,
+        icon: "chat-bubble".into(),
+        name: "Notes".into(),
+        group: false,
+        selected: false,
+        visible: !doc.notes_hidden,
+        locked: false,
+        renamable: false,
+        click: Action::new("notes_click"),
+        rename: Action::new("notes_click"),
+        toggle_visible: Action::new("notes_visible"),
+        toggle_locked: Action::new("notes_click"),
+        menu: vec![row("Delete", Action::new("notes_delete"))],
+        colors: Vec::new(),
+        thumbnail: None,
+        mark: None,
+        detail: None,
+        toggle_icon: None,
+        value: None,
+    }
+}
+
+/// The icon at a linked layer's row's right: a link while it is the file,
+/// a pencil once painted on, and a broken link when the file was gone.
+pub fn link_mark(node: &Node) -> Option<String> {
+    let linked = node.link.as_ref()?;
+    Some(
+        match (linked.edited, linked.state) {
+            (true, _) => "edit-pencil",
+            (false, LinkState::Missing) => "link-xmark",
+            (false, _) => "link",
+        }
+        .into(),
+    )
+}
+
+/// The second line of a linked layer's row, as ig-linked-layer shows it:
+/// its file's name, "Edited from <file>" once painted on, or "Missing:
+/// <file>" when the file could not be read. The protocol's `LayerRow` has
+/// no second line yet; this goes into its `detail` when it has one.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn row_detail(node: &Node) -> Option<String> {
+    let linked = node.link.as_ref()?;
+    let name = linked.link.file_name();
+    Some(match (linked.edited, linked.state) {
+        (true, _) => format!("Edited from {name}"),
+        (false, LinkState::Missing) => format!("Missing: {name}"),
+        (false, _) => name.to_string(),
+    })
+}
+
 /// A node's row, then its children's, top first, as the list shows them. A
 /// node's mask has its own row directly above it.
 fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, rows: &mut Vec<LayerRow>) {
@@ -716,7 +845,7 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
         _ if node.is_group() => ("folder", None),
         Kind::Text(_) => ("text", None),
         Kind::Curves(_) | Kind::Grade(_) => ("filter-list", Some("filter-list".to_string())),
-        Kind::Pixels => ("media-image", None),
+        Kind::Pixels => ("media-image", link_mark(node)),
     };
     rows.push(LayerRow {
         id,
@@ -738,7 +867,9 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
         // A text shows its icon in the image's frame.
         thumbnail: if node.text().is_some() { None } else { image.frame().thumbs.get(&id).map(|(_, thumb)| thumb.clone()) },
         mark,
-        detail: None,
+        // The linked file's line: its name, what it was edited from, or
+        // that it is missing.
+        detail: row_detail(node),
         toggle_icon: None,
         value: None,
     });
@@ -839,6 +970,7 @@ mod tests {
                 ToolItem::Button { icon, .. } => icon.clone(),
                 ToolItem::Menu { label, .. } => format!("menu {label}"),
                 ToolItem::Maximize { .. } => "maximize".to_string(),
+                ToolItem::Popover { icon, .. } => format!("popover {icon}"),
                 _ => "other".to_string(),
             })
             .collect()
@@ -856,12 +988,20 @@ mod tests {
             [
                 "folder", "floppy-disk", "|", "undo", "redo", "|", "cursor-pointer", "square-dashed",
                 "chat-bubble-empty", "crop", "color-picker", "bandage", "stamp", "brush*", "erase", "text",
-                "drag-hand-gesture", "search",
+                "drag-hand-gesture", "search", "chat-bubble",
             ]
         );
         // A new image is fitted: 1920 wide in 1200 less the margins is 58%.
-        assert_eq!(kinds(&bar.trailing), ["|", "menu 58%", "|", "zoom-out", "zoom-in", "frame", "maximize"]);
-        let ToolItem::Menu { rows, .. } = &bar.trailing[1] else { panic!() };
+        assert_eq!(
+            kinds(&bar.trailing),
+            ["|", "cube", "popover nav-arrow-down", "|", "menu 58%", "|", "zoom-out", "zoom-in", "frame", "maximize"]
+        );
+        let ToolItem::Popover { rows: check, tip, .. } = &bar.trailing[2] else { panic!() };
+        assert_eq!(tip, "Pre-vis check");
+        let labels: Vec<&str> = check.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, ["Open PNG or JPEG…", "", "Opacity"]);
+        assert!(matches!(&check[1].kind, RowKind::Choice { options, segmented: true, .. } if *options == ["Edges", "See-through"]));
+        let ToolItem::Menu { rows, .. } = &bar.trailing[4] else { panic!() };
         let actions: Vec<_> = rows.iter().map(|row| row.action.clone().unwrap()).collect();
         assert_eq!(actions[0], Action::new("canvas.fit"));
         assert_eq!(actions[2], Action::with_arg("canvas.zoom", json!({ "zoom": 1.0 })));
@@ -901,6 +1041,11 @@ mod tests {
         );
         session.choose_tool(ToolKind::Heal);
         assert_eq!(kinds(&toolbar(&session).options), ["Size px", "Hardness %", "|", "label Alt-click to set the source"]);
+        // The notes tool, as ig-notes-pin shows: its colour, then Pin or Draw.
+        session.choose_tool(ToolKind::Notes);
+        assert_eq!(kinds(&toolbar(&session).options), ["colour", "|", "Pin/Draw"]);
+        let ToolItem::Button { tip, .. } = &toolbar(&session).items[18] else { panic!() };
+        assert_eq!(tip, "Notes");
         session.choose_tool(ToolKind::Text);
         session.tools.text.bold = true;
         assert_eq!(
@@ -1034,6 +1179,48 @@ mod tests {
         let section = &properties(&session).unwrap().sections[0];
         let items: Vec<&str> = section.rows.iter().filter(|row| matches!(row.kind, RowKind::Item { .. })).map(|row| row.label.as_str()).collect();
         assert_eq!(items, ["Curves", "Color Grade"]);
+    }
+
+    /// Catches a linked layer's row that does not say what it is, as
+    /// ig-linked-layer shows: the file's name and the link mark, "Edited
+    /// from" and the pencil once painted on, and "Missing:" when the file
+    /// was gone; a layer of its own has neither.
+    #[test]
+    fn a_linked_layers_row_names_its_file() {
+        use crate::layered::Linked;
+        let mut node = Node::layer(1, "Take 3");
+        assert_eq!((row_detail(&node), link_mark(&node)), (None, None));
+        let link = layers::link::Link { path: "takes/keyframe-shot-12-take-3.png".into(), sha256: "ab".into() };
+        node.link = Some(Linked::new(link));
+        assert_eq!(row_detail(&node).as_deref(), Some("keyframe-shot-12-take-3.png"));
+        assert_eq!(link_mark(&node).as_deref(), Some("link"));
+        node.link.as_mut().unwrap().state = LinkState::Missing;
+        assert_eq!(row_detail(&node).as_deref(), Some("Missing: keyframe-shot-12-take-3.png"));
+        assert_eq!(link_mark(&node).as_deref(), Some("link-xmark"));
+        node.link.as_mut().unwrap().edited = true;
+        assert_eq!(row_detail(&node).as_deref(), Some("Edited from keyframe-shot-12-take-3.png"));
+        assert_eq!(link_mark(&node).as_deref(), Some("edit-pencil"));
+    }
+
+    /// Catches a Notes row that is missing, misplaced, or a layer, as
+    /// ig-notes-marks shows it: none without notes; with them, one row
+    /// at the top, its eye showing whether they are hidden, and no
+    /// thumbnail.
+    #[test]
+    fn the_notes_row_sits_at_the_top_while_there_are_notes() {
+        let mut session = Session::launch();
+        let _ = session.emit();
+        let rows = |session: &Session| properties(session).unwrap().layers.unwrap().rows;
+        assert_eq!(rows(&session).len(), 1);
+        let doc = session.images[0].doc_mut();
+        doc.add_mark(&[[10.0, 10.0, 1.0], [40.0, 10.0, 1.0]], 4.0, layers::notes::RED);
+        let shown = rows(&session);
+        assert_eq!(shown.len(), 2);
+        assert_eq!((shown[0].id, shown[0].name.as_str(), shown[0].icon.as_str()), (NOTES_ROW, "Notes", "chat-bubble"));
+        assert!(shown[0].visible && !shown[0].renamable && shown[0].thumbnail.is_none());
+        assert_eq!(shown[1].name, "Layer 1");
+        session.images[0].doc_mut().set_notes_hidden(true);
+        assert!(!rows(&session)[0].visible);
     }
 
     /// Catches a key that the host keeps for itself, or two keys on one chord.
