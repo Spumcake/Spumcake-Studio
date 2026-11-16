@@ -585,13 +585,16 @@ impl Running {
             AppMessage::Stage(stage) => {
                 declared.stages.insert(stage.tab.clone(), stage);
             }
-            AppMessage::Notices { tab, notices } => {
+            AppMessage::Notices { tab, notices, .. } => {
                 if notices.is_empty() {
                     declared.notices.remove(&tab);
                 } else {
                     declared.notices.insert(tab, notices);
                 }
             }
+            // The Prompt page's previews and prepared requests are drawn by
+            // the work that builds them; until then they are read and let go.
+            AppMessage::Previewed { .. } | AppMessage::AskAssistant { .. } => {}
         }
     }
 

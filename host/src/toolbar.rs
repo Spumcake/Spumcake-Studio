@@ -913,7 +913,7 @@ fn item_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
             enabled,
             rows,
         } => context_menu(ui, icon, label, *enabled, rows, chosen),
-        ToolItem::Popover { icon, tip, rows } => popover(ui, icon, tip, rows),
+        ToolItem::Popover { icon, tip, rows, .. } => popover(ui, icon, tip, rows),
         ToolItem::Slider {
             caption,
             width,
