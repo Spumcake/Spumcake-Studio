@@ -73,6 +73,11 @@ pub(crate) enum SettingsChoice {
     DeleteEndpoint(String),
     SaveSkill(SkillSetting),
     DeleteSkill(String),
+    /// Skill folders' Add folder…: choose a folder the assistant finds
+    /// agent skills in.
+    AddSkillFolder,
+    /// Remove a skill folder, by its path.
+    RemoveSkillFolder(String),
     /// A new level or an edited one, by its id.
     SaveLevel(Level),
     MoveLevel { from: usize, to: usize },
@@ -820,7 +825,7 @@ fn status_mark(ui: &egui::Ui, right: f32, center_y: f32, status: &Status) -> f32
     let color = match status {
         Status::Connected => CONNECTED,
         Status::KeyMissing | Status::Answered(_) => WARNING,
-        Status::Checking | Status::NotRunning => HINT,
+        Status::Checking | Status::NotRunning | Status::KeySaved => HINT,
     };
     let label = status.label();
     let galley = ui.painter().layout_no_wrap(label, ts::small(), MUTED);
@@ -890,7 +895,8 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
     let kinds: Vec<String> = EndpointKind::ALL.iter().map(|kind| kind.label().to_string()).collect();
     let chosen = EndpointKind::ALL.iter().position(|kind| *kind == form.kind);
     let type_rect = control(rows[0], CONTROL_W, 0.0);
-    row_text(ui, rows[0], rows[0].left() + PAD, type_rect.left() - 8.0, "Type", "What kind of service this is");
+    let type_line = if form.kind == EndpointKind::Fal { "Used by Skills' request.py" } else { "What kind of service this is" };
+    row_text(ui, rows[0], rows[0].left() + PAD, type_rect.left() - 8.0, "Type", type_line);
     if let Some(index) = select(ui, type_rect, "endpoint-type", form.kind.label(), &kinds, chosen) {
         let old = form.kind.suggested();
         let kind = EndpointKind::ALL[index];
@@ -967,7 +973,9 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
 
 /// The endpoint choices a skill or level offers, and which is chosen.
 fn endpoint_options(settings: &Settings, current: Option<&str>, chats_only: bool) -> (Vec<String>, Vec<String>, Option<usize>) {
-    let offered: Vec<&EndpointSetting> = settings.endpoints.iter().filter(|endpoint| !chats_only || endpoint.kind.chats()).collect();
+    // fal.ai only holds the key Skills' request.py uses: no skill or level sends to it.
+    let offered: Vec<&EndpointSetting> =
+        settings.endpoints.iter().filter(|endpoint| endpoint.kind != EndpointKind::Fal && (!chats_only || endpoint.kind.chats())).collect();
     let names = offered.iter().map(|endpoint| endpoint.name.clone()).collect();
     let ids: Vec<String> = offered.iter().map(|endpoint| endpoint.id.clone()).collect();
     let chosen = current.and_then(|current| ids.iter().position(|id| id == current));
@@ -1043,6 +1051,58 @@ fn skills(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: 
                 }
             });
         }
+    }
+    skill_folders(ui, panel, env, choices);
+}
+
+/// A skill folder as a person knows it: its repository's name, and the
+/// folder inside it when it is not the repository itself. A checkout in
+/// `<repository>/worktrees/<branch>` is named by the repository.
+fn folder_name(folder: &std::path::Path) -> String {
+    let root = folder.ancestors().find(|at| at.join(".git").exists());
+    let Some(root) = root else {
+        return folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().to_string());
+    };
+    let named = if root.parent().and_then(|parent| parent.file_name()).is_some_and(|parent| parent == "worktrees") {
+        root.parent().and_then(|parent| parent.parent())
+    } else {
+        Some(root)
+    };
+    let repository = named.and_then(|at| at.file_name()).map_or_else(String::new, |name| name.to_string_lossy().to_string());
+    match folder.strip_prefix(root).ok().filter(|inside| !inside.as_os_str().is_empty()) {
+        Some(inside) => format!("{repository} · {}", inside.display()),
+        None => repository,
+    }
+}
+
+/// The folders the assistant finds agent skills in, on the Endpoints
+/// card's pattern: a row for each, with Remove in its "…".
+fn skill_folders(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: &mut Vec<SettingsChoice>) {
+    gap(ui, 18.0);
+    // The label is drawn as section_label draws "Your skills", with Add
+    // folder… on its line, since the page's header holds New skill.
+    let (label_row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    ui.painter().text(pos2(label_row.left(), label_row.top() + 10.0), Align2::LEFT_CENTER, "Skill folders", ts::title(), TEXT);
+    let add_w = sessions::label_width(ui, "Add folder…");
+    let add = Rect::from_min_max(pos2(label_row.right() - add_w, label_row.top() - 6.0), pos2(label_row.right(), label_row.top() + 26.0));
+    if plain(ui, panel, add, "Add folder…") {
+        choices.push(SettingsChoice::AddSkillFolder);
+    }
+    let folders = &env.settings.skill_folders;
+    if folders.is_empty() {
+        ui.label(egui::RichText::new("No skill folders yet.").font(ts::body()).color(MUTED));
+        return;
+    }
+    let rows = card(ui, folders.len());
+    for (folder, row) in folders.iter().zip(rows) {
+        let menu = more(ui, row, folder);
+        let name = folder_name(std::path::Path::new(folder));
+        row_text(ui, row, row.left() + PAD, menu.rect.left() - 14.0, &name, &sessions::shorten_home(folder));
+        egui::Popup::menu(&menu).show(|ui| {
+            if widgets::menu_rows(ui, &[menu_item("Remove", true)]) == Some(0) {
+                choices.push(SettingsChoice::RemoveSkillFolder(folder.clone()));
+            }
+        });
     }
 }
 

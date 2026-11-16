@@ -327,7 +327,7 @@ impl Agent {
                                     "type": "text",
                                     "text": format!("{IMAGES_LEAD}`{name}` returned:"),
                                 }));
-                                image_parts.extend(images.iter().map(|png| image_part("image/png", png)));
+                                image_parts.extend(images.iter().map(|data| image_part(image_mime(data), data)));
                             }
                             content
                         }
@@ -406,13 +406,13 @@ impl Agent {
         let (app, tab, input) = match routed {
             Ok(routed) => routed,
             Err(error) => {
-                self.tool_entry(name, Some(false));
+                self.tool_entry(name, Some(false), Vec::new());
                 return Some((tool_error(&error), Vec::new()));
             }
         };
         let call = format!("{}.{}", busy.group, busy.calls);
         // The host can show the call, as a cell, before it finishes.
-        self.tool_entry(name, None);
+        self.tool_entry(name, None, Vec::new());
         self.emit(Event::Call {
             call: call.clone(),
             app,
@@ -428,7 +428,13 @@ impl Agent {
                 Woke::Stop | Woke::Reply(..) | Woke::Partial(..) | Woke::Result(_) => {}
             }
         };
-        self.tool_entry(name, Some(result.ok));
+        // An image a tool showed the model, from a file, is shown to the
+        // person too, with its full path.
+        let shown = match result.output.get("path").and_then(Value::as_str) {
+            Some(path) if !result.images.is_empty() => vec![path.to_string()],
+            _ => Vec::new(),
+        };
+        self.tool_entry(name, Some(result.ok), shown);
         let mut content = json!({"ok": result.ok, "output": result.output});
         if !result.images.is_empty() {
             content["images"] = json!(format!(
@@ -439,12 +445,12 @@ impl Agent {
         Some((content.to_string(), result.images))
     }
 
-    fn tool_entry(&self, tool: &str, ok: Option<bool>) {
+    fn tool_entry(&self, tool: &str, ok: Option<bool>, shown: Vec<String>) {
         self.emit(Event::Entry(Entry {
             role: Role::Tool,
             text: String::new(),
             time: now(),
-            attachments: Vec::new(),
+            attachments: shown,
             tool: Some(tool.to_string()),
             ok,
             cell: None,
@@ -616,6 +622,20 @@ fn person_message(text: &str, attachments: Vec<Value>) -> Value {
     ];
     content.extend(attachments);
     json!({"role": "user", "content": content})
+}
+
+/// An image's media type, read from the start of its base64: a tool
+/// returns PNG, or, from a project's files, JPEG, WebP, or GIF.
+pub(crate) fn image_mime(base64: &str) -> &'static str {
+    if base64.starts_with("/9j/") {
+        "image/jpeg"
+    } else if base64.starts_with("UklGR") {
+        "image/webp"
+    } else if base64.starts_with("R0lGOD") {
+        "image/gif"
+    } else {
+        "image/png"
+    }
 }
 
 fn image_part(mime: &str, base64: &str) -> Value {

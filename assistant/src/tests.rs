@@ -469,6 +469,18 @@ fn an_image_result_becomes_an_image_part() {
     assert!(!messages[tool_at]["content"].as_str().expect("text").contains("iVBORw0KGgo"));
 }
 
+/// Catches a JPEG from a project's files sent to the model labelled as a
+/// PNG, which a model may refuse.
+#[test]
+fn an_images_type_is_read_from_its_data() {
+    use base64::Engine;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    assert_eq!(crate::agent::image_mime(&encode(b"\xff\xd8\xff\xe0rest")), "image/jpeg");
+    assert_eq!(crate::agent::image_mime(&encode(b"RIFF\0\0\0\0WEBPVP8 ")), "image/webp");
+    assert_eq!(crate::agent::image_mime(&encode(b"GIF89a")), "image/gif");
+    assert_eq!(crate::agent::image_mime(&encode(b"\x89PNG\r\n\x1a\n")), "image/png");
+}
+
 /// Catches a conversation that carries every earlier read and image into
 /// every later turn: the next request sees earlier tool outputs and images
 /// only as stubs, and still sees what was said.

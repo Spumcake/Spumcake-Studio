@@ -184,6 +184,24 @@ impl HostWindow {
                     self.projects_root = Some(path);
                 }
             }
+            SettingsChoice::AddSkillFolder => {
+                let picked = if self.native_dialogs {
+                    crate::dialogs::pick_folder(frame)
+                } else {
+                    self.scripted_path()
+                };
+                if let Some(path) = picked {
+                    let text = path.display().to_string();
+                    self.settings.update(|settings| {
+                        if !settings.skill_folders.contains(&text) {
+                            settings.skill_folders.push(text.clone());
+                        }
+                    });
+                }
+            }
+            SettingsChoice::RemoveSkillFolder(folder) => {
+                self.settings.update(|settings| settings.skill_folders.retain(|known| *known != folder));
+            }
             SettingsChoice::SaveEndpoint { id, kind, name, address, key } => {
                 let id = id.unwrap_or_else(protocol::cell_id);
                 let endpoint = EndpointSetting { id: id.clone(), name, kind, address };

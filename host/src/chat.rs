@@ -917,8 +917,72 @@ fn cell_card(
     board.card_rect = Some(card);
 }
 
-/// One tool call: a Small row with its mark and what it did.
+/// The tallest an image a tool looked at is shown under its row.
+const SHOWN_HEIGHT: f32 = 120.0;
+
+/// A PNG as a texture, decoded once per file; None for another kind of
+/// image, which shows by its path alone.
+pub(crate) fn shown_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
+    type Cache = std::collections::HashMap<String, egui::TextureHandle>;
+    let id = egui::Id::new("tool-row-images");
+    if let Some(known) = ctx.data(|data| data.get_temp::<Cache>(id).and_then(|cache| cache.get(path).cloned())) {
+        return Some(known);
+    }
+    let icon = std::fs::read(path).ok().and_then(|bytes| eframe::icon_data::from_png_bytes(&bytes).ok())?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    let texture = ctx.load_texture(format!("tool-row:{path}"), image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Cache>(id).insert(path.to_string(), texture.clone()));
+    Some(texture)
+}
+
+/// A prepared request from a workspace, put in the composer as the person
+/// would type it, with each file it names as a chip. It is sent only when
+/// the person sends it.
+pub(crate) fn prepare(chat: &mut Chat, text: &str, items: &[protocol::ItemRef], project: Option<&Path>) {
+    chat.input = text.to_string();
+    for item in items {
+        let path = Path::new(&item.path);
+        let path = match project {
+            Some(project) if path.is_relative() => project.join(path),
+            _ => path.to_path_buf(),
+        };
+        if !chat.chips.contains(&path) {
+            chat.chips.push(path);
+        }
+    }
+}
+
+/// The most lines of a command's output shown under its row.
+const OUTPUT_LINES: usize = 8;
+
+/// One tool call: a Small row with its mark and what it did; under it, a
+/// command's latest output while it runs and after; and every image the
+/// tool showed the model, with its full path.
 fn tool_row(ui: &mut egui::Ui, entry: &Entry, width: f32) {
+    tool_line(ui, entry, width);
+    if !entry.text.trim().is_empty() {
+        let lines: Vec<&str> = entry.text.lines().collect();
+        let shown = lines[lines.len().saturating_sub(OUTPUT_LINES)..].join("\n");
+        let galley = ui.painter().layout(shown, ts::code(), ts::MUTED, width - 20.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, galley.size().y + 4.0), Sense::hover());
+        ui.painter().galley(pos2(rect.left() + 20.0, rect.top() + 2.0), galley, ts::MUTED);
+    }
+    for path in &entry.attachments {
+        if let Some(texture) = shown_texture(ui.ctx(), path) {
+            let size = texture.size_vec2();
+            let scale = (SHOWN_HEIGHT / size.y).min((width - 20.0) / size.x).min(1.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(width, size.y * scale + 6.0), Sense::hover());
+            let image = Rect::from_min_size(pos2(rect.left() + 20.0, rect.top() + 6.0), size * scale);
+            ui.painter().image(texture.id(), image, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        // The whole path, wrapped, never cut: a person finds files by it.
+        let galley = ui.painter().layout(path.clone(), ts::small(), ts::MUTED, width - 20.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, galley.size().y.max(ts::small_line())), Sense::hover());
+        ui.painter().galley(pos2(rect.left() + 20.0, rect.top()), galley, ts::MUTED);
+    }
+}
+
+fn tool_line(ui: &mut egui::Ui, entry: &Entry, width: f32) {
     let painter = ui.painter().clone();
     let (row, _) = ui.allocate_exact_size(vec2(width, ts::small_line()), Sense::hover());
     let (icon, color) = match entry.ok {
@@ -1150,6 +1214,18 @@ pub(crate) fn load_attachment(path: &Path) -> Option<Attachment> {
 
 #[cfg(test)]
 mod tests {
+    /// Catches a workspace's prepared request sent for the person, or its
+    /// file lost: it waits in the composer, with the file as a chip.
+    #[test]
+    fn a_prepared_request_waits_in_the_composer() {
+        let mut chat = super::Chat::default();
+        let item = protocol::ItemRef { path: String::from("library/take.png"), item: None };
+        super::prepare(&mut chat, "Use this take.", &[item], Some(Path::new("/film")));
+        assert_eq!(chat.input, "Use this take.");
+        assert_eq!(chat.chips, [std::path::PathBuf::from("/film/library/take.png")]);
+        assert!(chat.conversation.is_empty(), "it was sent");
+    }
+
     use super::*;
 
     /// Catches a step line that shows a workspace by its id: a tool is named

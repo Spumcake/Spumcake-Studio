@@ -228,7 +228,8 @@ pub struct Entry {
     pub text: String,
     /// Seconds since the Unix epoch.
     pub time: u64,
-    /// The paths of the files attached to a person's message.
+    /// The paths of the files attached to a person's message, or, for a
+    /// tool entry, of the images the tool showed the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
     /// For a tool entry: the tool's key, and whether the call succeeded.
