@@ -162,7 +162,7 @@ fn a_frame_renders_as_a_png_in_the_project() {
     let _ = std::fs::remove_dir_all(&project);
     let (path, fingerprint) =
         board::render(&mut boards, &mut looker, session.active_storyboard(), &project, clip, Which::First).expect("a render");
-    assert!(path.starts_with(".inpainter/renders/storyboard-generator/"));
+    assert!(path.starts_with(".spumcake/renders/storyboard-generator/"));
     assert!(path.ends_with(&format!("-{fingerprint}.png")));
     let bytes = std::fs::read(project.join(&path)).expect("the file");
     assert_eq!(&bytes[1..4], b"PNG");
