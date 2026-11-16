@@ -106,7 +106,7 @@ fn pixel(path: &Path, width: u32, x: u32, y: u32) -> [u8; 4] {
 fn display_folder(project: &Path) -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|runtime| runtime.is_absolute() && runtime.is_dir()) {
         Some(runtime) => runtime.join("inpainter/image-generator"),
-        None => project.join(".inpainter/cache/image-generator"),
+        None => project.join(".spumcake/cache/image-generator"),
     }
 }
 
@@ -205,7 +205,7 @@ fn the_images_for_the_host_are_in_memory_when_there_is_some() {
         _ => None,
     });
     assert_eq!(view.image, first.image, "naming a project moved the images out of memory");
-    assert!(!project.join(".inpainter/cache/image-generator").exists(), "images were written into the project's cache too");
+    assert!(!project.join(".spumcake/cache/image-generator").exists(), "images were written into the project's cache too");
     program.send(HostMessage::Shutdown);
     let gone = file.parent().unwrap().to_path_buf();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -224,7 +224,7 @@ fn the_images_for_the_host_are_in_memory_when_there_is_some() {
         AppMessage::Raster(view) => Some(view.clone()),
         _ => None,
     });
-    assert!(PathBuf::from(&view.image).starts_with(project.join(".inpainter/cache/image-generator")), "{}", view.image);
+    assert!(PathBuf::from(&view.image).starts_with(project.join(".spumcake/cache/image-generator")), "{}", view.image);
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }

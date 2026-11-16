@@ -23,6 +23,13 @@ pub use tools::*;
 /// which version it speaks; the host accepts only this one.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Studio's own folder inside every project, relative to the project.
+pub const PROJECT_DIR: &str = ".spumcake";
+
+/// The name that folder had before 2026-11-16; Studio moves it to
+/// [`PROJECT_DIR`] when it opens the project.
+pub const OLD_PROJECT_DIR: &str = ".inpainter";
+
 /// What a sub-application writes to the host, on its standard output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -997,7 +1004,7 @@ mod tests {
             }],
         });
         round_trip_app(AppMessage::Items { path: "Gone.vid".into(), items: Vec::new() });
-        round_trip_app(AppMessage::Rendered { id: "r".into(), path: Some(".inpainter/renders/x/b3-b1.png".into()), fingerprint: Some("b1".into()), error: None });
+        round_trip_app(AppMessage::Rendered { id: "r".into(), path: Some(".spumcake/renders/x/b3-b1.png".into()), fingerprint: Some("b1".into()), error: None });
         round_trip_app(AppMessage::Rendered { id: "r".into(), path: None, fingerprint: None, error: Some("No such board.".into()) });
         round_trip_app(AppMessage::Need { id: "n".into(), item: board.clone(), media_type: "image/png".into() });
         round_trip_app(AppMessage::Pick { id: "p".into(), media_types: vec!["image/png".into()] });
