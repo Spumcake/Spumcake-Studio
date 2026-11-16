@@ -106,7 +106,7 @@ fn pixel(path: &Path, width: u32, x: u32, y: u32) -> [u8; 4] {
 fn display_folder(project: &Path) -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|runtime| runtime.is_absolute() && runtime.is_dir()) {
         Some(runtime) => runtime.join("inpainter/image-generator"),
-        None => project.join(".inpainter/cache/image-generator"),
+        None => project.join(".spumcake/cache/image-generator"),
     }
 }
 
@@ -125,7 +125,7 @@ fn a_stroke_reaches_the_image_and_the_project() {
     assert_eq!((first.width, first.height), (1920, 1080));
     assert!(first.camera.is_some(), "a new image came without a camera");
 
-    program.send(HostMessage::Project { folder: folder.display().to_string() });
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     let view = program.raster(0);
     let file = PathBuf::from(&view.image);
     assert!(file.starts_with(display_folder(&folder)), "{}", file.display());
@@ -159,7 +159,7 @@ fn a_stroke_reaches_the_image_and_the_project() {
     drop(program);
 
     let mut again = Program::start(true);
-    again.send(HostMessage::Project { folder: folder.display().to_string() });
+    again.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     again.send(HostMessage::Claim { id: "c1".into(), path: written.display().to_string() });
     assert!(again.wait(|message| match message {
         AppMessage::Claimed { id, yours } if id == "c1" => Some(*yours),
@@ -199,13 +199,13 @@ fn the_images_for_the_host_are_in_memory_when_there_is_some() {
     assert!(file.starts_with(runtime.join("inpainter/image-generator")), "{}", file.display());
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 1920 * 1080 * 4);
     assert!(!left.exists(), "a folder left by a program no longer running stayed");
-    program.send(HostMessage::Project { folder: project.display().to_string() });
+    program.send(HostMessage::Project { folder: project.display().to_string(), skills: false });
     let view = program.wait(|message| match message {
         AppMessage::Raster(view) => Some(view.clone()),
         _ => None,
     });
     assert_eq!(view.image, first.image, "naming a project moved the images out of memory");
-    assert!(!project.join(".inpainter/cache/image-generator").exists(), "images were written into the project's cache too");
+    assert!(!project.join(".spumcake/cache/image-generator").exists(), "images were written into the project's cache too");
     program.send(HostMessage::Shutdown);
     let gone = file.parent().unwrap().to_path_buf();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -219,12 +219,12 @@ fn the_images_for_the_host_are_in_memory_when_there_is_some() {
         command.env_remove("XDG_RUNTIME_DIR");
     });
     program.raster(0);
-    program.send(HostMessage::Project { folder: project.display().to_string() });
+    program.send(HostMessage::Project { folder: project.display().to_string(), skills: false });
     let view = program.wait(|message| match message {
         AppMessage::Raster(view) => Some(view.clone()),
         _ => None,
     });
-    assert!(PathBuf::from(&view.image).starts_with(project.join(".inpainter/cache/image-generator")), "{}", view.image);
+    assert!(PathBuf::from(&view.image).starts_with(project.join(".spumcake/cache/image-generator")), "{}", view.image);
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }
@@ -253,7 +253,7 @@ fn open_and_export_go_through_the_file_dialog() {
     std::fs::write(&source, png).unwrap();
 
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string() });
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     program.raster(0);
     program.command("open", json!({}));
     let asked = program.wait(|message| match message {
@@ -414,7 +414,7 @@ fn an_image_opened_as_new_work_is_kept_with_its_source() {
     let from = protocol::OpenedFrom { cell: "c7".into(), image: "images/lamp.png".into(), session: Some("s3".into()), recipe: None };
 
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string() });
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     program.raster(0);
     program.send(HostMessage::OpenAsNew { path: source.display().to_string(), name: "AC/DC lamp\nposter".into(), from: Some(from.clone()) });
     let opened = program.wait(|message| match message {
@@ -432,7 +432,7 @@ fn an_image_opened_as_new_work_is_kept_with_its_source() {
     // Opened again, painted, and saved: the source stays.
     let saved = std::fs::metadata(&written).unwrap().modified().unwrap();
     let mut again = Program::start(false);
-    again.send(HostMessage::Project { folder: folder.display().to_string() });
+    again.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     again.raster(0);
     again.send(HostMessage::Open { path: Some(written.display().to_string()) });
     let shown = again.wait(|message| match message {
@@ -613,7 +613,7 @@ fn new_images_are_named_free_of_the_projects_files() {
     let existing = folder.join("Untitled Image.ipx");
     std::fs::write(&existing, b"someone's image").unwrap();
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string() });
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     let new_image = HostMessage::Command { id: "new_image".into(), tab: None, arg: None, node: None, viewport: [1200.0, 800.0] };
     program.send(new_image.clone());
     program.send(new_image);
@@ -655,7 +655,7 @@ fn an_image_file_from_0_13_opens_with_its_source() {
     let path = folder.join("Lamp from pitch.ipx");
     std::fs::copy(&fixture, &path).expect("the 0.13 fixture");
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string() });
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     program.send(HostMessage::Open { path: Some(path.display().to_string()) });
     let opened = program.wait(|message| match message {
         AppMessage::Raster(view) => Some(view.clone()),

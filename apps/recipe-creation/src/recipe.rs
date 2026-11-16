@@ -173,7 +173,7 @@ impl Session {
                 }
                 self.note_quit(&mut out)
             }
-            HostMessage::Project { folder } => {
+            HostMessage::Project { folder, .. } => {
                 let folder = PathBuf::from(folder);
                 self.project = Some(folder.canonicalize().unwrap_or(folder));
                 // A recipe made before the project was named takes a name
@@ -195,7 +195,7 @@ impl Session {
                 self.answer(&button, &mut out);
             }
             HostMessage::FileResult { id, path } => self.file_result(&id, path, &mut out),
-            HostMessage::EditCell { tab, cell, input } => self.edit(&tab, &cell, input, &mut out),
+            HostMessage::EditCell { tab, cell, input, .. } => self.edit(&tab, &cell, input, &mut out),
             HostMessage::CellResult {
                 tab,
                 cell,
@@ -222,7 +222,14 @@ impl Session {
             }),
             // Items come with the lifecycle's recipe work.
             HostMessage::Render { id, .. } => out.push(protocol::no_items(id)),
-            HostMessage::Provided { .. } | HostMessage::Stale { .. } | HostMessage::Picked { .. } => {}
+            HostMessage::Provided { .. } | HostMessage::Stale { .. } | HostMessage::Picked { .. } | HostMessage::Takes { .. } => {}
+            HostMessage::Preview { id, .. } => out.push(AppMessage::Previewed {
+                id,
+                thumbnail: None,
+                badge: String::new(),
+                cues: Vec::new(),
+                error: Some("This workspace makes no previews.".into()),
+            }),
             HostMessage::Invoke { call, .. } => out.extend(self.invoke(call)),
             HostMessage::Keep { tab } => {
                 let kept = match self.recipes.iter().position(|recipe| recipe.id == tab) {
@@ -1464,6 +1471,9 @@ mod tests {
             tab: "1".into(),
             cell: session.recipes[0].cells[0].id.clone(),
             input: text("A lighthouse keeper."),
+            settings: None,
+            endpoint: None,
+            model: None,
         }));
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].kind, TEXT_KIND);
@@ -1482,7 +1492,7 @@ mod tests {
         // holding the prompt that ran, not a later edit.
         let (cells, _) = last_cells(&session.handle(HostMessage::SetVersion { tab: "1".into(), cell: first.clone(), index: 1 }));
         assert_eq!((cells[0].current, cells[0].result_text().as_str()), (Some(1), "Two."));
-        session.handle(HostMessage::EditCell { tab: "1".into(), cell: first.clone(), input: text("A darker keeper.") });
+        session.handle(HostMessage::EditCell { tab: "1".into(), cell: first.clone(), input: text("A darker keeper."), settings: None, endpoint: None, model: None });
         let (cells, _) = last_cells(&run(&mut session, &first, "A darker keeper.", "Four."));
         assert_eq!(cells[0].versions.len(), 4);
         assert_eq!(cells[0].current, Some(3));
@@ -1512,7 +1522,7 @@ mod tests {
         assert_eq!(cells[1].kind, MARKDOWN_KIND);
         let notes = cells[1].id.clone();
         assert_eq!(selected.as_deref(), Some(notes.as_str()));
-        session.handle(HostMessage::EditCell { tab: "1".into(), cell: notes.clone(), input: text("# The Last Signal") });
+        session.handle(HostMessage::EditCell { tab: "1".into(), cell: notes.clone(), input: text("# The Last Signal"), settings: None, endpoint: None, model: None });
         let (cells, _) = last_cells(&session.handle(HostMessage::CellResult {
             tab: "1".into(),
             cell: notes.clone(),
@@ -1575,9 +1585,9 @@ mod tests {
     fn undo_never_hides_or_loses_a_run() {
         let mut session = Session::launch();
         let id = session.recipes[0].cells[0].id.clone();
-        session.handle(HostMessage::EditCell { tab: "1".into(), cell: id.clone(), input: text("p1") });
+        session.handle(HostMessage::EditCell { tab: "1".into(), cell: id.clone(), input: text("p1"), settings: None, endpoint: None, model: None });
         run(&mut session, &id, "p1", "R1");
-        session.handle(HostMessage::EditCell { tab: "1".into(), cell: id.clone(), input: text("p2") });
+        session.handle(HostMessage::EditCell { tab: "1".into(), cell: id.clone(), input: text("p2"), settings: None, endpoint: None, model: None });
         run(&mut session, &id, "p2", "R2");
         let (cells, _) = last_cells(&command(&mut session, "undo"));
         assert_eq!(cells[0].result_text(), "R2", "undo showed an older run");
@@ -1675,7 +1685,7 @@ mod tests {
     /// A launched session inside `folder`, its recipe changed.
     fn changed_in(folder: &Path) -> Session {
         let mut session = Session::launch();
-        let _ = session.handle(HostMessage::Project { folder: folder.display().to_string() });
+        let _ = session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         let _ = command(&mut session, "add_cell");
         session
     }

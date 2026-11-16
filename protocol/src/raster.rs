@@ -76,7 +76,9 @@ pub struct Film {
     pub items: Vec<FilmItem>,
     /// The index of the image shown.
     pub shown: usize,
-    /// A click on a thumbnail sends `select` with `{"value": index}`.
+    /// A click on a thumbnail sends `select` with `{"value": index}`; a
+    /// Ctrl- or Shift-click adds `"extend": true`, so two can show side by
+    /// side. See [`Film::select_message`].
     pub select: crate::Action,
     /// A thumbnail dragged along the strip sends `reorder` with
     /// `{"from": index, "to": index}` on release, `to` counted after the
@@ -87,6 +89,36 @@ pub struct Film {
     /// A press anywhere on the strip sends `focus` first, so the
     /// application knows the strip, not the image, has the keyboard.
     pub focus: crate::Action,
+    /// The items in runs, in order, each under its own label, such as
+    /// "Round 14 · GPT Image 2.5". `items` stays one list, so `shown`,
+    /// `select`, and `reorder` keep their indices; a drag stays inside its
+    /// group. Empty draws one run with no label.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<FilmGroup>,
+}
+
+impl Film {
+    /// What a click on thumbnail `index` sends, with `extend` for a Ctrl-
+    /// or Shift-click.
+    pub fn select_message(&self, index: usize, extend: bool) -> crate::Action {
+        let action = self.select.with_value(serde_json::json!(index));
+        if !extend {
+            return action;
+        }
+        let mut arg = action.arg.unwrap_or_default();
+        arg["extend"] = serde_json::Value::Bool(true);
+        crate::Action { id: action.id, arg: Some(arg) }
+    }
+}
+
+/// A run of the filmstrip's items: the next `count` of them, under `label`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilmGroup {
+    pub label: String,
+    pub count: usize,
+    /// The label's right-click menu.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub menu: Vec<crate::MenuEntry>,
 }
 
 /// One image on the filmstrip.
@@ -94,10 +126,49 @@ pub struct Film {
 pub struct FilmItem {
     /// Shown when the pointer rests on the thumbnail.
     pub name: String,
+    /// For a tile still pending, its size gives the tile's shape and its
+    /// path may be empty.
     pub thumbnail: Thumbnail,
     /// The thumbnail's right-click menu.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub menu: Vec<crate::MenuEntry>,
+    /// Words on the tile's corner, such as "8.0 s".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub badge: String,
+    /// An icon on the tile, such as the canon seal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<String>,
+    /// The take chosen, drawn with an outline and a star.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub chosen: bool,
+    /// A take not made yet: drawn as a placeholder tile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<FilmPending>,
+}
+
+/// Why a filmstrip tile has no image yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FilmPending {
+    /// Being made, drawn striped. From `since`, seconds since the Unix
+    /// epoch, the host counts the minutes on the tile.
+    Running {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<u64>,
+    },
+    Failed,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A timed mark in a sound, such as a beat, in seconds from its start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cue {
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 /// What the host's pointer does on a raster tab.
@@ -274,16 +345,41 @@ mod tests {
                     name: "Beach".into(),
                     thumbnail: Thumbnail { path: "/tmp/t.rgba".into(), width: 68, height: 44, revision: 1 },
                     menu: Vec::new(),
+                    badge: String::new(),
+                    mark: None,
+                    chosen: false,
+                    pending: None,
                 }],
                 shown: 0,
                 select: crate::Action::new("select_image"),
                 reorder: crate::Action::new("move_image"),
                 add: Vec::new(),
                 focus: crate::Action::new("film_focus"),
+                groups: Vec::new(),
             }),
         };
+        let mut view = view;
+        let film = view.film.as_mut().unwrap();
+        let tile = film.items[0].clone();
+        film.items.push(FilmItem { badge: "8.0 s".into(), mark: Some("canon".into()), chosen: true, ..tile.clone() });
+        film.items.push(FilmItem { pending: Some(FilmPending::Running { since: Some(1_793_146_000) }), ..tile.clone() });
+        film.items.push(FilmItem { pending: Some(FilmPending::Running { since: None }), ..tile.clone() });
+        film.items.push(FilmItem { pending: Some(FilmPending::Failed), ..tile });
+        film.groups = vec![
+            FilmGroup { label: "Round 14 · GPT Image 2.5".into(), count: 2, menu: Vec::new() },
+            FilmGroup { label: "Round 15 · GPT Image 2.5".into(), count: 3, menu: vec![crate::MenuEntry { label: "Next round from this".into(), icon: None, enabled: true, divider: false, action: Some(crate::Action::new("next_round")), submenu: Vec::new(), rename: false }] },
+        ];
         let text = serde_json::to_string(&crate::AppMessage::Raster(view.clone())).unwrap();
-        assert_eq!(crate::parse_app_message(&text).unwrap(), crate::AppMessage::Raster(view));
+        assert_eq!(crate::parse_app_message(&text).unwrap(), crate::AppMessage::Raster(view.clone()));
+        // A strip from before groups and pending tiles still reads.
+        let old = r#"{"items":[{"name":"Beach","thumbnail":{"path":"t","width":1,"height":1,"revision":1}}],"shown":0,"select":{"id":"s"},"reorder":{"id":"r"},"add":[],"focus":{"id":"f"}}"#;
+        let old: Film = serde_json::from_str(old).unwrap();
+        assert!(old.groups.is_empty());
+        assert_eq!((old.items[0].badge.as_str(), old.items[0].chosen, &old.items[0].pending), ("", false, &None));
+        // A Ctrl- or Shift-click adds `extend`; a plain click leaves it out.
+        let film = view.film.unwrap();
+        assert_eq!(film.select_message(2, false).arg, Some(serde_json::json!({"value": 2})));
+        assert_eq!(film.select_message(2, true), crate::Action::with_arg("select_image", serde_json::json!({"value": 2, "extend": true})));
         for gesture in [
             RasterGesture::StrokePart { from: 3, points: vec![[1.0, 2.0, 0.5]] },
             RasterGesture::Source { at: [3.0, 4.0] },

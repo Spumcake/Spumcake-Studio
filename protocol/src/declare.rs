@@ -212,8 +212,20 @@ pub enum ToolItem {
         action: Action,
     },
     /// An icon button that opens panel rows under it. Each row edits as a
-    /// panel row does, with `property`.
-    Popover { icon: String, tip: String, rows: Vec<Row> },
+    /// panel row does, with `property`. With `action`, it is one split
+    /// control: the icon sends `action`, and a chevron beside it opens the
+    /// rows. `selected` draws the icon as on, as a button's does.
+    Popover {
+        icon: String,
+        tip: String,
+        rows: Vec<Row>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<Action>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        selected: bool,
+        #[serde(default = "yes")]
+        enabled: bool,
+    },
     /// The host window's maximize toggle.
     Maximize {
         icon: String,
@@ -430,6 +442,16 @@ pub struct LayerRow {
     /// An icon drawn muted at the row's right, such as `link` for a mask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<String>,
+    /// A muted second line under the name, such as "Edited from …".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Drawn in place of the eye while the layer is shown, such as a
+    /// speaker for a sound layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toggle_icon: Option<String>,
+    /// Words at the row's right, such as "−6 dB".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 /// The outliner. Dragging a row among its siblings sends `reorder` with
@@ -512,6 +534,63 @@ pub struct Properties {
     /// layers, so a layer's settings sit above the list of layers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pages: Vec<PanelPage>,
+    /// The Prompt page's cell, drawn after the page tabs and before the
+    /// sections. The host draws and runs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<PanelCell>,
+}
+
+/// A cell the panel draws as a card: its header with the kind, the model,
+/// Generate or Stop, and "…"; the prompt; the reference rows; and the
+/// settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PanelCell {
+    /// The id of a cell the tab declared with `cells`.
+    pub cell: String,
+    /// Muted words in an empty prompt, such as "Describe the image…".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hint: String,
+    /// The roles a reference row's menu offers, in order. The host adds
+    /// "Name what it's for…".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<ReferenceRole>,
+    /// The media types "Add reference" offers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_types: Vec<String>,
+    /// Rows each reference row's own menu adds, each sent with the
+    /// reference's index as `value`. The host keeps Choose… and Clear.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_menu: Vec<MenuEntry>,
+    /// The settings rows. For a step, the values are the step's, and only
+    /// the labels and kinds come from here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<CellSetting>,
+    /// The card's "…" menu.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub menu: Vec<MenuEntry>,
+}
+
+/// One role a reference can have, such as Reference or Start frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceRole {
+    pub label: String,
+    /// The model's input a reference in this role fills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Always shown as its own row, with "Choose…" until it is filled, as
+    /// Start frame and End frame are.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub slot: bool,
+}
+
+/// One setting of a cell, drawn as a panel row of `kind`. Its value is the
+/// cell's `settings[key]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CellSetting {
+    pub key: String,
+    pub label: String,
+    #[serde(flatten)]
+    pub kind: RowKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

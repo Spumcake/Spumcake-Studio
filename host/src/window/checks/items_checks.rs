@@ -24,7 +24,7 @@ while IFS= read -r line; do
     *'"type":"command"'*) hero=h2; items ;;
     *'"type":"render"'*)
       id=$(printf '%s' "$line" | sed 's/.*"id":"\([^"]*\)".*/\1/')
-      echo "{\"type\":\"rendered\",\"id\":\"$id\",\"path\":\".inpainter/renders/easel/hero-$hero.png\",\"fingerprint\":\"$hero\"}" ;;
+      echo "{\"type\":\"rendered\",\"id\":\"$id\",\"path\":\".spumcake/renders/easel/hero-$hero.png\",\"fingerprint\":\"$hero\"}" ;;
   esac
 done
 "#;
@@ -115,7 +115,7 @@ fn a_needed_item_is_rendered_by_its_owner_and_handed_back() {
     window.until(|_| !sent(&dir, "provided").is_empty());
     let provided = &sent(&dir, "provided")[0];
     assert_eq!(provided["id"], "n1");
-    assert_eq!(provided["path"], ".inpainter/renders/easel/hero-h1.png");
+    assert_eq!(provided["path"], ".spumcake/renders/easel/hero-h1.png");
     assert_eq!(provided["fingerprint"], "h1");
     let _ = std::fs::remove_dir_all(dir);
 }

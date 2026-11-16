@@ -425,7 +425,7 @@ impl Session {
                 }
                 self.note_quit(&mut out);
             }
-            HostMessage::Project { folder } => {
+            HostMessage::Project { folder, .. } => {
                 let folder = PathBuf::from(folder);
                 let folder = folder.canonicalize().unwrap_or(folder);
                 // Images in memory stay where they are; otherwise they go
@@ -436,7 +436,7 @@ impl Session {
                         // was known are not needed any more.
                         let _ = std::fs::remove_dir_all(&self.cache);
                     }
-                    self.cache = folder.join(".inpainter").join("cache").join("image-generator");
+                    self.cache = folder.join(protocol::PROJECT_DIR).join("cache").join("image-generator");
                     // Rows a stroke left there in an earlier run are not
                     // needed.
                     for entry in std::fs::read_dir(&self.cache).into_iter().flatten().flatten() {
@@ -1327,7 +1327,7 @@ impl Session {
         let _ = std::fs::remove_dir_all(&self.cache);
         self.in_memory = false;
         self.cache = match &self.project {
-            Some(folder) => folder.join(".inpainter").join("cache").join("image-generator"),
+            Some(folder) => folder.join(protocol::PROJECT_DIR).join("cache").join("image-generator"),
             None => scratch_folder(),
         };
         for image in &mut self.images {
@@ -2839,7 +2839,7 @@ mod tests {
         let folder = folder.canonicalize().unwrap();
         let mut session = Session::launch();
         let _ = session.greeting();
-        session.handle(HostMessage::Project { folder: folder.display().to_string() });
+        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         let labels: Vec<String> = declare::menu(&session).into_iter().map(|row| row.label).collect();
         assert!(!labels.iter().any(|label| label.starts_with("Save")), "{labels:?}");
         command(&mut session, "add_layer", json!({}));
@@ -3089,7 +3089,7 @@ mod tests {
         let folder = folder.canonicalize().unwrap();
         let mut session = Session::launch();
         let _ = session.greeting();
-        session.handle(HostMessage::Project { folder: folder.display().to_string() });
+        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         command(&mut session, "tool", json!({ "tool": "brush" }));
         stroke(&mut session, [100.0, 100.0], [300.0, 100.0]);
         // Due, a write waits for the program to be idle, never a message.
@@ -3320,7 +3320,7 @@ mod tests {
         let folder = folder.canonicalize().unwrap();
         let mut session = Session::launch();
         let _ = session.greeting();
-        session.handle(HostMessage::Project { folder: folder.display().to_string() });
+        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         command(&mut session, "film_new", json!({}));
         command(&mut session, "add_layer", json!({}));
         command(&mut session, "film_duplicate", json!({ "image": 1 }));
@@ -3332,7 +3332,7 @@ mod tests {
         assert!(replies.iter().any(|reply| matches!(reply, AppMessage::Kept { path: Some(_), error: None, .. })));
 
         let mut again = Session::restored();
-        again.handle(HostMessage::Project { folder: folder.display().to_string() });
+        again.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         let messages = again.handle(HostMessage::Open { path: Some(path.display().to_string()) });
         let film = film_of(&messages);
         let names: Vec<&str> = film.items.iter().map(|item| item.name.as_str()).collect();
@@ -3632,7 +3632,7 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let folder = folder.canonicalize().unwrap();
         let mut session = patterned(64, 48, 2, 1, 0);
-        session.handle(HostMessage::Project { folder: folder.display().to_string() });
+        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         preview(&mut session, "grade_exposure", PropValue::Number(0.75));
         session.take_live();
         session.images[0].unwritten_since = Some(Instant::now() - WRITE_AFTER * 2);

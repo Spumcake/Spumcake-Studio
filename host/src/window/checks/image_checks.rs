@@ -22,7 +22,7 @@ fn image_of(cell: &protocol::Cell) -> String {
     cell.output
         .iter()
         .find_map(|part| match part {
-            CellPart::Path { path, media_type } if media_type == "image/png" => Some(path.clone()),
+            CellPart::Path { path, media_type, .. } if media_type == "image/png" => Some(path.clone()),
             _ => None,
         })
         .expect("the cell has no image")

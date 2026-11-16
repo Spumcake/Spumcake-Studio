@@ -177,7 +177,7 @@ impl Boards {
 }
 
 /// Writes a clip's frame as a PNG at
-/// `.inpainter/renders/storyboard-generator/<item>-<fingerprint>.png`, never
+/// `.spumcake/renders/storyboard-generator/<item>-<fingerprint>.png`, never
 /// over an existing one. Returns its path inside the project.
 pub fn render(
     boards: &mut Boards,
@@ -194,7 +194,7 @@ pub fn render(
     let fingerprint = boards
         .fingerprint(looker, record, clip, which)
         .ok_or_else(|| "The frame could not be drawn.".to_string())?;
-    let relative = format!(".inpainter/renders/storyboard-generator/{}-{fingerprint}.png", item_id(clip.id, which));
+    let relative = format!("{}/renders/storyboard-generator/{}-{fingerprint}.png", protocol::PROJECT_DIR, item_id(clip.id, which));
     let path = project.join(&relative);
     if !path.is_file() {
         let [x, y, width, height] = crate::sheet::field_in(film, clip);

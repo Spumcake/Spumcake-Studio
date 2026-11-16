@@ -38,7 +38,7 @@ fn new_recipes_take_names_free_in_the_tabs_and_the_folder() {
         node: None,
         viewport: [800.0, 600.0],
     };
-    for message in [protocol::HostMessage::Project { folder: folder.display().to_string() }, new_recipe.clone(), new_recipe] {
+    for message in [protocol::HostMessage::Project { folder: folder.display().to_string(), skills: false }, new_recipe.clone(), new_recipe] {
         writeln!(input, "{}", serde_json::to_string(&message).expect("json")).expect("sent");
     }
     let deadline = Instant::now() + Duration::from_secs(10);

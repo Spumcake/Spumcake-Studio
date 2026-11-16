@@ -101,6 +101,8 @@ pub(crate) enum SessionChoice {
     NewSession { project: String },
     /// The New Project form's Change: choose a folder.
     ChooseLocation,
+    /// Open folder…: choose an existing folder and open it as a project.
+    OpenFolder,
     CreateProject { name: String, location: String },
     RenameSession { project: String, session: String, name: String },
     RenameProject { project: String, name: String },
@@ -314,6 +316,9 @@ pub(crate) fn nav_row(ui: &mut egui::Ui, rect: Rect, icon: Option<&str>, label: 
     response
 }
 
+/// The menu's row that opens an existing folder as a project.
+pub(crate) const OPEN_FOLDER: &str = "Open folder…";
+
 fn nav(ui: &mut egui::Ui, column: Rect, menu: &mut SessionMenu, events: &mut Vec<SessionChoice>) {
     let inner = column.shrink2(vec2(12.0, PAD));
     let mut y = inner.top();
@@ -329,6 +334,7 @@ fn nav(ui: &mut egui::Ui, column: Rect, menu: &mut SessionMenu, events: &mut Vec
         ("trash", "Trash", Page::Trash),
     ];
     for (icon, label, page) in rows {
+        let new_project = page == Page::NewProject;
         let rect = next(NAV_ROW);
         if nav_row(ui, rect, Some(icon), label, menu.page == page, label).clicked() {
             if page == Page::NewProject {
@@ -336,6 +342,12 @@ fn nav(ui: &mut egui::Ui, column: Rect, menu: &mut SessionMenu, events: &mut Vec
                 menu.start_new_project(&root);
             } else {
                 menu.page = page;
+            }
+        }
+        if new_project {
+            let rect = next(NAV_ROW);
+            if nav_row(ui, rect, Some("open-in-window"), OPEN_FOLDER, false, OPEN_FOLDER).clicked() {
+                events.push(SessionChoice::OpenFolder);
             }
         }
     }

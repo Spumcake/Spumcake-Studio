@@ -23,7 +23,7 @@ pub(crate) const UNTITLED: &str = "Untitled Project";
 /// The file each project is stored as.
 const FILE_NAME: &str = "project.json";
 const PROJECTS_FILE: &str = "projects.json";
-const PROJECT_META_DIR: &str = ".inpainter";
+const PROJECT_META_DIR: &str = protocol::PROJECT_DIR;
 const SESSIONS_DIR: &str = "sessions";
 /// The lock that keeps Studio to one window.
 const LOCK_NAME: &str = "lock";
@@ -101,7 +101,7 @@ pub(crate) struct KnownProject {
     pub archived_at: Option<u64>,
 }
 
-/// `.inpainter/project.json`.
+/// `.spumcake/project.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ProjectRecord {
     pub version: u32,
@@ -109,7 +109,7 @@ pub(crate) struct ProjectRecord {
     pub name: String,
 }
 
-/// `.inpainter/sessions/<id>.json`.
+/// `.spumcake/sessions/<id>.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionFile {
     pub version: u32,
@@ -1232,6 +1232,7 @@ pub(crate) fn create_project_at(data: &Path, folder: &Path, name: &str) -> Resul
         return Err(reason);
     }
     std::fs::create_dir_all(project_meta_dir(folder)).map_err(|error| error.to_string())?;
+    write_meta_ignore(folder)?;
     let record = ProjectRecord {
         version: VERSION,
         id: protocol::cell_id(),
@@ -1250,6 +1251,108 @@ pub(crate) fn create_project_at(data: &Path, folder: &Path, name: &str) -> Resul
         locked: false,
         archived_at: None,
     });
+    list.current_project = Some(record.id.clone());
+    list.current_session = Some(session.id.clone());
+    list.write(data)?;
+    Ok((record, session))
+}
+
+/// What Studio's own folder leaves out of git: the scratch caches. The
+/// rest, the project's record and its sessions, is committed with the
+/// project.
+const META_IGNORE: &str = "cache/\n";
+
+/// Writes the `.gitignore` inside Studio's own folder, when it has none, so
+/// nothing at the project's root changes.
+pub(crate) fn write_meta_ignore(folder: &Path) -> Result<(), String> {
+    let path = project_meta_dir(folder).join(".gitignore");
+    if path.exists() {
+        return Ok(());
+    }
+    write_atomic(&path, META_IGNORE.to_string())
+}
+
+/// Moves a project's folder from its name before 2026-11-16 to Studio's own
+/// folder, when only the old one is there. Returns whether it moved.
+pub(crate) fn adopt_old_meta(folder: &Path) -> Result<bool, String> {
+    let old = folder.join(protocol::OLD_PROJECT_DIR);
+    let new = project_meta_dir(folder);
+    if !old.is_dir() || new.exists() {
+        return Ok(false);
+    }
+    std::fs::rename(&old, &new).map_err(|error| error.to_string())?;
+    write_meta_ignore(folder)?;
+    Ok(true)
+}
+
+/// Opens an existing folder as a project: one Studio already knows, one made
+/// elsewhere with its own record, or any other folder, which becomes a
+/// project named after it with its first session. Studio adds only its own
+/// folder; nothing else in `folder` is changed. The project becomes current.
+pub(crate) fn open_folder_as_project(data: &Path, folder: &Path) -> Result<(ProjectRecord, SessionFile), String> {
+    if !folder.is_absolute() {
+        return Err("Choose a full location.".to_string());
+    }
+    if !folder.is_dir() {
+        return Err("That is not a folder.".to_string());
+    }
+    let folder = folder.canonicalize().map_err(|error| error.to_string())?;
+    adopt_old_meta(&folder)?;
+    let mut list = ProjectsList::load(data)?;
+    let same_folder = |entry: &KnownProject| Path::new(&entry.folder).canonicalize().ok().as_deref() == Some(folder.as_path());
+    let record = match ProjectRecord::read(&folder) {
+        Ok(mut record) => {
+            // A copied project keeps its record's id; give the copy its own,
+            // so the two are never mistaken for each other.
+            let taken = list.projects.iter().any(|entry| entry.id == record.id && !same_folder(entry));
+            if taken {
+                record.id = protocol::cell_id();
+                record.write(&folder)?;
+            }
+            record
+        }
+        Err(ReadError::Version(version)) => return Err(version_line(version)),
+        Err(ReadError::Other(_)) if project_record_path(&folder).exists() => {
+            return Err("Its project file could not be read.".to_string());
+        }
+        Err(ReadError::Other(_)) => {
+            std::fs::create_dir_all(project_meta_dir(&folder)).map_err(|error| error.to_string())?;
+            let name = folder.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+            let record = ProjectRecord {
+                version: VERSION,
+                id: protocol::cell_id(),
+                name: if name.trim().is_empty() { UNTITLED.to_string() } else { name },
+            };
+            record.write(&folder)?;
+            record
+        }
+    };
+    write_meta_ignore(&folder)?;
+    let session = match list_session_summaries(&folder).into_iter().find(|summary| summary.trashed_at.is_none()) {
+        Some(summary) => SessionFile::read(&folder, &summary.id).map_err(|error| match error {
+            ReadError::Version(version) => version_line(version),
+            ReadError::Other(reason) => reason,
+        })?,
+        None => new_session(&folder, UNTITLED_SESSION.to_string())?,
+    };
+    list.version = VERSION;
+    match list.projects.iter_mut().find(|entry| entry.id == record.id) {
+        Some(entry) => {
+            entry.folder = folder.display().to_string();
+            entry.last_used = now_seconds();
+            entry.trashed_at = None;
+            entry.archived_at = None;
+        }
+        None => list.projects.push(KnownProject {
+            id: record.id.clone(),
+            folder: folder.display().to_string(),
+            last_used: now_seconds(),
+            trashed_at: None,
+            pinned: false,
+            locked: false,
+            archived_at: None,
+        }),
+    }
     list.current_project = Some(record.id.clone());
     list.current_session = Some(session.id.clone());
     list.write(data)?;
@@ -1281,6 +1384,7 @@ pub(crate) fn known_projects(data: &Path) -> Vec<Known> {
         .into_iter()
         .filter_map(|entry| {
             let folder = PathBuf::from(&entry.folder);
+            let _ = adopt_old_meta(&folder);
             let record = ProjectRecord::read(&folder).ok()?;
             Some(Known { entry, folder, record })
         })
@@ -1614,6 +1718,65 @@ mod tests {
         let list = ProjectsList::load(&data).unwrap();
         assert_eq!(list.current_project.as_deref(), Some(record.id.as_str()));
         assert_eq!(list.current_session.as_deref(), Some(session.id.as_str()));
+        std::fs::remove_dir_all(&data).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Catches a folder of someone's work refused, or changed, when it is
+    /// opened as a project: Studio adds only its own folder, names the
+    /// project after the folder, and opens the same project again later.
+    #[test]
+    fn an_existing_folder_opens_as_a_project() {
+        let data = scratch("open-data");
+        let root = scratch("open-root");
+        let film = root.join("last-order");
+        std::fs::create_dir_all(film.join("library")).unwrap();
+        std::fs::write(film.join("library").join("take.png"), "pixels").unwrap();
+        assert!(open_folder_as_project(&data, Path::new("relative")).is_err());
+        assert!(open_folder_as_project(&data, &film.join("library").join("take.png")).is_err());
+
+        let (record, session) = open_folder_as_project(&data, &film).unwrap();
+        assert_eq!(record.name, "last-order");
+        assert_eq!(session.name, "Untitled Session");
+        assert_eq!(std::fs::read_to_string(film.join("library").join("take.png")).unwrap(), "pixels");
+        let mut added: Vec<String> = std::fs::read_dir(&film).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().to_string()).collect();
+        added.sort();
+        assert_eq!(added, [protocol::PROJECT_DIR, "library"]);
+        assert_eq!(std::fs::read_to_string(project_meta_dir(&film).join(".gitignore")).unwrap(), META_IGNORE);
+        let list = ProjectsList::load(&data).unwrap();
+        assert_eq!(list.current_project.as_deref(), Some(record.id.as_str()));
+
+        // Opened again, it is the same project and the same session.
+        let (again, same) = open_folder_as_project(&data, &film).unwrap();
+        assert_eq!(again.id, record.id);
+        assert_eq!(same.id, session.id);
+        assert_eq!(ProjectsList::load(&data).unwrap().projects.len(), 1);
+        std::fs::remove_dir_all(&data).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Catches a project from before 2026-11-16 left in its old folder, or a
+    /// copy of a project taken for the original.
+    #[test]
+    fn an_old_project_moves_and_a_copy_gets_its_own_id() {
+        let data = scratch("adopt-data");
+        let root = scratch("adopt-root");
+        let old = root.join("Old");
+        let (record, session) = create_project_at(&data, &old, "Old").unwrap();
+        std::fs::rename(project_meta_dir(&old), old.join(protocol::OLD_PROJECT_DIR)).unwrap();
+        let known = known_projects(&data);
+        assert_eq!(known.len(), 1, "the old project was not found");
+        assert!(project_meta_dir(&old).join(".gitignore").is_file());
+        assert!(!old.join(protocol::OLD_PROJECT_DIR).exists());
+        assert_eq!(SessionFile::read(&old, &session.id).unwrap().id, session.id);
+
+        let copy = root.join("Copy");
+        std::fs::create_dir_all(project_meta_dir(&copy).join(SESSIONS_DIR)).unwrap();
+        std::fs::copy(project_record_path(&old), project_record_path(&copy)).unwrap();
+        let (copied, _) = open_folder_as_project(&data, &copy).unwrap();
+        assert_ne!(copied.id, record.id);
+        assert_eq!(copied.name, "Old");
+        assert_eq!(known_projects(&data).len(), 2);
         std::fs::remove_dir_all(&data).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
     }

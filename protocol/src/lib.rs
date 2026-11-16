@@ -23,6 +23,13 @@ pub use tools::*;
 /// which version it speaks; the host accepts only this one.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Studio's own folder inside every project, relative to the project.
+pub const PROJECT_DIR: &str = ".spumcake";
+
+/// The name that folder had before 2026-11-16; Studio moves it to
+/// [`PROJECT_DIR`] when it opens the project.
+pub const OLD_PROJECT_DIR: &str = ".inpainter";
+
 /// What a sub-application writes to the host, on its standard output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -153,8 +160,34 @@ pub enum AppMessage {
     Timeline(Timeline),
     /// What a canvas tab's stage shows besides its drawing, replaced whole.
     Stage(Stage),
-    /// That tab's notice cards, replaced whole.
-    Notices { tab: String, notices: Vec<Notice> },
+    /// That tab's notice cards, replaced whole, in `corner`.
+    Notices {
+        tab: String,
+        notices: Vec<Notice>,
+        #[serde(default, skip_serializing_if = "NoticeCorner::is_default")]
+        corner: NoticeCorner,
+    },
+    /// The answer to `preview`: a small image of the file, words for its
+    /// corner such as "8.0 s", and, for a sound, its cues; or `error`, a
+    /// sentence.
+    Previewed {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thumbnail: Option<Thumbnail>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        badge: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cues: Vec<Cue>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Puts a prepared request, such as "use this take", in the
+    /// conversation's composer with these items, for the user to send.
+    AskAssistant {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        items: Vec<ItemRef>,
+    },
 }
 
 /// The cell, and its image's path relative to the project, that new work
@@ -271,16 +304,30 @@ pub enum HostMessage {
     /// Make sure that tab's file is written. The answer is `kept`.
     Keep { tab: String },
     /// The project's folder, as an absolute path. New activities are created
-    /// in it, and paths outside it are refused.
-    Project { folder: String },
+    /// in it, and paths outside it are refused. `skills` says it is a Skills
+    /// project, whose requests run through Spumcake-Skills' scripts.
+    Project {
+        folder: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        skills: bool,
+    },
     /// The window is closing. Exit.
     Shutdown,
     /// The person's edit of a cell's prompt, when it loses focus and before
-    /// a run. Never per keystroke. One undo step for the cell's owner.
+    /// a run. Never per keystroke. One undo step for the cell's owner. A
+    /// draft's edit on the Prompt page also carries its `settings`,
+    /// `endpoint`, and `model`, kept with the draft until its first run;
+    /// an edit to a step goes to the step, never here.
     EditCell {
         tab: String,
         cell: String,
         input: Vec<CellPart>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// A run finished, failed, or was stopped. The owner keeps it as a new
     /// version, made from `input`, the prompt that actually ran. A run is
@@ -365,6 +412,13 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         media_type: Option<String>,
     },
+    /// Every round that cell has made, oldest first, replacing those sent
+    /// before. In a Skills project it takes the place of `cell_result`.
+    Takes { cell: ItemRef, rounds: Vec<Round> },
+    /// Asks a workspace whose `edits` covers `media_type` for a small image
+    /// of that file, such as a video or sound reference's. The answer is
+    /// `previewed`.
+    Preview { id: String, path: String, media_type: String },
 }
 
 /// What a selection message does, as the drawing surface's select tool does it.
@@ -553,6 +607,8 @@ impl Declaration {
             | AppMessage::Timeline(_)
             | AppMessage::Stage(_)
             | AppMessage::Notices { .. }
+            | AppMessage::Previewed { .. }
+            | AppMessage::AskAssistant { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -574,6 +630,15 @@ pub fn parse_app_message(line: &str) -> Result<AppMessage, ParseError> {
     if let AppMessage::Cells { cells, .. } = &message
         && cells.iter().any(|cell| cell.state == CellState::Running)
     {
+        return Err(refused());
+    }
+    // A step lives in `canon.sql` alone: a cell never carries a second copy.
+    let copies = match &message {
+        AppMessage::Cells { cells, .. } => cells.iter().any(Cell::copies_its_step),
+        AppMessage::RunCell { content: Some(cell), .. } => cell.copies_its_step(),
+        _ => false,
+    };
+    if copies {
         return Err(refused());
     }
     Ok(message)
@@ -888,6 +953,8 @@ mod tests {
                 CellPart::Path {
                     path: "/tmp/still.png".into(),
                     media_type: "image/png".into(),
+                    role: None,
+                    field: None,
                 },
             ],
             endpoint: Some("openrouter".into()),
@@ -896,6 +963,8 @@ mod tests {
             output: vec![CellPart::Path {
                 path: "/tmp/out.png".into(),
                 media_type: "image/png".into(),
+                role: None,
+                field: None,
             }],
             state: CellState::Done,
             error: None,
@@ -905,7 +974,7 @@ mod tests {
                 endpoint: Some("openrouter".into()),
                 model: Some("stand-in/model".into()),
                 effort: Some("low".into()),
-                output: vec![CellPart::Path { path: "/tmp/out.png".into(), media_type: "image/png".into() }],
+                output: vec![CellPart::Path { path: "/tmp/out.png".into(), media_type: "image/png".into(), role: None, field: None }],
                 state: CellState::Done,
                 error: None,
                 time: 1_793_146_000,
@@ -914,6 +983,7 @@ mod tests {
             }],
             settings: None,
             current: Some(0),
+            step: None,
         };
         let unknown = Cell {
             id: "22222222-2222-4222-8222-222222222222".into(),
@@ -929,6 +999,7 @@ mod tests {
             versions: Vec::new(),
             settings: None,
             current: None,
+            step: None,
         };
         round_trip_app(AppMessage::Cells {
             tab: "recipe".into(),
@@ -997,7 +1068,7 @@ mod tests {
             }],
         });
         round_trip_app(AppMessage::Items { path: "Gone.vid".into(), items: Vec::new() });
-        round_trip_app(AppMessage::Rendered { id: "r".into(), path: Some(".inpainter/renders/x/b3-b1.png".into()), fingerprint: Some("b1".into()), error: None });
+        round_trip_app(AppMessage::Rendered { id: "r".into(), path: Some(".spumcake/renders/x/b3-b1.png".into()), fingerprint: Some("b1".into()), error: None });
         round_trip_app(AppMessage::Rendered { id: "r".into(), path: None, fingerprint: None, error: Some("No such board.".into()) });
         round_trip_app(AppMessage::Need { id: "n".into(), item: board.clone(), media_type: "image/png".into() });
         round_trip_app(AppMessage::Pick { id: "p".into(), media_types: vec!["image/png".into()] });
@@ -1016,7 +1087,7 @@ mod tests {
         round_trip_host(HostMessage::Picked { id: "p".into(), item: None, media_type: None });
         // An item part reads as an item, not as a path or an unknown part.
         let part: CellPart = serde_json::from_str(r#"{"item":{"path":"Pilot.smx","item":"b3"},"media_type":"image/png","use":"result"}"#).unwrap();
-        assert_eq!(part, CellPart::Item { item: board, media_type: "image/png".into(), part: Some(CellUse::Result) });
+        assert_eq!(part, CellPart::Item { item: board, media_type: "image/png".into(), part: Some(CellUse::Result), role: None, field: None });
     }
 
     /// Every timeline, stage, and notice message round-trips, so a field
@@ -1037,6 +1108,7 @@ mod tests {
             read_only: false,
             menu: Vec::new(),
             drop: DropRule::Push,
+            accepts: None,
             content: RowContent::Items {
                 items: vec![TimelineItem {
                     id: "c1".into(),
@@ -1056,6 +1128,9 @@ mod tests {
                     menu: Vec::new(),
                     open: Some(Action::new("edit_clip")),
                     movable: true,
+                    kind: None,
+                    earliest_start: None,
+                    latest_end: None,
                 }],
             },
         };
@@ -1070,7 +1145,7 @@ mod tests {
         };
         round_trip_app(AppMessage::Timeline(Timeline {
             tab: "1".into(),
-            header: vec![ToolItem::Popover { icon: "onion".into(), tip: "Onion skin".into(), rows: Vec::new() }],
+            header: vec![ToolItem::Popover { icon: "onion".into(), tip: "Onion skin".into(), rows: Vec::new(), action: None, selected: false, enabled: true }],
             pages: vec![TimelinePage { label: "Timeline".into(), selected: true, action: Action::new("page") }],
             back: Some(TimelineBack { path: vec!["Film".into(), "Shot 1".into()], action: Action::new("back") }),
             ruler: Ruler { fps: 24.0, length: 240, unit: RulerUnit::Timecode },
@@ -1113,6 +1188,7 @@ mod tests {
                 actions: vec![NoticeAction { label: "Cancel".into(), action: Action::new("cancel_export") }],
                 close: None,
             }],
+            corner: NoticeCorner::BottomRight,
         });
         round_trip_host(HostMessage::TimelineGesture {
             tab: "1".into(),
@@ -1170,6 +1246,9 @@ mod tests {
             tab: "recipe".into(),
             cell: "c1".into(),
             input: vec![CellPart::Text { text: "A lighthouse.".into() }],
+            settings: None,
+            endpoint: None,
+            model: None,
         });
         round_trip_host(HostMessage::SelectCell {
             tab: "recipe".into(),
@@ -1181,11 +1260,153 @@ mod tests {
         });
     }
 
+    /// Every declaration and message of the Prompt page and its rounds
+    /// round-trips, so a field cannot be dropped quietly.
+    #[test]
+    fn prompt_page_and_rounds_round_trip() {
+        let cell = ItemRef { path: "work/Keeper.ipx".into(), item: Some("c1".into()) };
+        let mut step = Cell::text("c1", "");
+        step.input = Vec::new();
+        step.step = Some(StepRef { chain: "keeper".into(), step: "3".into() });
+        let mut draft = Cell::text("c2", "The keeper at the door.");
+        draft.kind = IMAGE_KIND.into();
+        draft.input.push(CellPart::Path { path: "library/door.png".into(), media_type: "image/png".into(), role: Some("Start frame, the keeper".into()), field: Some("image_url".into()) });
+        draft.input.push(CellPart::Item { item: cell.clone(), media_type: "image/png".into(), part: None, role: Some("Reference".into()), field: None });
+        round_trip_app(AppMessage::Cells { tab: "1".into(), cells: vec![step.clone(), draft], selected: None });
+        round_trip_app(AppMessage::RunCell { tab: String::new(), cell: "c1".into(), content: Some(step.clone()), at: Some(cell.clone()) });
+        let page = Properties {
+            open: true,
+            toggle: Action::new("toggle"),
+            tip: "Properties".into(),
+            finish: Action::new("finish"),
+            back: None,
+            layers: None,
+            sections: Vec::new(),
+            pages: vec![PanelPage { label: "Prompt".into(), active: true, enabled: true, action: None }],
+            cell: Some(PanelCell {
+                cell: "c1".into(),
+                hint: "Describe the image…".into(),
+                roles: vec![
+                    ReferenceRole { label: "Reference".into(), field: None, slot: false },
+                    ReferenceRole { label: "Start frame".into(), field: Some("image_url".into()), slot: true },
+                ],
+                reference_types: vec!["image/png".into(), "video/mp4".into()],
+                reference_menu: vec![MenuEntry { label: "Open".into(), icon: None, enabled: true, divider: false, action: Some(Action::new("open_reference")), submenu: Vec::new(), rename: false }],
+                settings: vec![
+                    CellSetting { key: "seconds".into(), label: "Duration".into(), kind: RowKind::Number { min: 1.0, max: 10.0, percent: false, places: 1, centered: false } },
+                    CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Choice { options: vec!["1024".into()], segmented: true, preview: ChoicePreview::Label } },
+                ],
+                menu: Vec::new(),
+            }),
+        };
+        round_trip_app(AppMessage::Properties(page));
+        let Ok(AppMessage::Properties(plain)) = parse_app_message(r#"{"type":"properties","open":true,"toggle":{"id":"t"},"tip":"","finish":{"id":"f"},"sections":[]}"#) else {
+            panic!("a panel without a cell did not read");
+        };
+        assert_eq!(plain.cell, None);
+        round_trip_host(HostMessage::EditCell {
+            tab: "1".into(),
+            cell: "c2".into(),
+            input: vec![CellPart::Text { text: "A darker keeper.".into() }],
+            settings: Some(serde_json::json!({"seconds": 8})),
+            endpoint: Some("fal".into()),
+            model: Some("stand-in/video".into()),
+        });
+        round_trip_host(HostMessage::Project { folder: "/p".into(), skills: true });
+        let Ok(HostMessage::Project { skills, .. }) = parse_host_message(r#"{"type":"project","folder":"/p"}"#) else {
+            panic!("a project without the flag did not read");
+        };
+        assert!(!skills);
+        let sent = SentReference { path: "library/door.png".into(), role: Some("Start frame, the keeper".into()) };
+        round_trip_host(HostMessage::Takes {
+            cell: cell.clone(),
+            rounds: vec![
+                Round {
+                    request: "r-14".into(),
+                    number: 14,
+                    model: "openai/gpt-image-2.5".into(),
+                    prompt: "The keeper at the door.".into(),
+                    references: vec![sent.clone()],
+                    left_out: vec![SentReference { path: "library/hat.png".into(), role: None }],
+                    state: RoundState::Done,
+                    started: Some(1_793_146_000),
+                    count: None,
+                    takes: vec![TakeFile { path: "library/keeper-14-1.png".into(), media_type: "image/png".into(), canon: true }],
+                    error: None,
+                    report: Some("requests/r-14.md".into()),
+                },
+                Round {
+                    request: "r-15".into(),
+                    number: 15,
+                    model: "openai/gpt-image-2.5".into(),
+                    prompt: String::new(),
+                    references: Vec::new(),
+                    left_out: Vec::new(),
+                    state: RoundState::Running,
+                    started: None,
+                    count: Some(4),
+                    takes: Vec::new(),
+                    error: None,
+                    report: None,
+                },
+            ],
+        });
+        for state in [RoundState::Pending, RoundState::Failed, RoundState::Cancelled] {
+            let text = serde_json::to_string(&state).unwrap();
+            assert_eq!(serde_json::from_str::<RoundState>(&text).unwrap(), state);
+        }
+        round_trip_host(HostMessage::Preview { id: "v1".into(), path: "library/beat.wav".into(), media_type: "audio/wav".into() });
+        round_trip_app(AppMessage::Previewed {
+            id: "v1".into(),
+            thumbnail: Some(Thumbnail { path: "/run/w.rgba".into(), width: 120, height: 40, revision: 1 }),
+            badge: "8.0 s".into(),
+            cues: vec![Cue { at: 3.25, label: "Door".into() }],
+            error: None,
+        });
+        round_trip_app(AppMessage::Previewed { id: "v2".into(), thumbnail: None, badge: String::new(), cues: Vec::new(), error: Some("This file could not be read.".into()) });
+        round_trip_app(AppMessage::AskAssistant { text: "Use this take.".into(), items: vec![cell] });
+        round_trip_app(AppMessage::Notices { tab: "1".into(), notices: Vec::new(), corner: NoticeCorner::BottomLeft });
+        let Ok(AppMessage::Notices { corner, .. }) = parse_app_message(r#"{"type":"notices","tab":"1","notices":[]}"#) else {
+            panic!("notices without a corner did not read");
+        };
+        assert_eq!(corner, NoticeCorner::BottomRight);
+        // The existing dialog question keeps its own type.
+        let line = encode_app_message(&AppMessage::AskAssistant { text: "x".into(), items: Vec::new() });
+        assert!(line.contains("\"type\":\"ask_assistant\""), "{line}");
+    }
+
+    /// Catches a second copy of a step: a cell with a step that also
+    /// carries a prompt, versions, a result, settings, an endpoint, or a
+    /// model is refused, in `cells` and in `run_cell`.
+    #[test]
+    fn a_cell_with_a_step_and_a_copy_of_it_is_refused() {
+        let step = r#""step":{"chain":"keeper","step":"3"}"#;
+        let bare = format!(r#"{{"type":"cells","tab":"1","cells":[{{"id":"c1","kind":"image","state":"idle",{step}}}]}}"#);
+        assert!(parse_app_message(&bare).is_ok(), "a bare step was refused");
+        for copy in [
+            r#""input":[{"text":"A copy."}]"#,
+            r#""output":[{"path":"a.png","media_type":"image/png"}]"#,
+            r#""versions":[{"id":"v","state":"done"}]"#,
+            r#""settings":{"seed":1}"#,
+            r#""endpoint":"fal""#,
+            r#""model":"stand-in/image""#,
+        ] {
+            let cells = format!(r#"{{"type":"cells","tab":"1","cells":[{{"id":"c1","kind":"image","state":"idle",{step},{copy}}}]}}"#);
+            assert!(parse_app_message(&cells).is_err(), "a step with {copy} was read");
+            let run = format!(r#"{{"type":"run_cell","tab":"","cell":"c1","content":{{"id":"c1","kind":"image","state":"idle",{step},{copy}}}}}"#);
+            assert!(parse_app_message(&run).is_err(), "a run of a step with {copy} was read");
+        }
+        // A draft carries its own prompt and settings.
+        let draft = r#"{"type":"cells","tab":"1","cells":[{"id":"c2","kind":"image","state":"idle","input":[{"text":"A draft."}],"settings":{"seed":1},"model":"stand-in/image"}]}"#;
+        assert!(parse_app_message(draft).is_ok());
+    }
+
     /// `project` and `kept`, including a failed `keep`, survive a round trip.
     #[test]
     fn project_and_kept_round_trip() {
         round_trip_host(HostMessage::Project {
             folder: "/home/someone/Inpainter/Lighthouse".into(),
+            skills: false,
         });
         round_trip_app(AppMessage::Kept {
             tab: "1".into(),

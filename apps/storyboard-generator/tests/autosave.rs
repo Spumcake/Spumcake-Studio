@@ -42,7 +42,7 @@ fn a_change_survives_a_kill_with_no_host() {
     let send = |input: &mut std::process::ChildStdin, message: protocol::HostMessage| {
         writeln!(input, "{}", serde_json::to_string(&message).expect("json")).expect("sent");
     };
-    send(&mut input, protocol::HostMessage::Project { folder: folder.display().to_string() });
+    send(&mut input, protocol::HostMessage::Project { folder: folder.display().to_string(), skills: false });
     send(
         &mut input,
         protocol::HostMessage::Command {

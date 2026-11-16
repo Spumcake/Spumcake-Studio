@@ -107,8 +107,23 @@ pub struct TimelineRow {
     /// What a drop onto items already on this row does; Shift does the other.
     #[serde(default)]
     pub drop: DropRule,
+    /// The kind of item this row takes, such as "sound": an item whose
+    /// `kind` differs is never previewed as landing here. None takes any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts: Option<String>,
     #[serde(flatten)]
     pub content: RowContent,
+}
+
+impl TimelineRow {
+    /// Whether `item` may land on this row: either has no kind, or both
+    /// name the same one.
+    pub fn takes(&self, item: &TimelineItem) -> bool {
+        match (&self.accepts, &item.kind) {
+            (Some(accepts), Some(kind)) => accepts == kind,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,6 +196,33 @@ pub struct TimelineItem {
     /// Whether it can be dragged and its edges moved.
     #[serde(default = "yes")]
     pub movable: bool,
+    /// What kind of item it is, matched against a row's `accepts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The earliest frame its start edge may be dragged to, such as where
+    /// its sound begins. A move is not limited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_start: Option<u32>,
+    /// The latest frame its end edge may be dragged to, such as where its
+    /// sound ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_end: Option<u32>,
+}
+
+impl TimelineItem {
+    /// `frames`, an edge's move, cut short so the edge stops at its limit.
+    pub fn limit_edge(&self, edge: Edge, frames: i64) -> i64 {
+        match edge {
+            Edge::Start => match self.earliest_start {
+                Some(earliest) => frames.max(i64::from(earliest) - i64::from(self.start)),
+                None => frames,
+            },
+            Edge::End => match self.latest_end {
+                Some(latest) => frames.min(i64::from(latest) - i64::from(self.start) - i64::from(self.length)),
+                None => frames,
+            },
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -422,7 +464,7 @@ pub enum Overlay {
     Dim { min: [f64; 2], max: [f64; 2] },
 }
 
-/// A card at the stage's bottom right.
+/// A card in a corner of the stage, as `notices` places it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Notice {
     pub id: String,
@@ -450,4 +492,64 @@ pub enum NoticeState {
 pub struct NoticeAction {
     pub label: String,
     pub action: Action,
+}
+
+/// Which corner of the working area a tab's notices sit in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeCorner {
+    #[default]
+    BottomRight,
+    /// Each card fits its text, between 240 and 480 points wide.
+    BottomLeft,
+}
+
+impl NoticeCorner {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(kind: Option<&str>) -> TimelineItem {
+        let line = r#"{"id":"a","start":10,"length":20,"fill":[0,0,0]}"#;
+        let mut item: TimelineItem = serde_json::from_str(line).expect("an item from before kinds and limits reads");
+        item.kind = kind.map(String::from);
+        item
+    }
+
+    /// Catches a sound previewed as landing on a row of clips, and a row or
+    /// an item without a kind that stops taking anything.
+    #[test]
+    fn an_item_lands_only_where_its_kind_is_taken() {
+        let line = r#"{"id":"s","name":"Sound 1","color":[1,2,3],"content":"items","items":[]}"#;
+        let mut row: TimelineRow = serde_json::from_str(line).expect("a row from before accepts reads");
+        assert_eq!(row.accepts, None);
+        assert!(row.takes(&item(Some("sound"))));
+        row.accepts = Some("sound".into());
+        assert!(row.takes(&item(Some("sound"))));
+        assert!(!row.takes(&item(Some("clip"))));
+        assert!(row.takes(&item(None)));
+        let text = serde_json::to_string(&row).unwrap();
+        assert_eq!(serde_json::from_str::<TimelineRow>(&text).unwrap(), row);
+    }
+
+    /// Catches an edge dragged past its sound's ends, and a limit that
+    /// holds back an edge that has room.
+    #[test]
+    fn an_edge_stops_at_its_limits() {
+        let mut item = item(Some("sound"));
+        assert_eq!(item.limit_edge(Edge::Start, -50), -50);
+        item.earliest_start = Some(4);
+        item.latest_end = Some(40);
+        assert_eq!(item.limit_edge(Edge::Start, -50), -6);
+        assert_eq!(item.limit_edge(Edge::Start, 3), 3);
+        assert_eq!(item.limit_edge(Edge::End, 50), 10);
+        assert_eq!(item.limit_edge(Edge::End, -5), -5);
+        let text = serde_json::to_string(&item).unwrap();
+        assert_eq!(serde_json::from_str::<TimelineItem>(&text).unwrap(), item);
+    }
 }

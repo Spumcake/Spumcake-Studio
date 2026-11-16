@@ -1880,6 +1880,7 @@ mod tests {
             read_only: false,
             menu: Vec::new(),
             drop: DropRule::Replace,
+            accepts: None,
             content,
         };
         let item = TimelineItem {
@@ -1900,6 +1901,9 @@ mod tests {
             menu: Vec::new(),
             open: Some(Action::new("open")),
             movable: true,
+            kind: None,
+            earliest_start: None,
+            latest_end: None,
         };
         Timeline {
             tab: "t1".into(),
