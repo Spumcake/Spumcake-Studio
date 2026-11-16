@@ -95,9 +95,41 @@ struct State {
     began: Option<(Instant, usize)>,
     /// Why the output stopped, when it did.
     failed: Option<String>,
+    /// A silent player's time since play began, once a test has called
+    /// `advance`: from then on only `advance` moves its clock.
+    advanced: Option<Duration>,
+    /// What was last played, and which frame was last scrubbed.
+    played: Option<Played>,
+    scrubbed: Option<u32>,
+}
+
+/// What a player was last asked to play: from a frame, to a frame or
+/// until paused, once or looping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Played {
+    pub from: u32,
+    pub to: Option<u32>,
+    pub looping: bool,
 }
 
 impl State {
+    fn new() -> State {
+        State {
+            tracks: Vec::new(),
+            position: 0,
+            end: Some(0),
+            start: 0,
+            looping: false,
+            playing: false,
+            heard: None,
+            began: None,
+            failed: None,
+            advanced: None,
+            played: None,
+            scrubbed: None,
+        }
+    }
+
     /// Fills `out` from the position on, looping back at the end of a
     /// looped range so the seam is never heard.
     fn fill(&mut self, rate: u32, fps: (u32, u32), out: &mut [f32]) {
@@ -135,24 +167,49 @@ pub struct Player {
 
 impl Player {
     /// Opens the computer's sound output at `rate`, for a film at `fps`.
-    /// With no output, the player still keeps the clock.
+    /// With no output, the player still keeps the clock. With
+    /// `INPAINTER_NO_SOUND` set, as tests and screenshot scenarios set it,
+    /// it is `silent` and opens nothing.
     pub fn open(rate: u32, fps: (u32, u32)) -> Player {
-        let state = Arc::new(Mutex::new(State {
-            tracks: Vec::new(),
-            position: 0,
-            end: Some(0),
-            start: 0,
-            looping: false,
-            playing: false,
-            heard: None,
-            began: None,
-            failed: None,
-        }));
+        if std::env::var_os("INPAINTER_NO_SOUND").is_some() {
+            return Player::silent(rate, fps);
+        }
+        let state = Arc::new(Mutex::new(State::new()));
         let (stream, refused) = match output(state.clone(), rate, fps) {
             Ok(stream) => (Some(stream), None),
             Err(why) => (None, Some(why)),
         };
         Player { state, stream, rate, fps, lead: 0.0, refused }
+    }
+
+    /// A player that opens no sound output and keeps the clock on the
+    /// wall's time, for tests and screenshots, which must never play sound
+    /// on the computer. Once `advance` is called, only it moves the clock.
+    pub fn silent(rate: u32, fps: (u32, u32)) -> Player {
+        Player { state: Arc::new(Mutex::new(State::new())), stream: None, rate, fps, lead: 0.0, refused: None }
+    }
+
+    /// Moves a silent player's clock on by `milliseconds` while playing,
+    /// and from then on keeps it still between calls.
+    pub fn advance(&self, milliseconds: f64) {
+        let mut state = self.lock();
+        let step = Duration::from_secs_f64(milliseconds.max(0.0) / 1000.0);
+        state.advanced = Some(state.advanced.unwrap_or(Duration::ZERO) + if state.playing { step } else { Duration::ZERO });
+    }
+
+    /// What was last played, from which frame, to which, and whether looped.
+    pub fn last_played(&self) -> Option<Played> {
+        self.lock().played
+    }
+
+    /// The frame the last play started from.
+    pub fn last_played_from(&self) -> Option<u32> {
+        self.lock().played.map(|played| played.from)
+    }
+
+    /// The frame whose slice was last scrubbed.
+    pub fn last_scrubbed(&self) -> Option<u32> {
+        self.lock().scrubbed
     }
 
     /// Whether sound is heard, or only the clock kept.
@@ -177,12 +234,14 @@ impl Player {
 
     /// Plays from the start of `frame` until paused.
     pub fn play_from(&self, frame: u32) {
+        self.lock().played = Some(Played { from: frame, to: None, looping: false });
         self.play(sample_at(frame, self.rate, self.fps), None, false);
     }
 
     /// Plays frames `from` up to `to`, once or looping with no seam.
     pub fn play_range(&self, from: u32, to: u32, looping: bool) {
         let end = sample_at(to.max(from), self.rate, self.fps);
+        self.lock().played = Some(Played { from, to: Some(to.max(from)), looping });
         self.play(sample_at(from, self.rate, self.fps), Some(end), looping);
     }
 
@@ -195,9 +254,19 @@ impl Player {
         state.playing = true;
         state.heard = None;
         state.began = Some((Instant::now(), start));
+        if state.advanced.is_some() {
+            state.advanced = Some(Duration::ZERO);
+        }
     }
 
     pub fn pause(&self) {
+        // With no output nothing moves the position, so it is taken from
+        // the clock, where playing reached.
+        if self.stream.is_none() {
+            if let Some(seconds) = self.clock() {
+                self.lock().position = (seconds * f64::from(self.rate)).round() as usize;
+            }
+        }
         let mut state = self.lock();
         state.end = Some(state.position);
         state.looping = false;
@@ -211,6 +280,7 @@ impl Player {
     pub fn scrub(&self, frame: u32) {
         let mut state = self.lock();
         let start = sample_at(frame, self.rate, self.fps);
+        state.scrubbed = Some(frame);
         state.position = start;
         state.start = start;
         state.end = Some(sample_at(frame + 1, self.rate, self.fps));
@@ -231,8 +301,12 @@ impl Player {
         }
         let device = self.stream.is_some() && state.failed.is_none();
         let (at, sample) = if device { state.heard? } else { state.began? };
-        let now = Instant::now();
-        let since = if now >= at { (now - at).as_secs_f64() } else { -(at - now).as_secs_f64() };
+        let since = if let (false, Some(advanced)) = (device, state.advanced) {
+            advanced.as_secs_f64()
+        } else {
+            let now = Instant::now();
+            if now >= at { (now - at).as_secs_f64() } else { -(at - now).as_secs_f64() }
+        };
         let mut position = sample as f64 + since * f64::from(self.rate);
         if let Some(end) = state.end {
             let (start, end) = (state.start as f64, end as f64);
@@ -354,9 +428,7 @@ mod tests {
             start: 2,
             looping: true,
             playing: true,
-            heard: None,
-            began: None,
-            failed: None,
+            ..State::new()
         };
         let mut out = vec![0.0; 2 * 10];
         state.fill(48, (24, 1), &mut out);
@@ -365,5 +437,46 @@ mod tests {
         for (g, w) in got.iter().zip(expected) {
             assert!((g - w).abs() < 1e-6, "{got:?}");
         }
+    }
+
+    /// Catches a silent player that opens a device, keeps running on the
+    /// wall's time after `advance`, or loses what it was asked to play: the
+    /// clock moves only by what was advanced, waits with the wall, starts
+    /// again from the play's own frame, and pausing keeps where it reached.
+    #[test]
+    fn a_silent_player_moves_only_when_advanced() {
+        let player = Player::silent(48_000, (24, 1));
+        assert!(!player.has_output());
+        assert!(player.problem().is_none());
+        player.play_from(24);
+        player.advance(500.0);
+        assert!((player.clock().unwrap() - 1.5).abs() < 1e-9);
+        std::thread::sleep(Duration::from_millis(30));
+        assert!((player.clock().unwrap() - 1.5).abs() < 1e-9, "the wall moved a silent clock after advance");
+        assert_eq!(player.frame_to_show(), Some(36));
+        assert_eq!(player.last_played(), Some(Played { from: 24, to: None, looping: false }));
+        assert_eq!(player.last_played_from(), Some(24));
+        player.pause();
+        assert_eq!(player.clock(), None);
+        player.advance(1000.0);
+        player.play_range(0, 48, true);
+        assert!((player.clock().unwrap() - 0.0).abs() < 1e-9, "a new play kept the last play's advance");
+        player.advance(2500.0);
+        assert!((player.clock().unwrap() - 0.5).abs() < 1e-9, "the looped range did not wrap");
+        assert_eq!(player.last_played(), Some(Played { from: 0, to: Some(48), looping: true }));
+        player.scrub(7);
+        assert_eq!(player.last_scrubbed(), Some(7));
+        assert_eq!(player.clock(), None);
+    }
+
+    /// Catches a silent player that only ever runs by `advance`: before any
+    /// call to it, the clock follows the wall, so frames still play.
+    #[test]
+    fn a_silent_player_keeps_wall_time_until_advanced() {
+        let player = Player::silent(48_000, (24, 1));
+        player.play_from(0);
+        std::thread::sleep(Duration::from_millis(40));
+        let seconds = player.clock().unwrap();
+        assert!(seconds >= 0.04 && seconds < 1.0, "{seconds}");
     }
 }

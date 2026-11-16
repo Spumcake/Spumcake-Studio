@@ -15,7 +15,7 @@ mod video;
 
 pub use encode::{Encoder, Settings};
 pub use frames::{write_frame, write_png};
-pub use player::{Player, Track, mix};
+pub use player::{Played, Player, Track, mix};
 pub use seeker::Seeker;
 pub use sound::Sound;
 pub use video::{Frame, Frames, Info, Video};

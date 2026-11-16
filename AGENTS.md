@@ -14,10 +14,11 @@ The stack is Rust, egui through eframe, and Iconoir icons.
 - `apps/template/` — the smallest correct sub-application, hidden from people. New ones are copied from it.
 - `apps/storyboard-generator/` — the Storyboard Generator: storyboards drawn on canvases.
 - `apps/recipe-creation/` — Recipe Creation: recipes, lists of cells. It stores cells and declares them. The host draws and runs them.
-- `apps/video-generator/` — the Video Generator: shots, to come; a scaffold copied from the template, which the Image and Video role session fills.
+- `apps/video-generator/` — the Video Generator: the Image Generator for video. A gallery of takes, each a link to a video file it never writes, shown a frame at a time, side by side, or as frame strips, decoded through `media/` at the size drawn. Its `.vgx` format is in its own AGENTS.md. Making takes, playing them with sound, and the mix come with the Image and Video build plan's later milestones.
 - `apps/image-generator/` — the Image Generator: layered images. It owns every pixel, layer, and step of history, composites the image, and declares a raster tab; the host draws it, previews strokes, and sends gestures. Its `.ipx` format is in its own AGENTS.md.
 - `.project/scripts/check.sh` — the one check to run before calling work done (see Working rules).
 - `media/` — video, sound, and encoding, shared by the workspaces that play and write them, as `draw/` is; never used by the host. The Image and Video role session writes it, to the interface in the lifecycle contract.
+- `layers/` — what the Image Generator and the Video Generator do alike, since neither may depend on the other: a layer's link to a file it never writes, notes marked on an image, the pre-vis check's edges as Spumcake-Skills' `overlay.py` finds them, and laying out a round's takes. Never used by the host. The Image and Video role session writes it.
 - `docs/tools.md` — the catalogue of every tool the assistant can be offered, written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`; a check fails while it is out of date, so regenerate it whenever a tool changes.
 - `client/` — `storyboard-client`, the no-host check: it drives `storyboard-generator` through the protocol alone, including every tool, one undo per request, and `open` and `keep`, and compares every reply with an in-process session. Its coverage check fails when a hand action that changes a storyboard has no tool.
 

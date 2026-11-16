@@ -7,4 +7,12 @@ publish = false
 
 [dependencies]
 protocol = { path = "../../protocol" }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.152"
+# Decoding video and sound, shared with the other workspaces that play them.
+media = { path = "../../media" }
+# PNG in and out, for thumbnails and frames written for the host.
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+# What it shares with the Image Generator: linked files, notes, the pre-vis
+# check's edges, and round layouts, as Studio 0.15's plan approved.
+layers = { path = "../../layers" }

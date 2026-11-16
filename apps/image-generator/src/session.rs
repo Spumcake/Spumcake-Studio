@@ -5,8 +5,12 @@
 //! Inside a project, which the host names with `project`, every image is
 //! written into the project's folder by itself, a second after it changes,
 //! and before its tab closes, a `keep` is answered, or the host quits, as
-//! Recipe Creation's recipes are. Save and Save As are offered only
-//! outside a project.
+//! Recipe Creation's recipes are; in a Skills project, into its `work/`
+//! folder, without where it was opened from. Save and Save As are offered
+//! only outside a project.
+//!
+//! Each tab has cells, the Prompt page's, and the rounds the host says
+//! they made, with `takes`, shown on the filmstrip and never kept.
 
 use crate::declare;
 use crate::doc::{Doc, Sampler, Setting};
@@ -14,14 +18,18 @@ use crate::files;
 use crate::gallery::{Frame, Gallery};
 use crate::paint::{Brush, Combine, Mask};
 use crate::layered::{Blend, Curves, Grade, Kind, LayeredImage, Pixels};
+use crate::rounds::{Rounds, View};
 use crate::text::{Align, Face, Style};
 use protocol::{
-    AppMessage, Ask, AskButton, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, PanelSide,
-    PropValue, RasterGesture, RasterTool, RasterView, TextEditing, Thumbnail,
+    AppMessage, Ask, AskButton, Cell, CellPart, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, Item,
+    ItemRef, PanelSide, PropValue, RasterGesture, RasterTool, RasterView, TextEditing, Thumbnail,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod requests;
+use requests::{forget_files, layer_png};
 
 /// How many files of rows sent while a stroke is drawn are kept for each
 /// image, for a host that falls behind; one that falls further waits for
@@ -45,6 +53,19 @@ const THUMB_SIZE: [u32; 2] = [56, 40];
 const FILM_SIZE: [u32; 2] = [176, 44];
 /// The space kept around an image when it is fitted to the window.
 const FIT_MARGIN: f64 = 40.0;
+/// The largest a preview the host asks for is, in pixels: a reference
+/// row's thumbnail, drawn sharp at twice its size.
+const PREVIEW_SIZE: [u32; 2] = [160, 96];
+/// This workspace's id, as its renders are filed under it.
+const OWNER: &str = "image-generator";
+/// How an item of a tab's file names a marked image a next round sends,
+/// and a layer written out: these, then its fingerprint, or its layer's
+/// id and its image's name.
+const MARKED_ITEM: &str = "marked ";
+const LAYER_ITEM: &str = "layer ";
+/// The words a next round's prompt gives its notes, and the role of the
+/// marked image it sends, as ig-notes-next-round shows them.
+const NOTES_WORDS: &str = "Notes on the last round";
 
 /// The tools of the toolbar, in its order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +82,14 @@ pub enum ToolKind {
     Text,
     Hand,
     Zoom,
+    Notes,
 }
 
 impl ToolKind {
     /// In the mockup's order: healing and the stamp after the eyedropper,
-    /// and text after the eraser.
-    pub const ALL: [ToolKind; 12] = [
+    /// text after the eraser, and notes after the magnifier, as
+    /// ig-notes-pin shows.
+    pub const ALL: [ToolKind; 13] = [
         ToolKind::Move,
         ToolKind::Marquee,
         ToolKind::Lasso,
@@ -79,6 +102,7 @@ impl ToolKind {
         ToolKind::Text,
         ToolKind::Hand,
         ToolKind::Zoom,
+        ToolKind::Notes,
     ];
 
     pub fn key(self) -> &'static str {
@@ -95,6 +119,7 @@ impl ToolKind {
             ToolKind::Text => "text",
             ToolKind::Hand => "hand",
             ToolKind::Zoom => "zoom",
+            ToolKind::Notes => "notes",
         }
     }
 
@@ -139,6 +164,10 @@ pub struct Tools {
     pub stroke: Option<[f64; 2]>,
     /// The style a new text takes, and the edited text's as it changes.
     pub text: Style,
+    /// The notes tool makes freehand marks, Draw, rather than pins, Pin,
+    /// and its marks' colour.
+    pub notes_draw: bool,
+    pub notes_rgb: [u8; 3],
 }
 
 impl Default for Tools {
@@ -161,6 +190,8 @@ impl Default for Tools {
             kept: None,
             stroke: None,
             text: Style::default(),
+            notes_draw: false,
+            notes_rgb: [layers::notes::RED[0], layers::notes::RED[1], layers::notes::RED[2]],
         }
     }
 }
@@ -171,6 +202,8 @@ pub enum Page {
     Layers,
     Properties,
     Adjustments,
+    /// The tab's cell, which the host draws and runs.
+    Prompt,
 }
 
 /// One tab: a gallery of images, kept in one file.
@@ -194,25 +227,59 @@ pub struct Image {
     send_camera: bool,
     /// Its thumbnails were left unwritten while a slider was held.
     thumbs_owed: bool,
+    /// The rounds its cells made, as the host last sent them, and the take
+    /// shown, if one is. Never kept in its file.
+    pub rounds: Rounds,
+    /// What the host was last told of its cells and of its file's items.
+    cells_sent: Option<(Vec<Cell>, Option<String>)>,
+    items_sent: Option<(String, Vec<Item>)>,
+    /// The marked images a next round sends, by item id, with their
+    /// fingerprints, and the layers written out, by image name and layer
+    /// id, declared as items while the program runs.
+    marked: Vec<(String, String)>,
+    written_out: Vec<(String, u64)>,
+    /// A written-out layer's fingerprint, by its image and layer, and the
+    /// pixels' generation it was taken at.
+    layer_prints: std::collections::HashMap<(u64, u64), (u64, String)>,
 }
 
 impl Image {
-    /// The image shown.
+    /// The image shown: a take, when one is, or the gallery's.
     pub fn frame(&self) -> &Frame {
-        self.gallery.frame()
+        match self.rounds.shown_frame() {
+            Some(frame) => frame,
+            None => self.gallery.frame(),
+        }
     }
 
     pub fn frame_mut(&mut self) -> &mut Frame {
-        self.gallery.frame_mut()
+        match self.rounds.shown_frame_mut() {
+            Some(frame) => frame,
+            None => self.gallery.frame_mut(),
+        }
     }
 
     /// The shown image's document.
     pub fn doc(&self) -> &Doc {
-        &self.gallery.frame().doc
+        &self.frame().doc
     }
 
     pub fn doc_mut(&mut self) -> &mut Doc {
-        &mut self.gallery.frame_mut().doc
+        &mut self.frame_mut().doc
+    }
+
+    /// Every image's frame the tab holds: the gallery's, and the takes'.
+    pub fn all_frames_mut(&mut self) -> impl Iterator<Item = &mut Frame> {
+        self.gallery.frames.iter_mut().chain(self.rounds.frames_mut())
+    }
+
+    pub fn all_frames(&self) -> impl Iterator<Item = &Frame> {
+        self.gallery.frames.iter().chain(self.rounds.frames())
+    }
+
+    /// Whether a take, not an image of the gallery, is shown.
+    pub fn take_shown(&self) -> bool {
+        self.rounds.shown_frame().is_some()
     }
 
     /// Whether Undo, as the keyboard has it now, has something to undo.
@@ -234,6 +301,11 @@ enum Purpose {
     OpenImage { tab: String },
     Export { jpeg: bool },
     Save { tab: String, then_quit: bool },
+    /// The pre-vis check's render, for the image shown in this tab.
+    PrevisRender { tab: String },
+    /// "Write out as PNG…" for a tab with no file yet, outside a project:
+    /// that layer of the image shown.
+    WriteOut { tab: String, node: u64 },
 }
 
 pub struct Session {
@@ -250,6 +322,10 @@ pub struct Session {
     /// The curve point last moved, for its input and output.
     pub curve_point: Option<[f64; 2]>,
     pub project: Option<PathBuf>,
+    /// The host says the project is a Skills project: images are kept in
+    /// its `work/` folder, and what leaves the workspace is filed by its
+    /// runner.
+    pub skills: bool,
     /// Where images and thumbnails for the host are written, and whether
     /// it is a folder of this session's own in memory, which stays when a
     /// project is named.
@@ -310,6 +386,7 @@ impl Session {
             curve_channel: 0,
             curve_point: None,
             project: None,
+            skills: false,
             in_memory: memory.is_some(),
             display_failed: false,
             cache: memory.unwrap_or_else(scratch_folder),
@@ -334,7 +411,7 @@ impl Session {
             messages.push(AppMessage::Panel { tab: image.id.clone(), side: PanelSide::Right });
         }
         messages.push(AppMessage::Tools { groups: crate::assist::tool_groups() });
-        messages.push(AppMessage::Edits { media_types: vec![String::from("image/png"), String::from("image/jpeg")] });
+        messages.push(AppMessage::Edits { media_types: crate::rounds::IMAGE_TYPES.iter().map(|kind| kind.to_string()).collect() });
         messages.push(AppMessage::End);
         if !self.images.is_empty() {
             messages.extend(self.emit());
@@ -376,10 +453,12 @@ impl Session {
                 | HostMessage::Ping
                 | HostMessage::Keep { .. }
                 | HostMessage::Claim { .. }
+                | HostMessage::Render { .. }
+                | HostMessage::Preview { .. }
         );
         if !drawing {
             for image in &mut self.images {
-                for frame in &mut image.gallery.frames {
+                for frame in image.all_frames_mut() {
                     frame.doc.end_live();
                 }
             }
@@ -394,9 +473,11 @@ impl Session {
             | HostMessage::Ping
             | HostMessage::Keep { .. }
             | HostMessage::Claim { .. }
+            | HostMessage::Render { .. }
+            | HostMessage::Preview { .. }
             | HostMessage::Answer { .. } => true,
             HostMessage::RasterGesture { gesture: RasterGesture::Click { .. } | RasterGesture::Rect { .. } | RasterGesture::TextBox { .. }, .. } => {
-                self.tools.tool == ToolKind::Text
+                matches!(self.tools.tool, ToolKind::Text | ToolKind::Notes)
             }
             HostMessage::Command { id, .. } => {
                 matches!(id.as_str(), "text_style" | "undo" | "redo" | "toggle_panel" | "panel_page") || id.starts_with("canvas.")
@@ -409,6 +490,11 @@ impl Session {
             if image.doc().edits != before {
                 image.dirty = true;
             }
+        }
+        // A round view is no image to draw on: the pointer only pans it.
+        let viewing = self.active_image().is_some_and(|image| image.rounds.viewing());
+        if viewing && matches!(message, HostMessage::RasterGesture { .. } | HostMessage::RasterText { .. }) {
+            return out;
         }
         match message {
             HostMessage::Shutdown => return Vec::new(),
@@ -425,7 +511,8 @@ impl Session {
                 }
                 self.note_quit(&mut out);
             }
-            HostMessage::Project { folder, .. } => {
+            HostMessage::Project { folder, skills } => {
+                self.skills = skills;
                 let folder = PathBuf::from(folder);
                 let folder = folder.canonicalize().unwrap_or(folder);
                 // Images in memory stay where they are; otherwise they go
@@ -447,15 +534,17 @@ impl Session {
                     // Every image is written again where the host now
                     // looks.
                     for image in &mut self.images {
-                        for frame in &mut image.gallery.frames {
+                        for frame in image.all_frames_mut() {
                             frame.written = None;
                             frame.thumbs.clear();
                             frame.film = None;
                         }
+                        image.rounds.written_elsewhere();
                     }
                 }
                 self.project = Some(folder);
                 out.extend(self.emit());
+                out.extend(self.items_due());
             }
             // An image file from outside the project opens nothing.
             HostMessage::Open { path: Some(path) }
@@ -491,6 +580,11 @@ impl Session {
                 {
                     image.doc_mut().sample_live(from, &points, &sampler);
                     self.live_due = true;
+                } else if let Some((width, colour)) = self.mark_pen()
+                    && let Some(image) = self.images.get_mut(self.active)
+                {
+                    image.doc_mut().mark_live(from, &points, width, colour);
+                    self.live_due = true;
                 }
             }
             // The move tool's drag while it is open: with a selection, the
@@ -522,7 +616,8 @@ impl Session {
                 out.extend(self.emit());
             }
             HostMessage::Camera { tab, origin, zoom, .. } => {
-                if let Some(image) = self.images.iter_mut().find(|image| image.id == tab) {
+                // A round view's camera is its own, not the take's.
+                if let Some(image) = self.images.iter_mut().find(|image| image.id == tab && !image.rounds.viewing()) {
                     let frame = image.frame_mut();
                     frame.camera = Some(DocumentCamera { origin, zoom, rotation: 0.0, flip: false });
                     frame.host_camera = true;
@@ -575,13 +670,34 @@ impl Session {
                     Ok(path) => AppMessage::Kept { tab, path: path.map(|path| path.display().to_string()), error: None },
                     Err(error) => AppMessage::Kept { tab, path: None, error: Some(error) },
                 });
+                // A file written for the first time has items to declare.
+                out.extend(self.items_due());
             }
             HostMessage::Claim { id, path } => {
                 let path = Path::new(&path);
                 out.push(AppMessage::Claimed { id, yours: files::is_ipx(path) && self.in_project(path) });
             }
-            // Items come with the lifecycle's image work.
-            HostMessage::Render { id, .. } => out.push(protocol::no_items(id)),
+            HostMessage::Render { id, item, media_type, .. } => out.push(self.render(id, &item, &media_type)),
+            HostMessage::Preview { id, path, media_type } => out.push(self.preview(id, &path, &media_type)),
+            HostMessage::Takes { cell, rounds } => {
+                if let Some(id) = cell.item {
+                    self.takes(&id, rounds, &mut out);
+                }
+            }
+            HostMessage::EditCell { cell, input, settings, endpoint, model, .. } => {
+                self.edit_cell(&cell, input, settings, endpoint, model, &mut out);
+            }
+            HostMessage::InsertCell { tab, index, cell } => self.insert_cell(&tab, index, cell, &mut out),
+            HostMessage::SelectCell { tab, cell } => {
+                if let Some(index) = self.image_index(&tab)
+                    && self.images[index].gallery.cells.iter().any(|own| own.id == cell)
+                {
+                    self.images[index].gallery.cell = Some(cell);
+                    out.extend(self.emit());
+                }
+            }
+            HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
+            HostMessage::CellBecameStep { tab, cell, step } => self.cell_became_step(&tab, &cell, &step, &mut out),
             _ => {}
         }
         if self.finish_writes(false) {
@@ -605,6 +721,9 @@ impl Session {
         if self.finish_writes(false) {
             out.extend(self.declared());
         }
+        // A file written for the first time, or a written-out layer
+        // painted on since, changes what the host is told of its items.
+        out.extend(self.items_due());
         out
     }
 
@@ -615,9 +734,9 @@ impl Session {
     pub fn keep_ahead(&mut self) -> bool {
         let active = self.active;
         for (index, image) in self.images.iter_mut().enumerate() {
-            let shown = image.gallery.shown;
-            for (position, frame) in image.gallery.frames.iter_mut().enumerate() {
-                if index != active || position != shown {
+            let shown = image.frame().uid;
+            for frame in image.all_frames_mut() {
+                if index != active || frame.uid != shown {
                     frame.doc.let_beneath_go();
                 }
             }
@@ -633,19 +752,20 @@ impl Session {
     /// Writes whole every image file a stroke left behind, while nothing
     /// is being drawn, and tells the host the image shown is whole again.
     fn catch_up(&mut self) -> Vec<AppMessage> {
-        if self.images.iter().any(|image| image.gallery.frames.iter().any(|frame| frame.doc.drawing())) {
+        if self.images.iter().any(|image| image.all_frames().any(|frame| frame.doc.drawing())) {
             return Vec::new();
         }
         let cache = self.cache.clone();
         let mut shown = false;
         for (index, image) in self.images.iter_mut().enumerate() {
             let shown_uid = image.frame().uid;
-            for frame in &mut image.gallery.frames {
+            let id = image.id.clone();
+            for frame in image.all_frames_mut() {
                 if !frame.behind {
                     continue;
                 }
-                let file = cache.join(format!("{}-{}.rgba", image.id, frame.uid));
-                if files::write_atomic(&file, frame.doc.composite()).is_ok() {
+                let file = cache.join(format!("{id}-{}.rgba", frame.uid));
+                if files::write_atomic(&file, &frame.doc.shown()).is_ok() {
                     caught_up(frame);
                     shown |= index == self.active && frame.uid == shown_uid;
                 }
@@ -704,7 +824,39 @@ impl Session {
         protocol::free_name(&protocol::untitled(ITEM), |name| {
             self.images.iter().any(|image| image.label == name)
                 || self.project.as_ref().is_some_and(|folder| folder.join(format!("{name}.ipx")).exists())
+                || self.work_folder().is_some_and(|folder| folder.join(format!("{name}.ipx")).exists())
         })
+    }
+
+    /// Where a tab never written goes: the project's folder, or in a
+    /// Skills project its `work/` folder, as the contract with
+    /// Spumcake-Skills keeps workspace files.
+    fn work_folder(&self) -> Option<PathBuf> {
+        let project = self.project.as_ref()?;
+        Some(if self.skills { project.join("work") } else { project.clone() })
+    }
+
+    /// What a tab's file keeps besides its images: its cells, the notes
+    /// marked on its takes, and, outside a Skills project, where it was
+    /// opened from. In one, that record is Spumcake-Skills', so it is never
+    /// written.
+    fn extra(&self, image: &Image) -> files::Extra {
+        let gallery = &image.gallery;
+        files::Extra {
+            source: if self.skills { None } else { gallery.source.clone() },
+            cells: gallery.cells.clone(),
+            cell: gallery.cell.clone(),
+            take_notes: image.rounds.notes_to_keep(),
+        }
+    }
+
+    /// A path inside the project, as the project names it, with `/`
+    /// between folders.
+    fn relative(&self, path: &Path) -> Option<String> {
+        let project = self.project.as_ref()?;
+        let whole = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let inside = whole.strip_prefix(project).ok()?;
+        Some(inside.to_string_lossy().replace('\\', "/"))
     }
 
     fn push_image(&mut self, mut gallery: Gallery, path: Option<PathBuf>, label: Option<String>) -> usize {
@@ -727,6 +879,12 @@ impl Session {
             saving: None,
             send_camera: true,
             thumbs_owed: false,
+            rounds: Rounds::default(),
+            cells_sent: None,
+            items_sent: None,
+            marked: Vec::new(),
+            written_out: Vec::new(),
+            layer_prints: std::collections::HashMap::new(),
         });
         self.active = self.images.len() - 1;
         if self.tools.tool == ToolKind::Crop {
@@ -769,19 +927,24 @@ impl Session {
 
     fn film_of<T>(&mut self, index: usize, change: impl FnOnce(&mut Gallery) -> T) -> Option<T> {
         let in_project = self.project.is_some();
+        let cache = self.cache.clone();
         let image = self.images.get_mut(index)?;
         // A held slider on the image shown becomes its step first, and a
         // text being typed in its own.
         image.doc_mut().end_typing();
         image.doc_mut().finish_edit();
-        let (edits, shown) = (image.gallery.edits, image.frame().uid);
+        let (edits, shown, seen) = (image.gallery.edits, image.gallery.frame().uid, image.frame().uid);
+        // Whatever the strip does shows an image of the gallery.
+        if let Some(gone) = image.rounds.leave() {
+            forget_files(&cache, &image.id, gone);
+        }
         let result = change(&mut image.gallery);
         // Which image is shown is kept too, but only a project's file is
         // written for it by itself: outside one, it asks nothing on close.
-        if image.gallery.edits != edits || (in_project && image.frame().uid != shown) {
+        if image.gallery.edits != edits || (in_project && image.gallery.frame().uid != shown) {
             image.dirty = true;
         }
-        if image.frame().uid != shown {
+        if image.frame().uid != seen {
             image.send_camera = true;
         }
         Some(result)
@@ -864,15 +1027,62 @@ impl Session {
             // own, as the person who clicks a thumbnail and presses Undo
             // expects. The +, a thumbnail's menu, and a drag leave the
             // keyboard with the strip.
+            // The strip holds the rounds' tiles first, then the gallery's
+            // images. A take of another round chosen with Ctrl or Shift
+            // shows the two rounds one above the other.
             "film_select" => {
                 if let Some(index) = number("value") {
-                    self.film(|gallery| gallery.select(index.max(0.0) as usize));
+                    let index = index.max(0.0) as usize;
+                    let tiles = self.active_image().map_or(0, |image| image.rounds.tiles.len());
+                    if index < tiles {
+                        let extend = arg.get("extend").and_then(Value::as_bool) == Some(true);
+                        self.select_take(index, extend, out);
+                    } else {
+                        self.film(|gallery| gallery.select(index - tiles));
+                    }
                 }
                 self.image_focus();
             }
+            // A take keeps its round's place; an image moves among the
+            // gallery's.
             "film_reorder" => {
-                if let (Some(from), Some(to)) = (number("from"), number("to")) {
-                    self.film(|gallery| gallery.move_to(from.max(0.0) as usize, to.max(0.0) as usize));
+                let tiles = self.active_image().map_or(0, |image| image.rounds.tiles.len());
+                if let (Some(from), Some(to)) = (number("from"), number("to"))
+                    && from.max(0.0) as usize >= tiles
+                {
+                    let (from, to) = (from.max(0.0) as usize - tiles, (to.max(0.0) as usize).saturating_sub(tiles));
+                    self.film(|gallery| gallery.move_to(from, to));
+                }
+            }
+            // The toolbar's grid shows the shown take's round whole, and its
+            // two rectangles the take beside its references.
+            "round_grid" | "round_sheet" => {
+                let want = if id == "round_grid" { View::Grid } else { View::Sheet };
+                if let Some(image) = self.images.get_mut(self.active)
+                    && image.rounds.shown.is_some()
+                {
+                    image.rounds.view = if image.rounds.view == want { View::Single } else { want };
+                    image.send_camera = true;
+                }
+            }
+            // A take's menu.
+            "take_next_round" | "take_ask" | "take_edit" | "take_report" => {
+                let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
+                    return;
+                };
+                match id {
+                    "take_next_round" => self.next_round(&path, out),
+                    "take_ask" => self.ask_about(&path, out),
+                    "take_report" => {
+                        self.open_report(&path, out);
+                        return;
+                    }
+                    _ => self.edit_take(&path, out),
+                }
+            }
+            "layer_write_png" => {
+                if let Some(node) = node {
+                    self.write_out(node, out);
                 }
             }
             "film_new" => {
@@ -930,12 +1140,62 @@ impl Session {
                 self.page = match number("value").or_else(|| number("page")).map(|page| page as i64) {
                     Some(1) => Page::Properties,
                     Some(2) => Page::Adjustments,
+                    Some(3) => Page::Prompt,
                     _ => Page::Layers,
                 };
             }
             "toggle_aligned" => {
                 self.tools.aligned = !self.tools.aligned;
                 self.tools.kept = None;
+            }
+            // The notes tool's settings row: Pin or Draw, and the marks'
+            // colour.
+            "notes_mode" => {
+                if let Some(index) = number("value") {
+                    self.tools.notes_draw = index >= 1.0;
+                    self.change(Doc::end_typing);
+                }
+            }
+            "notes_colour" => {
+                if let Some(rgb) = arg.get("value").and_then(rgb_of) {
+                    self.tools.notes_rgb = rgb;
+                }
+            }
+            // The Notes row: a click chooses the notes tool, its eye shows
+            // or hides them, and its menu's Delete takes them all away.
+            "notes_click" => self.choose_tool(ToolKind::Notes),
+            "notes_visible" => {
+                self.change(|doc| {
+                    let hidden = !doc.notes_hidden;
+                    doc.set_notes_hidden(hidden);
+                });
+            }
+            "notes_delete" => {
+                self.change(Doc::clear_notes);
+            }
+            // The pre-vis check's button turns it on and off for the image
+            // shown; with no render chosen yet, it asks for one first.
+            "previs_toggle" => {
+                let Some(image) = self.active_image() else {
+                    return;
+                };
+                if image.doc().previs.settings.render.is_none() {
+                    let purpose = Purpose::PrevisRender { tab: image.id.clone() };
+                    self.ask_file(FileKind::Open, None, purpose, image_filter(false), out);
+                    return;
+                }
+                self.change(|doc| {
+                    doc.previs.settings.on = !doc.previs.settings.on;
+                    doc.touch_previs();
+                });
+            }
+            "previs_choose" => {
+                let Some(image) = self.active_image() else {
+                    return;
+                };
+                let purpose = Purpose::PrevisRender { tab: image.id.clone() };
+                self.ask_file(FileKind::Open, None, purpose, image_filter(false), out);
+                return;
             }
             "text_style" => self.text_style(&arg),
             "add_mask" => {
@@ -1095,7 +1355,15 @@ impl Session {
             }
             "reorder" => {
                 if let (Some(node), Some(to)) = (node, number("value")) {
-                    let to = to.max(0.0) as usize;
+                    // The Notes row sits at the top among the top-level
+                    // rows, and is no layer: a top-level place counts
+                    // from below it.
+                    let notes_row = self.active_image().is_some_and(|image| declare::shows_notes_row(image.doc()));
+                    let top = match arg.get("parent") {
+                        Some(parent) => parent.is_null(),
+                        None => self.active_image().and_then(|image| image.doc().image.place(node)).is_some_and(|place| place.parent.is_none()),
+                    };
+                    let to = if notes_row && top { (to.max(0.0) as usize).saturating_sub(1) } else { to.max(0.0) as usize };
                     // With `parent`, null for the top level, the layer goes
                     // into that group or out of its own; without it, it
                     // stays among its siblings.
@@ -1227,6 +1495,19 @@ impl Session {
         })
     }
 
+    /// The notes tool's Draw, as the settings row sets it: a mark's width,
+    /// about four pixels on the screen at the zoom the image is shown at,
+    /// and its colour.
+    fn mark_pen(&self) -> Option<(f32, [u8; 4])> {
+        if self.tools.tool != ToolKind::Notes || !self.tools.notes_draw {
+            return None;
+        }
+        let zoom = self.active_image().and_then(|image| image.frame().camera.as_ref()).map_or(1.0, |camera| camera.zoom);
+        let width = (f64::from(crate::notes::MARK_WIDTH) / zoom.max(0.01)).clamp(1.0, 64.0) as f32;
+        let [r, g, b] = self.tools.notes_rgb;
+        Some((width, [r, g, b, 255]))
+    }
+
     /// The clone stamp or the healing brush chosen, as the toolbar sets it,
     /// with the offset of the stroke being drawn. `first`, the first point
     /// of a stroke beginning, sets that offset: kept from the last stroke
@@ -1331,7 +1612,7 @@ impl Session {
             None => scratch_folder(),
         };
         for image in &mut self.images {
-            for frame in &mut image.gallery.frames {
+            for frame in image.all_frames_mut() {
                 frame.written = None;
                 frame.behind = false;
                 frame.last_patch = None;
@@ -1339,6 +1620,7 @@ impl Session {
                 frame.thumbs.clear();
                 frame.film = None;
             }
+            image.rounds.written_elsewhere();
         }
         true
     }
@@ -1346,6 +1628,21 @@ impl Session {
     fn gesture(&mut self, gesture: RasterGesture) {
         let tools = self.tools.clone();
         match gesture {
+            RasterGesture::Stroke { points } if tools.tool == ToolKind::Notes => {
+                if let Some((width, colour)) = self.mark_pen() {
+                    self.change(|doc| doc.add_mark(&points, width, colour));
+                }
+            }
+            RasterGesture::Click { at } if tools.tool == ToolKind::Notes => {
+                if !tools.notes_draw {
+                    self.change(|doc| doc.note_click(at));
+                }
+            }
+            RasterGesture::Rect { from, to } if tools.tool == ToolKind::Notes => {
+                if !tools.notes_draw {
+                    self.change(|doc| doc.note_drag(from, to));
+                }
+            }
             RasterGesture::Stroke { points } => {
                 if let Some(brush) = self.brush() {
                     // A stroke on a locked or hidden layer changes nothing.
@@ -1441,6 +1738,30 @@ impl Session {
             return;
         };
         let value = serde_json::from_value::<PropValue>(value.clone()).ok();
+        // The pre-vis check's own rows, under its chevron.
+        match (name, &value) {
+            ("previs_mode", Some(PropValue::Index(index))) => {
+                let see_through = *index == 1;
+                self.change(|doc| {
+                    if doc.previs.settings.see_through != see_through {
+                        doc.previs.settings.see_through = see_through;
+                        doc.touch_previs();
+                    }
+                });
+                return;
+            }
+            ("previs_opacity", Some(PropValue::Number(number))) => {
+                let opacity = if number.is_finite() { number.clamp(0.0, 1.0) as f32 } else { return };
+                self.change(|doc| {
+                    if doc.previs.settings.opacity != opacity {
+                        doc.previs.settings.opacity = opacity;
+                        doc.touch_previs();
+                    }
+                });
+                return;
+            }
+            _ => {}
+        }
         let Some(active) = self.active_image().and_then(|image| image.doc().active) else {
             return;
         };
@@ -1569,10 +1890,11 @@ impl Session {
                 }
                 self.open_path(Some(path), out);
             }
-            Purpose::OpenLayer => match files::import(&path) {
-                Ok(pixels) => {
+            Purpose::OpenLayer => match files::import_linked(&path) {
+                Ok((pixels, sha256)) => {
                     let name = file_title(&path);
-                    let result = self.change(|doc| doc.add_image(&name, pixels));
+                    let link = self.link_to(&path, sha256);
+                    let result = self.change(|doc| doc.add_linked(&name, pixels, Some(link)));
                     if let Some(Err(reason)) = result {
                         out.push(notice("The image could not be added", &reason));
                     }
@@ -1580,14 +1902,14 @@ impl Session {
                 }
                 Err(reason) => out.push(notice("This image could not be opened", &reason)),
             },
-            Purpose::OpenImage { tab } => match files::import(&path) {
-                Ok(pixels) => {
+            Purpose::OpenImage { tab } => match files::import_linked(&path) {
+                Ok((pixels, sha256)) => {
                     let Some(index) = self.image_index(&tab) else {
                         return;
                     };
                     self.active = index;
                     let title = file_title(&path);
-                    let doc = Doc::new(LayeredImage::from_pixels(&title, pixels));
+                    let doc = Doc::new(LayeredImage::linked(&title, pixels, self.link_to(&path, sha256)));
                     self.film(|gallery| gallery.add(&title, doc, None));
                     out.extend(self.emit());
                 }
@@ -1614,7 +1936,50 @@ impl Session {
                     self.write_at(index, &path, then_quit, out);
                 }
             }
+            // The render chosen turns the check on.
+            Purpose::PrevisRender { tab } => match files::import_linked(&path) {
+                Ok((pixels, sha256)) => {
+                    let Some(index) = self.image_index(&tab) else {
+                        return;
+                    };
+                    self.active = index;
+                    let link = self.link_to(&path, sha256);
+                    let image = layers::Rgba { width: pixels.width, height: pixels.height, data: pixels.data };
+                    self.change(|doc| {
+                        doc.previs.set_render(link, image);
+                        doc.previs.settings.on = true;
+                        doc.touch_previs();
+                    });
+                    out.extend(self.emit());
+                }
+                Err(reason) => out.push(notice("This image could not be opened", &reason)),
+            },
+            Purpose::WriteOut { tab, node } => {
+                let Some(index) = self.image_index(&tab) else {
+                    return;
+                };
+                let written = layer_png(self.images[index].doc(), node).and_then(|(_, png)| files::write_atomic(&path, &png));
+                match written {
+                    Ok(()) => {
+                        let name = self.images[index].gallery.frame().name.clone();
+                        let image = &mut self.images[index];
+                        if !image.written_out.contains(&(name.clone(), node)) {
+                            image.written_out.push((name, node));
+                        }
+                    }
+                    Err(reason) => out.push(notice("The image could not be exported", &reason)),
+                }
+            }
         }
+    }
+
+    /// A link to a file a layer or the pre-vis check is made from: its
+    /// path relative to the project's folder when it is inside it, or
+    /// else whole.
+    fn link_to(&self, path: &Path, sha256: String) -> layers::link::Link {
+        let whole = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let inside = self.project.as_ref().and_then(|project| whole.strip_prefix(project).ok()).map(|relative| relative.to_string_lossy().replace('\\', "/"));
+        layers::link::Link { path: inside.unwrap_or_else(|| whole.display().to_string()), sha256 }
     }
 
     /// Opens a file in a new tab: an image file as itself, or a PNG or JPEG
@@ -1631,7 +1996,7 @@ impl Session {
             return;
         }
         if files::is_ipx(&path) {
-            match files::read_ipx(&path) {
+            match files::read_ipx_in(&path, self.project.as_deref()) {
                 Ok(read) => {
                     let images = read
                         .images
@@ -1641,22 +2006,29 @@ impl Session {
                             if read.active.is_some() {
                                 doc.active = read.active;
                             }
+                            doc.notes = read.notes;
+                            doc.notes_hidden = read.notes_hidden;
+                            doc.previs = read.previs;
                             (read.name, doc)
                         })
                         .collect();
                     let mut gallery = Gallery::new(images, read.shown);
                     gallery.source = read.source;
-                    self.push_image(gallery, Some(path), None);
+                    gallery.cells = read.cells;
+                    gallery.cell = read.cell;
+                    let index = self.push_image(gallery, Some(path), None);
+                    self.images[index].rounds.kept = read.take_notes;
                     self.declare_new(out);
                 }
                 Err(reason) => out.push(notice("This image could not be opened", &reason)),
             }
             return;
         }
-        match files::import(&path) {
-            Ok(pixels) => {
+        match files::import_linked(&path) {
+            Ok((pixels, sha256)) => {
                 let title = file_title(&path);
-                let gallery = Gallery::one(&title, Doc::new(LayeredImage::from_pixels(&title, pixels)));
+                let link = self.link_to(&path, sha256);
+                let gallery = Gallery::one(&title, Doc::new(LayeredImage::linked(&title, pixels, link)));
                 let index = self.push_image(gallery, None, Some(title));
                 // It is new work, so it is kept in the project as an image.
                 self.images[index].dirty = true;
@@ -1672,9 +2044,10 @@ impl Session {
     fn open_as_new(&mut self, path: &Path, name: &str, from: Option<protocol::OpenedFrom>, out: &mut Vec<AppMessage>) {
         let name = safe_name(name);
         let name = if name.is_empty() { file_title(path) } else { name };
-        match files::import(path) {
-            Ok(pixels) => {
-                let mut gallery = Gallery::one(&name, Doc::new(LayeredImage::from_pixels(&name, pixels)));
+        match files::import_linked(path) {
+            Ok((pixels, sha256)) => {
+                let link = self.link_to(path, sha256);
+                let mut gallery = Gallery::one(&name, Doc::new(LayeredImage::linked(&name, pixels, link)));
                 gallery.source = from;
                 let index = self.push_image(gallery, None, Some(name));
                 self.images[index].dirty = true;
@@ -1709,13 +2082,13 @@ impl Session {
     /// and the file it goes to. Not while it is being written already, or
     /// while a stroke is drawn on it.
     fn start_write(&mut self, index: usize) {
-        let Some(folder) = self.project.clone() else {
+        let Some(folder) = self.work_folder() else {
             return;
         };
         // Nothing is copied for a write while a stroke is drawn or a slider
         // held anywhere: taking the image would finish the held step and
         // split one drag into two undo steps.
-        if self.images.iter().any(|image| image.gallery.frames.iter().any(|frame| frame.doc.drawing() || frame.doc.held())) {
+        if self.images.iter().any(|image| image.all_frames().any(|frame| frame.doc.drawing() || frame.doc.held())) {
             return;
         }
         let path = match self.images.get(index).map(|image| &image.path) {
@@ -1726,6 +2099,9 @@ impl Session {
             },
             None => return,
         };
+        let Some(extra) = self.images.get(index).map(|image| self.extra(image)) else {
+            return;
+        };
         let Some(image) = self.images.get_mut(index) else {
             return;
         };
@@ -1733,7 +2109,7 @@ impl Session {
             return;
         }
         let (images, shown) = snapshot(&mut image.gallery);
-        let job = Job { tab: image.id.clone(), source: image.gallery.source.clone(), signature: signature(image), path: path.clone(), images, shown };
+        let job = Job { tab: image.id.clone(), extra, signature: signature(image), path: path.clone(), images, shown };
         image.saving = Some((job.signature, path));
         let writer = self.writer.get_or_insert_with(Writer::start);
         if writer.jobs.send(job).is_ok() {
@@ -1804,7 +2180,7 @@ impl Session {
     fn write_into_project(&mut self, index: usize) -> Result<Option<PathBuf>, String> {
         // The writer's earlier writes land first, so none lands after this.
         self.finish_writes(true);
-        let Some(folder) = self.project.clone() else {
+        let Some(folder) = self.work_folder() else {
             return Err("No project folder.".into());
         };
         let Some(image) = self.images.get(index) else {
@@ -1820,8 +2196,9 @@ impl Session {
                 None => return Err("No free file name.".into()),
             },
         };
+        let extra = self.extra(&self.images[index]);
         let image = &mut self.images[index];
-        match write_gallery(&path, &mut image.gallery) {
+        match write_gallery(&path, &mut image.gallery, extra) {
             Ok(()) => {
                 image.label = file_title(&path);
                 image.path = Some(path.clone());
@@ -1840,10 +2217,13 @@ impl Session {
     /// Outside a project: Save, or Save As, to `path`.
     fn write_at(&mut self, index: usize, path: &Path, then_quit: bool, out: &mut Vec<AppMessage>) {
         self.finish_writes(true);
+        let Some(extra) = self.images.get(index).map(|image| self.extra(image)) else {
+            return;
+        };
         let Some(image) = self.images.get_mut(index) else {
             return;
         };
-        if let Err(reason) = write_gallery(path, &mut image.gallery) {
+        if let Err(reason) = write_gallery(path, &mut image.gallery, extra) {
             out.push(notice("This image could not be saved", &reason));
             if then_quit || self.quitting {
                 self.cancel_quit(out);
@@ -1979,6 +2359,8 @@ impl Session {
         if self.leave_memory_if_full() {
             out = self.raster_only();
         }
+        // The cells come before the panel that names one.
+        out.extend(self.cells_due());
         out.extend(self.declared());
         out
     }
@@ -2015,6 +2397,9 @@ impl Session {
     /// the rows it changed are written, to a file of their own; the image
     /// file is written whole at the next view that is not.
     fn raster_view(&mut self, index: usize, live: bool) -> Option<RasterView> {
+        if self.images.get(index).is_some_and(|image| image.rounds.viewing()) {
+            return self.round_view(index);
+        }
         let tool = self.raster_tool();
         let move_tool = self.tools.tool == ToolKind::Move;
         let crop_tool = self.tools.tool == ToolKind::Crop;
@@ -2051,13 +2436,9 @@ impl Session {
                 let rows = match (earlier, rect) {
                     (Some((_, since)), Some(rect)) if live => {
                         let path = cache.join(format!("{image_id}-{}-{next}.patch", frame.uid));
-                        let width = frame.doc.image.width as usize;
-                        let composite = frame.doc.composite();
-                        let mut bytes = Vec::with_capacity(rect[2] as usize * rect[3] as usize * 4);
-                        for y in rect[1] as usize..(rect[1] + rect[3]) as usize {
-                            let start = (y * width + rect[0] as usize) * 4;
-                            bytes.extend_from_slice(&composite[start..start + rect[2] as usize * 4]);
-                        }
+                        // The rows as shown, with the notes and the pre-vis
+                        // check over them.
+                        let bytes = frame.doc.shown_rows(crate::layered::Rect::new(rect[0] as i32, rect[1] as i32, rect[2] as i32, rect[3] as i32));
                         files::write_atomic(&path, &bytes).ok().map(|()| (since, rect, path))
                     }
                     _ => None,
@@ -2077,7 +2458,7 @@ impl Session {
                         }
                     }
                     None => {
-                        if files::write_atomic(&file, frame.doc.composite()).is_err() {
+                        if files::write_atomic(&file, &frame.doc.shown()).is_err() {
                             self.display_failed = true;
                         }
                         caught_up(frame);
@@ -2165,6 +2546,19 @@ impl Session {
             ToolKind::Text => RasterTool::Text,
             ToolKind::Hand => RasterTool::Hand,
             ToolKind::Zoom => RasterTool::Zoom,
+            // Draw makes marks as the brush paints; Pin clicks, and drags
+            // a pin, as the T tool does, and its words are typed as a
+            // text's are.
+            ToolKind::Notes => match self.mark_pen() {
+                Some((width, colour)) => RasterTool::Brush {
+                    rgb: [colour[0], colour[1], colour[2]],
+                    size: f64::from(width),
+                    hardness: 1.0,
+                    opacity: 1.0,
+                    pressure: false,
+                },
+                None => RasterTool::Text,
+            },
         }
     }
 
@@ -2285,12 +2679,21 @@ impl Session {
         };
         let name = protocol::split_tool_key(tool).map_or(tool, |(_, _, name)| name);
         let in_project = self.project.is_some();
+        let cache = self.cache.clone();
         let image = &mut self.images[index];
-        let (edits, shown, doc_edits) = (image.gallery.edits, image.frame().uid, image.doc().edits);
+        // The assistant's tools are the gallery's, whether or not a take
+        // is shown.
+        let shown = image.frame().uid;
+        let (edits, own, doc_edits) = (image.gallery.edits, image.gallery.frame().uid, image.gallery.frame().doc.edits);
         let (outcome, look) = crate::assist::run(&mut image.gallery, name, &input, group);
+        let own_changed = image.gallery.frame().uid != own;
+        // One that shows another image shows it in place of a take.
+        if own_changed && let Some(gone) = image.rounds.leave() {
+            forget_files(&cache, &image.id, gone);
+        }
         let shown_changed = image.frame().uid != shown;
-        let changed = image.gallery.edits != edits || (!shown_changed && image.doc().edits != doc_edits);
-        if changed || (in_project && shown_changed) {
+        let changed = image.gallery.edits != edits || (!own_changed && image.gallery.frame().doc.edits != doc_edits);
+        if changed || (in_project && own_changed) {
             image.dirty = true;
         }
         if shown_changed {
@@ -2417,9 +2820,9 @@ pub fn safe_name(name: &str) -> String {
 }
 
 /// Writes a tab's gallery to its file, each held slider finished first.
-fn write_gallery(path: &Path, gallery: &mut Gallery) -> Result<(), String> {
+fn write_gallery(path: &Path, gallery: &mut Gallery, extra: files::Extra) -> Result<(), String> {
     let (images, shown) = snapshot(gallery);
-    let encoded = files::write_ipx(path, images, shown, gallery.source.clone())?;
+    let encoded = files::write_ipx(path, images, shown, extra)?;
     keep(gallery, encoded);
     Ok(())
 }
@@ -2433,6 +2836,7 @@ fn snapshot(gallery: &mut Gallery) -> (Vec<files::Snapshot>, usize) {
         .map(|frame| {
             frame.doc.finish_edit();
             files::Snapshot::take(frame.uid, &frame.name, &frame.doc.image, frame.doc.active, frame.doc.generation, &frame.pngs)
+                .keeping(&frame.doc.notes, frame.doc.notes_hidden, &frame.doc.previs.settings)
         })
         .collect();
     (images, gallery.shown)
@@ -2448,13 +2852,14 @@ fn keep(gallery: &mut Gallery, encoded: Vec<files::Encoded>) {
 }
 
 /// What an image is, as far as its file goes: its gallery's changes, its
-/// images' changes, and the image shown. A write made of an image with
-/// the same signature holds everything in it.
+/// images' changes, and the gallery's image shown. A write made of an
+/// image with the same signature holds everything in it.
 type Signature = (u64, u64, u64);
 
 fn signature(image: &Image) -> Signature {
-    let edits = image.gallery.frames.iter().map(|frame| frame.doc.edits).sum();
-    (image.gallery.edits, edits, image.frame().uid)
+    // A take's notes are kept in the file too.
+    let edits = image.all_frames().map(|frame| frame.doc.edits).sum();
+    (image.gallery.edits, edits, image.gallery.frame().uid)
 }
 
 /// The thread that writes images inside a project, one at a time and in
@@ -2468,7 +2873,7 @@ struct Writer {
 
 struct Job {
     tab: String,
-    source: Option<protocol::OpenedFrom>,
+    extra: files::Extra,
     signature: Signature,
     path: PathBuf,
     images: Vec<files::Snapshot>,
@@ -2488,7 +2893,7 @@ impl Writer {
         let (finished, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for job in incoming {
-                let result = files::write_ipx(&job.path, job.images, job.shown, job.source);
+                let result = files::write_ipx(&job.path, job.images, job.shown, job.extra);
                 if finished.send(Done { tab: job.tab, signature: job.signature, path: job.path, result }).is_err() {
                     break;
                 }
@@ -2580,7 +2985,7 @@ fn rgb_of(value: &Value) -> Option<[u8; 3]> {
 }
 
 fn image_filter(with_ipx: bool) -> FileFilter {
-    let mut extensions = vec!["png".to_string(), "jpg".to_string(), "jpeg".to_string()];
+    let mut extensions = vec!["png".to_string(), "jpg".to_string(), "jpeg".to_string(), "webp".to_string()];
     if with_ipx {
         extensions.push("ipx".to_string());
     }
@@ -2911,6 +3316,24 @@ mod tests {
         assert_eq!(strong_labels(&options(&messages)), ["Layer 1 is locked."], "moving a group with a locked layer gave no reason");
         let messages = command(&mut session, "tool", json!({ "tool": "eraser" }));
         assert_eq!(strong_labels(&options(&messages)), ["Choose a layer to paint on; a group holds layers."]);
+    }
+
+    /// Catches the Notes row taken for a layer's place: with notes, the
+    /// row sits above the top layer, so a drop just under it puts a layer
+    /// on top, and a drop at its own place too.
+    #[test]
+    fn the_notes_row_is_not_a_place_among_the_layers() {
+        let mut session = Session::launch();
+        let _ = session.greeting();
+        let bottom = session.images[0].doc().active.unwrap();
+        command(&mut session, "add_layer", json!({}));
+        session.images[0].doc_mut().add_mark(&[[10.0, 10.0, 1.0], [40.0, 10.0, 1.0]], 4.0, layers::notes::RED);
+        command(&mut session, "reorder", json!({ "node": bottom, "value": 1, "parent": null }));
+        assert_eq!(session.images[0].doc().image.place(bottom).unwrap().index, 1, "the layer did not go on top");
+        command(&mut session, "reorder", json!({ "node": bottom, "value": 2 }));
+        assert_eq!(session.images[0].doc().image.place(bottom).unwrap().index, 0);
+        command(&mut session, "reorder", json!({ "node": bottom, "value": 0 }));
+        assert_eq!(session.images[0].doc().image.place(bottom).unwrap().index, 1);
     }
 
     /// Catches the Layers list's drop into or out of a group not reaching
@@ -3685,7 +4108,7 @@ mod tests {
             let gallery = &mut session.images[0].gallery;
             let (images, shown) = snapshot(gallery);
             let copied = images[0].copied();
-            keep(gallery, files::write_ipx(&path, images, shown, None).unwrap());
+            keep(gallery, files::write_ipx(&path, images, shown, files::Extra::default()).unwrap());
             copied
         };
         assert_eq!(write(&mut session), 2, "the first write did not copy both layers");

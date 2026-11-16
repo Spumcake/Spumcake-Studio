@@ -873,6 +873,79 @@ fn popover(ui: &mut egui::Ui, icon: &str, tip: &str, rows: &[protocol::Row]) {
     ui.data_mut(|data| data.insert_temp(id, open));
 }
 
+/// A popover with an action of its own, as one split control: the icon
+/// sends `action`, drawn pressed while `selected` and lighter and inert
+/// when not `enabled`, and the chevron beside it opens the rows, as the
+/// pre-vis check's button does in ig-previs-overlay-settings.
+#[allow(clippy::too_many_arguments)]
+fn split_popover(
+    ui: &mut egui::Ui,
+    icon: &str,
+    tip: &str,
+    rows: &[protocol::Row],
+    action: &Action,
+    selected: bool,
+    enabled: bool,
+    chosen: &mut Vec<Action>,
+) {
+    let (rect, _) = ui.allocate_exact_size(vec2(BUTTON_W + SPLIT_CHEVRON_W, ROW), Sense::hover());
+    let side = BUTTON_W - 2.0;
+    let plate = Rect::from_center_size(rect.center(), vec2(rect.width() - 2.0, side));
+    let button = Rect::from_min_max(rect.min, pos2(rect.left() + BUTTON_W, rect.bottom()));
+    let arrow = Rect::from_min_max(pos2(button.right(), rect.top()), rect.max);
+    let id = ui.id().with(("split-popover", icon, tip));
+    let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
+    let pressed = ui.interact(button, id.with("icon"), sense).on_hover_text(tip);
+    let opener = ui.interact(arrow, id.with("chevron"), sense).on_hover_text(tip);
+    if selected {
+        ui.painter().rect_filled(plate, 6.0, widgets::SELECTED);
+    }
+    let color = |hovered: bool| match (enabled, hovered) {
+        (true, true) => ICON_ACTIVE,
+        (true, false) => ICON,
+        (false, _) => ICON_QUIET,
+    };
+    let popover_id = id.with("popover");
+    let mut open = enabled && ui.data(|data| data.get_temp::<bool>(popover_id).unwrap_or(false));
+    paint_icon(ui.painter(), pos2(plate.left() + side / 2.0, rect.center().y), icon, ICON_POINTS, color(pressed.hovered()));
+    paint_icon(ui.painter(), arrow.center(), CHEVRON_ICON, 12.0, color(open || opener.hovered()));
+    pressed.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, tip));
+    opener.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, enabled, tip));
+    if enabled && pressed.clicked() {
+        chosen.push(action.clone());
+    }
+    if enabled && opener.clicked() {
+        open = !open;
+    }
+    if open {
+        let mut edits: Vec<crate::panel::Sent> = Vec::new();
+        let area = egui::Area::new(popover_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_bottom() + vec2(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(crate::panel::WIDTH - 32.0);
+                    let none = Action::new("");
+                    for row in rows {
+                        crate::panel::draw_row(ui, row, &none, &mut edits);
+                    }
+                });
+            });
+        if area.response.clicked_elsewhere() && !opener.clicked() {
+            open = false;
+        }
+        edits.retain(|sent| !matches!(sent, crate::panel::Sent::Run(action) if action.id.is_empty()));
+        if !edits.is_empty() {
+            ui.data_mut(|data| data.get_temp_mut_or_default::<Vec<crate::panel::Sent>>(popover_edits_id()).extend(edits));
+        }
+    }
+    ui.data_mut(|data| data.insert_temp(popover_id, open));
+}
+
+/// The chevron's part of a split popover, wider than a menu button's so
+/// it can be pressed on its own.
+const SPLIT_CHEVRON_W: f32 = 20.0;
+
 /// The edits made in popovers since the last call.
 pub(crate) fn take_popover_edits(ctx: &egui::Context) -> Vec<crate::panel::Sent> {
     ctx.data_mut(|data| data.remove_temp::<Vec<crate::panel::Sent>>(popover_edits_id()).unwrap_or_default())
@@ -913,6 +986,14 @@ fn item_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
             enabled,
             rows,
         } => context_menu(ui, icon, label, *enabled, rows, chosen),
+        ToolItem::Popover {
+            icon,
+            tip,
+            rows,
+            action: Some(action),
+            selected,
+            enabled,
+        } => split_popover(ui, icon, tip, rows, action, *selected, *enabled, chosen),
         ToolItem::Popover { icon, tip, rows, .. } => popover(ui, icon, tip, rows),
         ToolItem::Slider {
             caption,

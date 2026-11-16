@@ -294,6 +294,40 @@ impl Grade {
 
 pub use crate::text::Text;
 
+/// A pixel layer's link to the file it was made from, outside the image,
+/// which is never written: the file, whether the layer has been painted on
+/// since, and how the file was found when the image was opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linked {
+    pub link: layers::link::Link,
+    /// Painted on directly: its pixels are kept in the image's file from
+    /// then, and the link says what it was edited from.
+    pub edited: bool,
+    pub state: LinkState,
+    /// The sha256 of the bytes read when the file had changed since it was
+    /// linked: the first step that paints on the layer moves the link to
+    /// them, so "Edited from" names what the painting was made on.
+    pub read: Option<String>,
+}
+
+impl Linked {
+    pub fn new(link: layers::link::Link) -> Self {
+        Self { link, edited: false, state: LinkState::Holds, read: None }
+    }
+}
+
+/// How a linked file was found when its image was opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkState {
+    /// The file linked, as it was.
+    #[default]
+    Holds,
+    /// A file at its path with other bytes, read as it is.
+    Changed,
+    /// No file that could be read at its path: the layer opened empty.
+    Missing,
+}
+
 /// One layer or group. A group has `children`, bottom to top.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
@@ -312,6 +346,8 @@ pub struct Node {
     pub children: Option<Vec<Node>>,
     pub kind: Kind,
     pub mask: Option<LayerMask>,
+    /// A pixel layer made from a file outside the image.
+    pub link: Option<Linked>,
 }
 
 impl Node {
@@ -328,6 +364,7 @@ impl Node {
             children: None,
             kind: Kind::Pixels,
             mask: None,
+            link: None,
         }
     }
 
@@ -487,6 +524,13 @@ impl LayeredImage {
         let id = image.take_id();
         image.nodes.push(Node::layer(id, name));
         image.pixels.insert(id, pixels);
+        image
+    }
+
+    /// An image made of a file, as its only layer, linked to the file.
+    pub fn linked(name: &str, pixels: Pixels, link: layers::link::Link) -> Self {
+        let mut image = Self::from_pixels(name, pixels);
+        image.nodes[0].link = Some(Linked::new(link));
         image
     }
 
