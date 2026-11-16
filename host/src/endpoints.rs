@@ -127,7 +127,7 @@ fn probe_url(kind: EndpointKind, address: &str) -> String {
         EndpointKind::Comfyui => format!("{base}/system_stats"),
         EndpointKind::Openrouter => format!("{base}/key"),
         EndpointKind::Openai => format!("{base}/models"),
-        EndpointKind::Fal => base.to_string(),
+        EndpointKind::Fal | EndpointKind::Brave => base.to_string(),
     }
 }
 
@@ -139,7 +139,9 @@ pub(crate) fn check(kind: EndpointKind, address: &str, key: Option<String>) -> S
     }
     // Studio never calls fal.ai: its key is checked by request.py's first
     // request, after the person approves its plan.
-    if kind == EndpointKind::Fal {
+    // Nor Brave Search, which bills each search: its key is tried by the
+    // first search the person approves.
+    if matches!(kind, EndpointKind::Fal | EndpointKind::Brave) {
         return if key.as_deref().is_none_or(|key| key.trim().is_empty()) { Status::KeyMissing } else { Status::KeySaved };
     }
     status_of(assistant::status(&probe_url(kind, address), key.as_deref(), PROBE_LIMIT))

@@ -160,10 +160,22 @@ fn resolve(command: &[String], env: &ScriptEnv) -> Result<Vec<String>, String> {
 }
 
 /// Which of Skills' scripts a command runs, and its subcommand.
+/// Only a script Python runs directly counts, as `resolve` makes it, so a
+/// shell string that merely ends in a script's name is never taken for one.
 fn script_of(argv: &[String]) -> Option<(&'static str, String)> {
-    let at = argv.iter().position(|arg| arg.ends_with("request.py") || arg.ends_with("pipeline.py"))?;
-    let name = if argv[at].ends_with("request.py") { "request.py" } else { "pipeline.py" };
-    Some((name, argv.get(at + 1).cloned().unwrap_or_default()))
+    let program = Path::new(argv.first()?).file_name()?.to_string_lossy().to_string();
+    if !program.starts_with("python") {
+        return None;
+    }
+    let script = argv.get(1)?;
+    let name = if script.ends_with("request.py") {
+        "request.py"
+    } else if script.ends_with("pipeline.py") {
+        "pipeline.py"
+    } else {
+        return None;
+    };
+    Some((name, argv.get(2).cloned().unwrap_or_default()))
 }
 
 /// Whether a command spends money: the contract's list.
@@ -177,6 +189,23 @@ pub(crate) fn spends(argv: &[String]) -> bool {
         (pair[0].ends_with("request.py") && pair[1] == "run" && !stand_in)
             || (pair[0].ends_with("pipeline.py") && pair[1] == "rerun" && !stand_in && !plan_only)
     })
+}
+
+/// Whether a command only reads, and so runs without asking, as the owner
+/// approved on 2026-11-16: the contract's exact list of Skills' commands
+/// that render, download, spend, and change nothing. `pipeline.py sql`
+/// counts only with `--read-only`. Commands run with no shell, so a command
+/// given to one names no script of its own and never counts.
+pub(crate) fn only_reads(argv: &[String]) -> bool {
+    match script_of(argv) {
+        Some(("request.py", sub)) => matches!(sub.as_str(), "show" | "tell" | "list" | "check" | "plan" | "version" | "record"),
+        Some(("pipeline.py", sub)) => match sub.as_str() {
+            "touches" | "history" => true,
+            "sql" => argv.iter().any(|arg| arg == "--read-only"),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Whether a command runs Skills' own scripts, the only commands the keys
@@ -345,6 +374,13 @@ impl Runner {
                 if spends(&argv) {
                     return Begun::Answered(failed(call, "This command spends money, so it is never run as a plain command. Send a request with send_request and its spec, or a step with rerun_step, so the person approves its plan."));
                 }
+                // A command that only reads runs at once, with no question.
+                if only_reads(&argv) {
+                    return match self.start(call, tool, argv, Vec::new(), String::new(), false) {
+                        Ok(()) => Begun::Waiting,
+                        Err(reason) => Begun::Answered(failed(call, reason)),
+                    };
+                }
                 Asking::Command { call: call.to_string(), tool: tool.to_string(), argv, why: text("why") }
             }
             SEND_REQUEST => {
@@ -476,6 +512,40 @@ impl Runner {
         Ok(())
     }
 
+    /// Whether a command made for `call` is running.
+    pub(crate) fn is_running(&self, call: &str) -> bool {
+        self.jobs.iter().any(|job| job.call == call)
+    }
+
+    /// Runs a command at once, with no question: the person's own action
+    /// in a workspace, such as filing a file, which spends nothing. Its
+    /// answer comes back from `poll` under `call`.
+    pub(crate) fn run_now(&mut self, folder: &Path, env: ScriptEnv, call: &str, command: &[String]) -> Result<(), String> {
+        let argv = resolve(command, &env)?;
+        if spends(&argv) {
+            return Err(String::from("This command spends money, so it is asked for with its plan first."));
+        }
+        self.cwd = folder.to_path_buf();
+        self.env = env.vars;
+        self.start(call, "", argv, Vec::new(), String::new(), false)
+    }
+
+    /// Asks the person to approve a request from its spec, for a caller
+    /// that is not the assistant, such as a cell on the Prompt page.
+    pub(crate) fn ask_request(&mut self, folder: &Path, env: ScriptEnv, call: &str, spec: &str) -> Begun {
+        self.begin(folder, env, call, "", SEND_REQUEST, &json!({ "spec": spec }))
+    }
+
+    /// The person stopped one caller's command, such as a cell's run. An
+    /// approved spend runs on, as `stop` says; anything else is killed.
+    pub(crate) fn stop_call(&mut self, call: &str) -> Vec<ToolResult> {
+        let (stopping, kept): (Vec<Job>, Vec<Job>) = std::mem::take(&mut self.jobs).into_iter().partition(|job| job.call == call);
+        self.jobs = stopping;
+        let answers = self.stop_jobs();
+        self.jobs = kept;
+        answers
+    }
+
     /// The window to wake when a command's output arrives.
     pub(crate) fn wake_with(&mut self, ctx: &eframe::egui::Context) {
         if self.ctx.is_none() {
@@ -486,6 +556,13 @@ impl Runner {
     /// Called each frame: the answers of commands that ended, and the
     /// output of those still running, as `(tool key, text)` for their rows.
     pub(crate) fn poll(&mut self) -> (Vec<ToolResult>, Vec<(String, String)>) {
+        let (answers, live, _) = self.poll_all();
+        (answers, live)
+    }
+
+    /// As `poll`, with each command that ended well, as it ran.
+    pub(crate) fn poll_all(&mut self) -> (Vec<ToolResult>, Vec<(String, String)>, Vec<Vec<String>>) {
+        let mut finished = Vec::new();
         self.detached.retain_mut(|child| child.try_wait().ok().flatten().is_none());
         let mut answers = Vec::new();
         let mut live = Vec::new();
@@ -514,6 +591,9 @@ impl Runner {
                         next.push((job.call, job.tool, then.remove(0), then, all, job.spends));
                         continue;
                     }
+                    if code == Some(0) {
+                        finished.push(job.argv.clone());
+                    }
                     answers.push(ToolResult {
                         call: job.call,
                         ok: code == Some(0),
@@ -529,7 +609,7 @@ impl Runner {
                 answers.push(failed(&call, reason));
             }
         }
-        (answers, live)
+        (answers, live, finished)
     }
 
     /// The person stopped the request. An approved spend is never killed:
@@ -542,6 +622,12 @@ impl Runner {
         if let Some(result) = self.answer(false) {
             answers.push(result);
         }
+        answers.extend(self.stop_jobs());
+        answers
+    }
+
+    fn stop_jobs(&mut self) -> Vec<ToolResult> {
+        let mut answers = Vec::new();
         for mut job in std::mem::take(&mut self.jobs) {
             let text = job.output.lock().map(|output| output.clone()).unwrap_or_default();
             let submitted = text.lines().find_map(|line| line.split(SUBMITTED).nth(1).map(|id| id.trim().to_string()));
@@ -617,6 +703,22 @@ mod tests {
         assert!(!setup.contains("secret-key"), "{setup}");
         assert!(setup.contains("setup-v1"));
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Catches a read-only command asked about, or a command that writes
+    /// run without asking: the owner's exact list, and nothing else.
+    #[test]
+    fn only_the_listed_reads_run_without_asking() {
+        for read in [["request.py", "show", "f.png"], ["request.py", "tell", "r1"], ["pipeline.py", "touches", "002"], ["pipeline.py", "history", "002"]] {
+            assert!(only_reads(&argv(&["python3", read[0], read[1], read[2]])), "{read:?}");
+        }
+        assert!(only_reads(&argv(&["python3", "/s/pipeline.py", "sql", "002", "SELECT name FROM artifact", "--read-only"])));
+        assert!(!only_reads(&argv(&["python3", "/s/pipeline.py", "sql", "002", "DELETE FROM artifact"])));
+        for write in [["request.py", "collect"], ["request.py", "resource"], ["pipeline.py", "publish"], ["pipeline.py", "keep"], ["pipeline.py", "fact"]] {
+            assert!(!only_reads(&argv(&["python3", write[0], write[1]])), "{write:?}");
+        }
+        assert!(!only_reads(&argv(&["sh", "-c", "python3 request.py show f.png"])));
+        assert!(!runs_skills(&argv(&["sh", "-c", "env; python3 request.py"])), "a shell string ending in a script's name got the keys");
     }
 
     /// Catches a command that spends passed as a plain one through a

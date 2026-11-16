@@ -367,6 +367,15 @@ fn report_record(text: &str) -> Option<String> {
     serde_json::to_string_pretty(&record).ok()
 }
 
+/// A request's report's record, as JSON, with nothing left out.
+pub(crate) fn record_of(text: &str) -> Option<Value> {
+    let start = text.find(r#"<script type="application/json" id="request">"#)?;
+    let body = &text[start..];
+    let open = body.find('>')? + 1;
+    let close = body.find("</script>")?;
+    serde_json::from_str(&body[open..close].replace("<\\/", "</")).ok()
+}
+
 fn leave_out_embedded(value: &mut Value) {
     match value {
         Value::String(text) if text.starts_with("data:") => {
@@ -525,7 +534,7 @@ fn read_skill(skills: &[Skill], name: &str) -> Result<Value, String> {
 }
 
 /// The local time as a file name starts with it: `2026-11-14_21-12`.
-fn local_stamp() -> String {
+pub(crate) fn local_stamp() -> String {
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as libc::time_t)

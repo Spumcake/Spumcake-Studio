@@ -16,6 +16,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 mod agent;
 mod openrouter;
+pub mod web;
 mod prompt;
 pub use openrouter::{image_models, make_image, models, status, stream_prompt};
 
