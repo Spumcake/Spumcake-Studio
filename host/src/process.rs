@@ -128,9 +128,9 @@ pub struct Declared {
     pub views3d: HashMap<String, View3dShown>,
     /// Requests whose reports it asked to see, oldest first.
     pub reports: VecDeque<String>,
-    /// Plain files it asked the runner to file: the tab, the file, and the
-    /// workspace file it came from. Chat Assistant Work's runner takes them.
-    pub resources: VecDeque<(String, String, String)>,
+    /// Plain files it asked the runner to file: the tab, the file, and what
+    /// it came from, the workspace file first, then the linked files beneath. Chat Assistant Work's runner takes them.
+    pub resources: VecDeque<(String, String, Vec<String>)>,
     /// Cells the toolbar asked the host to run.
     pub run_cells: VecDeque<(String, String)>,
     /// Cells the toolbar asked the host to stop.
