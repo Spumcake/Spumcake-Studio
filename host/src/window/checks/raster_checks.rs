@@ -61,6 +61,7 @@ fn view(dir: &Path, tool: RasterTool) -> RasterView {
         crop: Some([0.0, 0.0, 20.0, 10.0]),
         bounds: Some([0.0, 0.0, 40.0, 20.0]),
         camera: Some(DocumentCamera { origin: ORIGIN, zoom: ZOOM, rotation: 0.0, flip: false }),
+        camera_owner: protocol::RasterCamera::Host,
         film: None,
         text: None,
     }

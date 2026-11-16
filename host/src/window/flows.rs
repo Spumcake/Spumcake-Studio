@@ -48,6 +48,14 @@ fn import_line(path: &Path) -> String {
 const EMPTY_TRASH_LINE: &str =
     "Projects in Trash go to the system's trash with their folders. Sessions in Trash are deleted; their projects keep their files.";
 
+/// What the person asked for while a restore waited for a program still
+/// starting. It is done once the restore ends, so a quit or a menu choice
+/// is never lost because one program said hello later than the others.
+enum Held {
+    Quit,
+    Choice(SessionChoice),
+}
+
 /// The quit flow is closing every tab, and then this happens.
 enum Closing {
     Quit { closed: bool },
@@ -161,6 +169,8 @@ pub(crate) struct Flows {
     keeping: Option<Keeping>,
     closing: Option<Closing>,
     restore: Option<Restore>,
+    /// A quit or menu choice waiting for the restore to end.
+    held: Option<Held>,
     /// The tabs at the start of a quit, updated with a path a save produces.
     kept: Option<Kept>,
     /// Paths the file dialog returned during a quit: the application, how
@@ -202,6 +212,12 @@ impl Flows {
 
     fn busy(&self) -> bool {
         self.question.is_some() || self.keeping.is_some() || self.closing.is_some() || self.restore.is_some()
+    }
+
+    /// Only a restore is under way: what the person asks for now is held
+    /// until it ends, rather than lost.
+    fn only_restoring(&self) -> bool {
+        self.restore.is_some() && self.question.is_none() && self.keeping.is_none() && self.closing.is_none()
     }
 }
 
@@ -622,7 +638,9 @@ impl HostWindow {
             self.settings_panel.open_at(crate::settings_panel::Page::General);
             return;
         }
-        if self.locked() || self.flows.busy() {
+        // During a restore the quit goes ahead: the window's close holds it
+        // until the restore ends.
+        if self.locked() || (self.flows.busy() && !self.flows.only_restoring()) {
             return;
         }
         if choice == LogoChoice::Quit {
@@ -650,7 +668,18 @@ impl HostWindow {
             self.refresh_sessions();
             return;
         }
-        if self.locked() || self.flows.busy() || self.project.is_none() {
+        if self.locked() || self.project.is_none() {
+            return;
+        }
+        // A choice made while a program is still starting waits for the
+        // restore; a quit already held goes first.
+        if self.flows.only_restoring() {
+            if !matches!(self.flows.held, Some(Held::Quit)) {
+                self.flows.held = Some(Held::Choice(choice));
+            }
+            return;
+        }
+        if self.flows.busy() {
             return;
         }
         let Some(data) = self.data.clone() else {
@@ -1106,8 +1135,25 @@ impl HostWindow {
         self.keeping_frame();
         self.closing_frame(ctx);
         self.restore_frame();
+        self.held_frame(frame);
         self.write_project(false);
-        let _ = frame;
+    }
+
+    /// Once a restore has ended, does the quit or menu choice held while it
+    /// waited for a program still starting.
+    fn held_frame(&mut self, frame: &mut eframe::Frame) {
+        if self.flows.restore.is_some() {
+            return;
+        }
+        match self.flows.held.take() {
+            Some(Held::Quit) => {
+                if self.flows.question.is_none() && self.flows.keeping.is_none() && self.flows.closing.is_none() {
+                    self.start_closing(Closing::Quit { closed: false });
+                }
+            }
+            Some(Held::Choice(choice)) => self.session_choice(choice, frame),
+            None => {}
+        }
     }
 
     fn settle_frame(&mut self) {
@@ -1153,7 +1199,11 @@ impl HostWindow {
             Some(_) => ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose),
             None => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                if self.flows.question.is_none() && self.flows.restore.is_none() && self.flows.keeping.is_none() {
+                if self.flows.only_restoring() {
+                    // A program is still starting: the quit waits for the
+                    // restore, so every tab it reopens is kept.
+                    self.flows.held = Some(Held::Quit);
+                } else if self.flows.question.is_none() && self.flows.restore.is_none() && self.flows.keeping.is_none() {
                     self.start_closing(Closing::Quit { closed: false });
                 }
             }

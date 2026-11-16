@@ -403,7 +403,9 @@ impl HostWindow {
             let declared = &mut started.running.declared;
             // A raster tab's camera answers the drawing surface's own
             // commands, and `canvas.zoom` sets a zoom by number.
+            // Under the workspace's own camera, they go to it as commands.
             if let Some(display) = declared.rasters.get_mut(&tab)
+                && display.view.camera_owner.is_host()
                 && Doc::moves_camera_only(&action.id)
             {
                 match action.id.as_str() {
@@ -711,6 +713,7 @@ impl eframe::App for HostWindow {
         self.pump_assistant();
         self.take_cell_requests();
         self.take_items();
+        self.take_reports();
         // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
         let editable = if self.locked() { Vec::new() } else { self.edited_types() };
@@ -1425,6 +1428,38 @@ impl HostWindow {
         }
     }
 
+    /// A workspace asked to show a request's report. Until the window draws
+    /// reports, the report's page opens with the system's own opener, as a
+    /// link does.
+    fn take_reports(&mut self) {
+        let mut asked = Vec::new();
+        for started in &mut self.apps {
+            asked.extend(started.running.declared.reports.drain(..));
+        }
+        for request in asked {
+            match self.report_page(&request) {
+                Ok(page) => self.ctx.open_url(egui::OpenUrl::new_tab(page.display().to_string())),
+                Err(reason) => self.tell(reason),
+            }
+        }
+    }
+
+    /// A request's report page, `requests/<request>.html` in the project.
+    fn report_page(&self, request: &str) -> Result<PathBuf, String> {
+        let plain = !request.is_empty() && request != "." && request != ".." && !request.contains(['/', '\\']);
+        if !plain {
+            return Err(format!("“{request}” names no request, so there is no report to show."));
+        }
+        let Some(project) = &self.project else {
+            return Err(String::from("No project is open, so there is no report to show."));
+        };
+        let page = project.folder.join("requests").join(format!("{request}.html"));
+        if !page.is_file() {
+            return Err(format!("Request {request} has no report yet."));
+        }
+        Ok(page)
+    }
+
     fn take_cell_requests(&mut self) {
         let mut runs = Vec::new();
         let mut stops = Vec::new();
@@ -2128,6 +2163,8 @@ fn asked_zoom(action: &Action) -> Option<f64> {
 fn waits_while_locked(message: &HostMessage) -> bool {
     match message {
         HostMessage::Command { id, .. } => id != "select_tab",
+        // A workspace's own camera moves, as the host's does.
+        HostMessage::RasterGesture { gesture: protocol::RasterGesture::View { .. }, .. } => false,
         HostMessage::Gesture { .. }
         | HostMessage::RasterGesture { .. }
         | HostMessage::RasterText { .. }
@@ -2299,6 +2336,13 @@ impl HostWindow {
             Some(ContentsKind::Canvas) => self.show_canvas(ui, app, &tab, rect, dismissing),
             Some(ContentsKind::Cells) => self.show_cells(ui, app, &tab, rect),
             Some(ContentsKind::Raster) => self.show_raster(ui, app, &tab, rect, dismissing),
+            // 3D Viewport Work's view draws the scene; until it lands, the
+            // area is empty.
+            Some(ContentsKind::View3d) => {
+                ui.painter()
+                    .with_clip_rect(rect)
+                    .rect_filled(rect, 0.0, CANVAS);
+            }
             Some(ContentsKind::Grid) => {
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.rect_filled(rect, 0.0, CANVAS);

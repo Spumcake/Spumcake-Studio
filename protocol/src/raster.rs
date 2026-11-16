@@ -47,11 +47,36 @@ pub struct RasterView {
     /// host owns the camera after that and reports it with `camera`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<DocumentCamera>,
+    /// Who moves the view: the host, by default, or the workspace.
+    #[serde(default, skip_serializing_if = "RasterCamera::is_host")]
+    pub camera_owner: RasterCamera,
     /// The tab's images, as a filmstrip along the bottom of the working
     /// area, as the owner's mockup and 0.11's gallery views show. None draws
     /// no strip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub film: Option<Film>,
+}
+
+/// Who moves a raster tab's view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RasterCamera {
+    /// The host: the wheel, a pan, the magnifier, and the drawing
+    /// surface's zoom commands move its camera, which it reports with
+    /// `camera`.
+    #[default]
+    Host,
+    /// The workspace: the host's camera moves only when a view carries
+    /// `camera`. The wheel, a pan, and the magnifier's click are sent as
+    /// `view` gestures, and the drawing surface's zoom commands as
+    /// ordinary commands.
+    Workspace,
+}
+
+impl RasterCamera {
+    pub fn is_host(&self) -> bool {
+        *self == Self::Host
+    }
 }
 
 /// What changed since an earlier revision: `[x, y, width, height]` in
@@ -257,6 +282,22 @@ pub enum RasterGesture {
     TextBox { rect: [f64; 4] },
     /// The crop box after a drag made or changed it: `[x, y, width, height]`.
     Crop { rect: [f64; 4] },
+    /// Under the workspace's own camera, the wheel, a pan, or the
+    /// magnifier's click: zoom by `zoom_by` about `at`, and move the view
+    /// by `pan_by`, how far the image moved under the pointer, positive
+    /// right and down. A pan sends one each frame it moves.
+    View {
+        #[serde(default = "one")]
+        zoom_by: f64,
+        #[serde(default)]
+        pan_by: [f64; 2],
+        #[serde(default)]
+        at: [f64; 2],
+    },
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 /// A text being typed in: its box, its caret, and its selected spans, as
@@ -340,6 +381,7 @@ mod tests {
             crop: Some([1.0, 2.0, 3.0, 4.0]),
             bounds: Some([0.0, 0.0, 1920.0, 1080.0]),
             camera: Some(DocumentCamera { origin: [0.0, 0.0], zoom: 0.5, rotation: 0.0, flip: false }),
+            camera_owner: RasterCamera::Workspace,
             film: Some(Film {
                 items: vec![FilmItem {
                     name: "Beach".into(),
@@ -376,6 +418,15 @@ mod tests {
         let old: Film = serde_json::from_str(old).unwrap();
         assert!(old.groups.is_empty());
         assert_eq!((old.items[0].badge.as_str(), old.items[0].chosen, &old.items[0].pending), ("", false, &None));
+        // A view from before `camera_owner` leaves the camera to the host,
+        // and a `view` gesture with nothing but its kind zooms by 1.
+        let mut plain = serde_json::to_value(&view).unwrap();
+        plain.as_object_mut().unwrap().remove("camera_owner");
+        assert_eq!(serde_json::from_value::<RasterView>(plain).unwrap().camera_owner, RasterCamera::Host);
+        assert_eq!(
+            serde_json::from_str::<RasterGesture>(r#"{"kind":"view"}"#).unwrap(),
+            RasterGesture::View { zoom_by: 1.0, pan_by: [0.0, 0.0], at: [0.0, 0.0] }
+        );
         // A Ctrl- or Shift-click adds `extend`; a plain click leaves it out.
         let film = view.film.unwrap();
         assert_eq!(film.select_message(2, false).arg, Some(serde_json::json!({"value": 2})));
@@ -393,6 +444,7 @@ mod tests {
             RasterGesture::Drag { from: [0.0, 0.0], to: [5.0, 5.0] },
             RasterGesture::Pick { at: [3.0, 4.0] },
             RasterGesture::Crop { rect: [0.0, 0.0, 5.0, 5.0] },
+            RasterGesture::View { zoom_by: 1.25, pan_by: [-3.0, 4.5], at: [10.0, 20.0] },
         ] {
             let message = crate::HostMessage::RasterGesture { tab: "1".into(), gesture };
             let text = serde_json::to_string(&message).unwrap();
