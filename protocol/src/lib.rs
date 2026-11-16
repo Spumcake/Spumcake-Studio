@@ -216,16 +216,17 @@ pub enum AppMessage {
     /// in the project.
     OpenReport { request: String },
     /// Asks the host's runner to file a plain file the workspace wrote, such
-    /// as a layer written out as a PNG, with `request.py resource <path>
-    /// --from <from>`: `path` is the plain file's path in the project, and
-    /// `from` the workspace's file in `work/` it came from, recorded as
-    /// where it came from.
+    /// as a layer written out as a PNG, with `request.py resource <path>`
+    /// and one `--from` for each entry of `from`: `path` is the plain file's
+    /// path in the project, and `from` lists the workspace's file in `work/`
+    /// it came from, recorded as where it came from, then every linked file
+    /// beneath it, recorded as inputs so `touches` follows the edit back.
     FileResource {
         tab: String,
         #[serde(default)]
         path: String,
         #[serde(default)]
-        from: String,
+        from: Vec<String>,
     },
 }
 
@@ -1554,7 +1555,7 @@ mod tests {
         round_trip_app(AppMessage::FileResource {
             tab: "1".into(),
             path: "library/layers/door-glow.png".into(),
-            from: "work/door.ipx".into(),
+            from: vec!["work/door.ipx".into(), "library/2026-11-14_19-02-door-take.png".into()],
         });
         round_trip_host(HostMessage::CellBecameStep {
             tab: "1".into(),
