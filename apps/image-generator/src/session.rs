@@ -436,7 +436,7 @@ impl Session {
                         // was known are not needed any more.
                         let _ = std::fs::remove_dir_all(&self.cache);
                     }
-                    self.cache = folder.join(".inpainter").join("cache").join("image-generator");
+                    self.cache = folder.join(protocol::PROJECT_DIR).join("cache").join("image-generator");
                     // Rows a stroke left there in an earlier run are not
                     // needed.
                     for entry in std::fs::read_dir(&self.cache).into_iter().flatten().flatten() {
@@ -1327,7 +1327,7 @@ impl Session {
         let _ = std::fs::remove_dir_all(&self.cache);
         self.in_memory = false;
         self.cache = match &self.project {
-            Some(folder) => folder.join(".inpainter").join("cache").join("image-generator"),
+            Some(folder) => folder.join(protocol::PROJECT_DIR).join("cache").join("image-generator"),
             None => scratch_folder(),
         };
         for image in &mut self.images {

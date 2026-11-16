@@ -107,7 +107,7 @@ pub fn render_path(owner: &str, item: &ItemRef, part: Option<CellUse>, fingerpri
         Some(CellUse::Prompt) => "-prompt",
         Some(CellUse::Result) => "-result",
     };
-    format!(".inpainter/renders/{owner}/{safe}{part}-{fingerprint}.{extension}")
+    format!("{}/renders/{owner}/{safe}{part}-{fingerprint}.{extension}", crate::PROJECT_DIR)
 }
 
 /// The fingerprint of a cell: its current prompt and its current result,
@@ -145,9 +145,9 @@ mod tests {
     #[test]
     fn a_render_is_named_by_its_item_and_fingerprint() {
         let item = ItemRef { path: "Beach.ipx".into(), item: Some("img 2".into()) };
-        assert_eq!(render_path("image-generator", &item, None, "00ff", "png"), ".inpainter/renders/image-generator/img_2-00ff.png");
+        assert_eq!(render_path("image-generator", &item, None, "00ff", "png"), ".spumcake/renders/image-generator/img_2-00ff.png");
         let whole = ItemRef { path: "Beach.ipx".into(), item: None };
-        assert_eq!(render_path("image-generator", &whole, None, "00ff", "png"), ".inpainter/renders/image-generator/file-00ff.png");
+        assert_eq!(render_path("image-generator", &whole, None, "00ff", "png"), ".spumcake/renders/image-generator/file-00ff.png");
     }
 
     /// Catches a cell's prompt and result rendered to one file, where the

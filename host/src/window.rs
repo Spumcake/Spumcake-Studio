@@ -76,7 +76,7 @@ const CLAIM_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
 struct Project {
     id: String,
     name: String,
-    /// The project's folder, which holds its activities and `.inpainter`.
+    /// The project's folder, which holds its activities and `.spumcake`.
     folder: PathBuf,
     /// The open session: its id, name, and when it was made.
     session: String,

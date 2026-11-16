@@ -2,7 +2,7 @@
 //! sessions and projects, new ones, Trash, and quitting.
 //!
 //! The host owns projects and sessions. A session's file, inside its
-//! project's `.inpainter/sessions`, holds each tab's sub-application, file
+//! project's `.spumcake/sessions`, holds each tab's sub-application, file
 //! (relative to the project's folder), label, and camera, the selected tab,
 //! whether the workspace panel is shown, and the conversation, never a
 //! sub-application's work. Switching closes every tab through the quit flow;
@@ -702,6 +702,30 @@ impl HostWindow {
                 };
                 if let Some(path) = picked {
                     self.sessions.chose_root(&path.display().to_string());
+                }
+            }
+            SessionChoice::OpenFolder => {
+                let picked = if self.native_dialogs {
+                    crate::dialogs::pick_folder(frame)
+                } else {
+                    self.scripted_path()
+                };
+                let Some(folder) = picked else {
+                    return;
+                };
+                match workspace::open_folder_as_project(&data, &folder) {
+                    Ok((record, session)) => {
+                        self.sessions.open = false;
+                        self.sessions.page = Page::Recent;
+                        let folder = folder.canonicalize().unwrap_or(folder);
+                        self.start_closing(Closing::Open(Opening {
+                            id: record.id,
+                            name: record.name,
+                            folder,
+                            session,
+                        }));
+                    }
+                    Err(reason) => self.tell(format!("That folder could not be opened as a project: {reason}")),
                 }
             }
             SessionChoice::CreateProject { name, location } => {

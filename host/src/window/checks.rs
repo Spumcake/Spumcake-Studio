@@ -1294,7 +1294,7 @@ fn a_new_project_goes_where_chosen_and_never_over_other_files() {
     window.menu(SessionChoice::CreateProject { name: "Full".into(), location: full.display().to_string() });
     assert!(window.app.sessions.form_error.is_some(), "a folder with files in it was taken");
     assert_eq!(window.here().0, first);
-    assert!(!full.join(".inpainter").exists());
+    assert!(!full.join(protocol::PROJECT_DIR).exists());
 
     let lighthouse = dir.join("Studio projects").join("Lighthouse");
     window.menu(SessionChoice::CreateProject { name: "Lighthouse".into(), location: lighthouse.display().to_string() });
@@ -1305,8 +1305,33 @@ fn a_new_project_goes_where_chosen_and_never_over_other_files() {
     assert_eq!(open.name, "Lighthouse");
     assert_eq!(open.folder, lighthouse);
     assert_eq!(open.session_name, "Untitled Session");
-    assert!(lighthouse.join(".inpainter").join("project.json").is_file());
+    assert!(lighthouse.join(protocol::PROJECT_DIR).join("project.json").is_file());
     assert_eq!(std::fs::read_to_string(full.join("notes.txt")).unwrap(), "mine");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Catches a folder of someone's work that Open folder… refuses, changes, or
+/// opens without moving the window to it.
+#[test]
+fn open_folder_opens_a_folder_of_work_as_a_project() {
+    use crate::sessions::SessionChoice;
+    let dir = scratch("open-folder");
+    let stand_in = StandIn::start(Vec::new());
+    let mut window = project_window(both(), &stand_in, &dir);
+    let (first, _, _) = window.here();
+    let film = dir.join("last-order");
+    std::fs::create_dir_all(film.join("requests")).unwrap();
+    std::fs::write(film.join("requests").join("report.html"), "made").unwrap();
+    window.app.scripted_paths.push_back(film.clone());
+    window.menu(SessionChoice::OpenFolder);
+    window.until(|app| app.project.as_ref().is_some_and(|open| open.id != first));
+    let session = window.here().2;
+    window.settle_on(&session);
+    let open = window.app.project.as_ref().unwrap();
+    assert_eq!(open.name, "last-order");
+    assert_eq!(open.folder, film.canonicalize().unwrap());
+    assert!(film.join(protocol::PROJECT_DIR).join("project.json").is_file());
+    assert_eq!(std::fs::read_to_string(film.join("requests").join("report.html")).unwrap(), "made");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1380,11 +1405,11 @@ fn an_archived_project_leaves_the_lists_and_comes_back() {
     window.app.refresh_sessions();
     let row = window.app.sessions.projects.iter().find(|row| row.id == project).expect("an archived project left All Projects");
     assert!(row.archived);
-    assert!(folder.join(".inpainter").is_dir(), "archiving removed the project");
+    assert!(folder.join(protocol::PROJECT_DIR).is_dir(), "archiving removed the project");
     assert!(!window.app.sessions.trash.iter().any(|row| row.name == "Untitled Project" && matches!(&row.item, crate::sessions::Trashed::Project(id) if *id == project)));
     window.menu(SessionChoice::EmptyTrash);
     window.app.answer_question("empty");
-    assert!(folder.join(".inpainter").is_dir(), "Empty Trash touched an archived project");
+    assert!(folder.join(protocol::PROJECT_DIR).is_dir(), "Empty Trash touched an archived project");
     window.menu(SessionChoice::ArchiveProject { project: project.clone(), archived: false });
     assert!(window.app.sessions.projects.iter().any(|row| row.id == project && !row.archived));
     assert!(window.app.sessions.recent.iter().any(|row| row.id == session));
@@ -1670,7 +1695,7 @@ fn what_0_13_kept_opens_in_the_renamed_workspaces() {
     keep_ticking(&mut window);
     drop(window);
 
-    let sessions = folder.join(".inpainter").join("sessions");
+    let sessions = folder.join(protocol::PROJECT_DIR).join("sessions");
     for entry in std::fs::read_dir(&sessions).unwrap() {
         let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
         for former in ["simple-sketch", "image-editor", "mission-control"] { // stored spelling
