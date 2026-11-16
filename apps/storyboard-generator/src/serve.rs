@@ -378,7 +378,10 @@ impl Server {
             | HostMessage::ShowSource { .. }
             | HostMessage::OpenAsNew { .. }
             | HostMessage::RasterText { .. }
-            | HostMessage::Takes { .. } => {}
+            | HostMessage::Takes { .. }
+            | HostMessage::CellBecameStep { .. }
+            | HostMessage::View3dCamera { .. }
+            | HostMessage::View3dPicked { .. } => {}
             HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {
                 id,
                 thumbnail: None,

@@ -561,6 +561,78 @@ fn a_recipe_and_a_conversation_cell_come_back_with_the_project() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A real program that starts late: it waits until `gate` exists, then a
+/// tenth of a second more, then runs as itself.
+fn late_program(dir: &Path, program: &Path, gate: &Path) -> std::path::PathBuf {
+    let path = dir.join("late");
+    let script = format!(
+        "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.02; done\nsleep 0.1\nexec '{}' \"$@\"\n",
+        gate.display(),
+        program.display()
+    );
+    std::fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// A quit asked for while one workspace is still starting waits for the
+/// restore, so it neither is lost nor drops that workspace's tab, whichever
+/// program says hello first.
+#[test]
+fn a_quit_while_a_workspace_starts_late_waits_for_it() {
+    let dir = scratch("late");
+    let gate = dir.join("gate");
+    std::fs::write(&gate, "").unwrap();
+    let late = late_program(&dir, &built("storyboard-generator"), &gate);
+    let stand_in = StandIn::start(Vec::new());
+    let mut window = project_window(
+        vec![
+            spec("storyboard-generator", "Storyboard Generator", &late),
+            spec("template", "Template", &built("template")),
+            spec("recipe-creation", "Recipe Creation", &built("recipe-creation")),
+        ],
+        &stand_in,
+        &dir,
+    );
+    let (id, files, session) = window.here();
+    window.menu(crate::sessions::SessionChoice::NewSession { project: id.clone() });
+    window.until(|app| {
+        app.project.as_ref().is_some_and(|project| project.session != session)
+            && app.flows.idle()
+            && app.apps.iter().all(|started| !started.running.pending() && started.running.tabs().1.is_some())
+    });
+    keep_ticking(&mut window);
+    // Reopening the first session, the storyboard's program starts only
+    // after the others have reopened their tabs.
+    std::fs::remove_file(&gate).unwrap();
+    window.menu(crate::sessions::SessionChoice::Open { project: id.clone(), session: session.clone() });
+    window.until(|app| {
+        app.project.as_ref().is_some_and(|project| project.session == session)
+            && app.apps.iter().any(|started| started.id == "recipe-creation" && !started.running.tabs().0.is_empty())
+    });
+    let storyboard = |app: &crate::window::HostWindow| {
+        app.apps.iter().find(|started| started.id == "storyboard-generator").map(|started| started.running.pending())
+    };
+    assert_eq!(storyboard(&window.app), Some(true), "the storyboard's program started before its gate opened");
+    assert!(!window.app.flows.idle(), "the restore ended without the storyboard");
+    window.logo(crate::chat::LogoChoice::Quit);
+    window.step();
+    std::fs::write(&gate, "").unwrap();
+    window.until(|app| app.apps.iter().all(|started| started.running.declared.quit_ready));
+    window.step();
+    window.step();
+    drop(window);
+    let kept = crate::workspace::SessionFile::read(&files, &session).unwrap();
+    let apps: Vec<&str> = kept.tabs.iter().map(|tab| tab.app.as_str()).collect();
+    assert!(apps.contains(&"storyboard-generator"), "the quit dropped the late workspace's tab: {apps:?}");
+    assert!(apps.contains(&"recipe-creation"), "the quit dropped the recipe's tab: {apps:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// S-4. Closing a changed recipe in a project writes it there and asks
 /// nothing.
 #[test]

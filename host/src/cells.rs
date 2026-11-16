@@ -196,6 +196,7 @@ pub(crate) fn kind_label(kind: &str) -> &str {
         protocol::TEXT_KIND => "LLM",
         protocol::IMAGE_KIND => "Image",
         protocol::MARKDOWN_KIND => "Markdown",
+        protocol::VIDEO_KIND => "Video",
         other => other,
     }
 }
@@ -938,5 +939,6 @@ mod tests {
         assert!(actions.iter().all(|action| !matches!(action, CardAction::Run(_))), "an unknown kind ran");
         assert_eq!(kind_label("plot"), "plot");
         assert_eq!(kind_label("text"), "LLM");
+        assert_eq!(kind_label("video"), "Video");
     }
 }
