@@ -1176,6 +1176,9 @@ impl HostWindow {
                 tab,
                 cell: id.to_string(),
                 input,
+                settings: None,
+                endpoint: None,
+                model: None,
             },
         );
     }
@@ -1483,6 +1486,9 @@ impl HostWindow {
                     tab: tab.to_string(),
                     cell: id.to_string(),
                     input: vec![protocol::CellPart::Text { text: prompt.clone() }],
+                    settings: None,
+                    endpoint: None,
+                    model: None,
                 },
             );
         }
@@ -1597,7 +1603,7 @@ impl HostWindow {
         self.board.chosen.remove(&id);
         // An Image cell's output is its image, named relative to the project.
         let output = match &image {
-            Some((path, _)) => vec![protocol::CellPart::Path { path: path.clone(), media_type: String::from("image/png") }],
+            Some((path, _)) => vec![protocol::CellPart::Path { path: path.clone(), media_type: String::from("image/png"), role: None, field: None }],
             None => vec![protocol::CellPart::Text { text: text.clone() }],
         };
         match place {
@@ -1911,6 +1917,9 @@ impl HostWindow {
                     tab: tab.to_string(),
                     cell: cell.id.clone(),
                     input: vec![protocol::CellPart::Text { text: draft }],
+                    settings: None,
+                    endpoint: None,
+                    model: None,
                 },
             );
         }

@@ -22,7 +22,7 @@ fn a_change_survives_a_kill_with_no_host() {
     let output = child.stdout.take().expect("stdout");
     std::thread::spawn(move || for _ in BufReader::new(output).lines() {});
     for message in [
-        protocol::HostMessage::Project { folder: folder.display().to_string() },
+        protocol::HostMessage::Project { folder: folder.display().to_string(), skills: false },
         protocol::HostMessage::Command {
             id: "add_cell".into(),
             tab: Some("1".into()),

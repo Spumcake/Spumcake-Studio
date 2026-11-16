@@ -136,6 +136,9 @@ fn declare_film(session: &Session, boards: &mut Boards, looker: &mut Looker, tab
                 menu: clip_menu(clip.id),
                 open: Some(action_with("edit_clip", json!(clip.id))),
                 movable: true,
+                kind: None,
+                earliest_start: None,
+                latest_end: None,
             }
         })
         .collect();
@@ -152,6 +155,7 @@ fn declare_film(session: &Session, boards: &mut Boards, looker: &mut Looker, tab
         read_only: false,
         menu: vec![entry("New clip", action("new_clip"), true)],
         drop: DropRule::Push,
+        accepts: None,
         content: RowContent::Items { items },
     };
     Timeline {
@@ -219,7 +223,7 @@ fn declare_clip(session: &Session, clip: &Clip, tab: String) -> Timeline {
             action: Some(action("toggle_onion")),
             menu: Vec::new(),
         },
-        ToolItem::Popover { icon: "nav-arrow-down".to_string(), tip: "Onion skin settings".to_string(), rows: onion_rows(session) },
+        ToolItem::Popover { icon: "nav-arrow-down".to_string(), tip: "Onion skin settings".to_string(), rows: onion_rows(session), action: None, selected: false, enabled: true },
         ToolItem::Button {
             icon: "plus-circle".to_string(),
             tip: "Insert keyframe (F6)".to_string(),
@@ -358,6 +362,7 @@ fn layer_row(
         read_only: false,
         menu: menu.to_vec(),
         drop: DropRule::Replace,
+        accepts: None,
         content: if layer.folder {
             RowContent::Cells { marks: Vec::new(), spans: Vec::new() }
         } else {

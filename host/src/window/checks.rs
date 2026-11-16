@@ -1555,6 +1555,19 @@ fn a_change_left_at_once_is_written_by_the_switch() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Makes a folder writable again when dropped, even when a check fails.
+struct Writable(std::path::PathBuf);
+
+impl Drop for Writable {
+    fn drop(&mut self) {
+        if let Ok(metadata) = std::fs::metadata(&self.0) {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(&self.0, permissions);
+        }
+    }
+}
+
 /// Catches a switch that loses work it could not write: with the project's
 /// folder read-only, a changed storyboard stops the switch, says so, and stays
 /// open with its change.
@@ -1573,6 +1586,9 @@ fn a_change_that_cannot_be_written_stops_the_switch() {
     let mut permissions = std::fs::metadata(&folder).unwrap().permissions();
     permissions.set_readonly(true);
     std::fs::set_permissions(&folder, permissions.clone()).unwrap();
+    // Made writable again however the check ends, so cleaning `target/`
+    // never stalls on a folder it cannot delete.
+    let _writable = Writable(folder.clone());
     window.app.send(
         0,
         protocol::HostMessage::Command { id: "new_clip".into(), tab: Some(tab), arg: None, node: None, viewport: [800.0, 600.0] },

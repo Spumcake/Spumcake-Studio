@@ -480,6 +480,7 @@ impl Session {
                 back: None,
                 layers: None,
                 sections,
+                cell: None,
                 pages: Vec::new(),
             };
         }
@@ -508,6 +509,7 @@ impl Session {
             back,
             layers,
             sections,
+            cell: None,
             pages: Vec::new(),
         }
     }
@@ -645,6 +647,9 @@ impl Session {
                     },
                     thumbnail: None,
                     mark: None,
+                    detail: None,
+                    toggle_icon: None,
+                    value: None,
                 }
             })
             .collect();

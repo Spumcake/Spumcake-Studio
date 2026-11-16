@@ -204,7 +204,7 @@ impl Server {
                 input,
                 group,
             } => last = self.invoke(call, &tab, &tool, &input, &group),
-            HostMessage::Project { folder } => {
+            HostMessage::Project { folder, .. } => {
                 let folder = PathBuf::from(folder);
                 self.session.set_project(&folder);
                 self.project = Some(folder);
@@ -377,7 +377,15 @@ impl Server {
             | HostMessage::DeleteCell { .. }
             | HostMessage::ShowSource { .. }
             | HostMessage::OpenAsNew { .. }
-            | HostMessage::RasterText { .. } => {}
+            | HostMessage::RasterText { .. }
+            | HostMessage::Takes { .. } => {}
+            HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {
+                id,
+                thumbnail: None,
+                badge: String::new(),
+                cues: Vec::new(),
+                error: Some("This workspace makes no previews.".into()),
+            }),
         }
         if self.project.is_some() {
             self.write_due(Instant::now());
@@ -1442,7 +1450,7 @@ mod tests {
     fn changed_in(folder: &std::path::Path) -> (Server, String) {
         let mut server = Server::new(None);
         let _ = server.greeting();
-        let _ = server.handle(HostMessage::Project { folder: folder.display().to_string() });
+        let _ = server.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         let tab = tab_id(server.session.active_id());
         let _ = server.handle(command("new_clip", Some(tab.clone())));
         (server, tab)
@@ -1507,7 +1515,7 @@ mod tests {
 
         let mut untouched = Server::new(None);
         let _ = untouched.greeting();
-        let _ = untouched.handle(HostMessage::Project { folder: folder.display().to_string() });
+        let _ = untouched.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
         let blank = tab_id(untouched.session.active_id());
         let replies = untouched.handle(HostMessage::Keep { tab: blank }).expect("replies");
         assert!(replies.iter().any(|reply| matches!(reply, AppMessage::Kept { path: None, error: None, .. })));
@@ -1557,7 +1565,7 @@ mod tests {
         std::fs::write(folder.join("Untitled Storyboard.smx"), b"{}").expect("a file of that name");
         let mut server = Server::new(None);
         let _ = server.greeting();
-        let replies = server.handle(HostMessage::Project { folder: folder.display().to_string() }).expect("replies");
+        let replies = server.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false }).expect("replies");
         assert_eq!(tab_labels(&replies), Some(vec!["Untitled Storyboard 2".to_string()]));
         let replies = server.handle(command("new_storyboard", None)).expect("replies");
         assert_eq!(
