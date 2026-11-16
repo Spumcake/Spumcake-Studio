@@ -73,6 +73,11 @@ pub(crate) enum SettingsChoice {
     DeleteEndpoint(String),
     SaveSkill(SkillSetting),
     DeleteSkill(String),
+    /// Skill folders' Add folder…: choose a folder the assistant finds
+    /// agent skills in.
+    AddSkillFolder,
+    /// Remove a skill folder, by its path.
+    RemoveSkillFolder(String),
     /// A new level or an edited one, by its id.
     SaveLevel(Level),
     MoveLevel { from: usize, to: usize },
@@ -1043,6 +1048,58 @@ fn skills(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: 
                 }
             });
         }
+    }
+    skill_folders(ui, panel, env, choices);
+}
+
+/// A skill folder as a person knows it: its repository's name, and the
+/// folder inside it when it is not the repository itself. A checkout in
+/// `<repository>/worktrees/<branch>` is named by the repository.
+fn folder_name(folder: &std::path::Path) -> String {
+    let root = folder.ancestors().find(|at| at.join(".git").exists());
+    let Some(root) = root else {
+        return folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().to_string());
+    };
+    let named = if root.parent().and_then(|parent| parent.file_name()).is_some_and(|parent| parent == "worktrees") {
+        root.parent().and_then(|parent| parent.parent())
+    } else {
+        Some(root)
+    };
+    let repository = named.and_then(|at| at.file_name()).map_or_else(String::new, |name| name.to_string_lossy().to_string());
+    match folder.strip_prefix(root).ok().filter(|inside| !inside.as_os_str().is_empty()) {
+        Some(inside) => format!("{repository} · {}", inside.display()),
+        None => repository,
+    }
+}
+
+/// The folders the assistant finds agent skills in, on the Endpoints
+/// card's pattern: a row for each, with Remove in its "…".
+fn skill_folders(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: &mut Vec<SettingsChoice>) {
+    gap(ui, 18.0);
+    // The label is drawn as section_label draws "Your skills", with Add
+    // folder… on its line, since the page's header holds New skill.
+    let (label_row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    ui.painter().text(pos2(label_row.left(), label_row.top() + 10.0), Align2::LEFT_CENTER, "Skill folders", ts::title(), TEXT);
+    let add_w = sessions::label_width(ui, "Add folder…");
+    let add = Rect::from_min_max(pos2(label_row.right() - add_w, label_row.top() - 6.0), pos2(label_row.right(), label_row.top() + 26.0));
+    if plain(ui, panel, add, "Add folder…") {
+        choices.push(SettingsChoice::AddSkillFolder);
+    }
+    let folders = &env.settings.skill_folders;
+    if folders.is_empty() {
+        ui.label(egui::RichText::new("No skill folders yet.").font(ts::body()).color(MUTED));
+        return;
+    }
+    let rows = card(ui, folders.len());
+    for (folder, row) in folders.iter().zip(rows) {
+        let menu = more(ui, row, folder);
+        let name = folder_name(std::path::Path::new(folder));
+        row_text(ui, row, row.left() + PAD, menu.rect.left() - 14.0, &name, &sessions::shorten_home(folder));
+        egui::Popup::menu(&menu).show(|ui| {
+            if widgets::menu_rows(ui, &[menu_item("Remove", true)]) == Some(0) {
+                choices.push(SettingsChoice::RemoveSkillFolder(folder.clone()));
+            }
+        });
     }
 }
 

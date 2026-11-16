@@ -21,6 +21,7 @@ mod process;
 mod raster;
 mod sessions;
 mod settings_panel;
+mod skills_setup;
 mod route;
 mod tablet;
 mod tabs;

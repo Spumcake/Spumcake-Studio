@@ -7,11 +7,13 @@
 //! stops answering, gets the call answered for it with `ok: false`. The host
 //! never knows a skill or a tool by name.
 
+use crate::skills_setup;
 use crate::window::Started;
 use crate::workspace::{DISCUSSION, Makes, Settings, SkillSetting};
 use assistant::{Command, TabInfo, Target};
 use protocol::{HostMessage, ToolResult};
 use serde_json::json;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// A call with no answer after this long is answered as failed.
@@ -205,9 +207,19 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
     })
 }
 
-fn host_target(settings: &Settings) -> Target {
-    let mut tool_groups = vec![host_tools()];
-    tool_groups.extend(your_skills(settings));
+/// The host's tools. In a Skills project, every generation runs through
+/// `request.py`, so the host offers none of the tools that generate
+/// directly, its prompt tools and the person's skills, and offers the
+/// project tools and the skills the setup lists instead.
+fn host_target(settings: &Settings, project: Option<&Path>) -> Target {
+    let tool_groups = match project.filter(|folder| skills_setup::is_skills_project(folder)) {
+        Some(folder) => vec![skills_setup::tool_group(folder, &skills_setup::listed_skills(&settings.skill_folders))],
+        None => {
+            let mut tool_groups = vec![host_tools()];
+            tool_groups.extend(your_skills(settings));
+            tool_groups
+        }
+    };
     Target {
         app: HOST_ID.into(),
         name: "Spumcake Studio".into(),
@@ -217,8 +229,9 @@ fn host_target(settings: &Settings) -> Target {
     }
 }
 
-/// Every running sub-application, and the host's own tools, as a request offers them.
-pub(crate) fn targets(apps: &[Started], settings: &Settings) -> Vec<Target> {
+/// Every running sub-application, and the host's own tools, as a request
+/// offers them, for the project open in `project`.
+pub(crate) fn targets(apps: &[Started], settings: &Settings, project: Option<&Path>) -> Vec<Target> {
     let mut offered: Vec<Target> = apps
         .iter()
         .filter(|started| !started.running.exited() && !started.running.pending())
@@ -239,8 +252,22 @@ pub(crate) fn targets(apps: &[Started], settings: &Settings) -> Vec<Target> {
             tabless: false,
         })
         .collect();
-    offered.push(host_target(settings));
+    offered.push(host_target(settings, project));
     offered
+}
+
+/// A call to the host's project tools, answered at once, or None when the
+/// call is for another of the host's tools.
+pub(crate) fn project_call(project: Option<&Path>, settings: &Settings, call: &str, tool: &str, input: &serde_json::Value) -> Option<ToolResult> {
+    if !skills_setup::is_project_tool(tool) {
+        return None;
+    }
+    let (_, _, name) = protocol::split_tool_key(tool)?;
+    let Some(folder) = project.filter(|folder| skills_setup::is_skills_project(folder)) else {
+        return Some(failed(call.to_string(), "No Skills project is open."));
+    };
+    let skills = skills_setup::listed_skills(&settings.skill_folders);
+    Some(skills_setup::call(folder, &skills, call.to_string(), name, input))
 }
 
 fn failed(call: String, reason: &str) -> ToolResult {
@@ -327,8 +354,8 @@ impl Routing {
 
     /// The running sub-applications, when they changed since the assistant
     /// was last told.
-    pub(crate) fn changed_targets(&mut self, apps: &[Started], settings: &Settings) -> Option<Vec<Target>> {
-        let now = targets(apps, settings);
+    pub(crate) fn changed_targets(&mut self, apps: &[Started], settings: &Settings, project: Option<&Path>) -> Option<Vec<Target>> {
+        let now = targets(apps, settings, project);
         if self.offered.as_ref() == Some(&now) {
             return None;
         }

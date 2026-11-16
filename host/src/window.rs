@@ -1025,7 +1025,7 @@ impl HostWindow {
             model: level.as_ref().map(|level| level.model.clone()).unwrap_or_default(),
             effort: level.and_then(|level| level.effort).map(|effort| effort.word().to_string()),
             selected,
-            targets: route::targets(&self.apps, &self.settings),
+            targets: route::targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path())),
         };
         self.assistant.send(Command::Send(request));
         for path in unread {
@@ -1066,6 +1066,7 @@ impl HostWindow {
             })
         {
             pending.ok = entry.ok;
+            pending.attachments = entry.attachments;
             return;
         }
         self.chat.conversation.push(entry);
@@ -2413,6 +2414,11 @@ impl HostWindow {
                     group,
                 } => {
                     if app == route::HOST_ID {
+                        let folder = self.project.as_ref().map(|project| project.folder.as_path());
+                        if let Some(answer) = route::project_call(folder, &self.settings, &call, &tool, &input) {
+                            self.assistant.send(Command::Result(answer));
+                            continue;
+                        }
                         self.begin_host_cell(call, &tool, input);
                         continue;
                     }
@@ -2432,7 +2438,7 @@ impl HostWindow {
         for answer in self.routing.poll(&mut self.apps) {
             self.assistant.send(answer);
         }
-        if let Some(targets) = self.routing.changed_targets(&self.apps, &self.settings) {
+        if let Some(targets) = self.routing.changed_targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path())) {
             self.assistant.send(Command::Targets(targets));
         }
     }
@@ -3313,7 +3319,7 @@ mod tests {
         assert_eq!(out, vec![Command::Result(answer("c2"))]);
         assert!(routing.poll(&mut apps).is_empty());
 
-        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default());
+        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default(), None);
         assert!(targets.iter().all(|target| target.app != "gone"), "an exited process is offered");
         let here = targets.iter().find(|target| target.app == "here").expect("the living process was dropped");
         assert_eq!(here.tabs[0].label, "Template");

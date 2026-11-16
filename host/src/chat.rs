@@ -917,8 +917,44 @@ fn cell_card(
     board.card_rect = Some(card);
 }
 
-/// One tool call: a Small row with its mark and what it did.
+/// The tallest an image a tool looked at is shown under its row.
+const SHOWN_HEIGHT: f32 = 120.0;
+
+/// A PNG as a texture, decoded once per file; None for another kind of
+/// image, which shows by its path alone.
+fn shown_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
+    type Cache = std::collections::HashMap<String, egui::TextureHandle>;
+    let id = egui::Id::new("tool-row-images");
+    if let Some(known) = ctx.data(|data| data.get_temp::<Cache>(id).and_then(|cache| cache.get(path).cloned())) {
+        return Some(known);
+    }
+    let icon = std::fs::read(path).ok().and_then(|bytes| eframe::icon_data::from_png_bytes(&bytes).ok())?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    let texture = ctx.load_texture(format!("tool-row:{path}"), image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Cache>(id).insert(path.to_string(), texture.clone()));
+    Some(texture)
+}
+
+/// One tool call: a Small row with its mark and what it did, and under it
+/// every image the tool showed the model, with its full path.
 fn tool_row(ui: &mut egui::Ui, entry: &Entry, width: f32) {
+    tool_line(ui, entry, width);
+    for path in &entry.attachments {
+        if let Some(texture) = shown_texture(ui.ctx(), path) {
+            let size = texture.size_vec2();
+            let scale = (SHOWN_HEIGHT / size.y).min((width - 20.0) / size.x).min(1.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(width, size.y * scale + 6.0), Sense::hover());
+            let image = Rect::from_min_size(pos2(rect.left() + 20.0, rect.top() + 6.0), size * scale);
+            ui.painter().image(texture.id(), image, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        // The whole path, wrapped, never cut: a person finds files by it.
+        let galley = ui.painter().layout(path.clone(), ts::small(), ts::MUTED, width - 20.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, galley.size().y.max(ts::small_line())), Sense::hover());
+        ui.painter().galley(pos2(rect.left() + 20.0, rect.top()), galley, ts::MUTED);
+    }
+}
+
+fn tool_line(ui: &mut egui::Ui, entry: &Entry, width: f32) {
     let painter = ui.painter().clone();
     let (row, _) = ui.allocate_exact_size(vec2(width, ts::small_line()), Sense::hover());
     let (icon, color) = match entry.ok {

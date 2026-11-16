@@ -796,6 +796,11 @@ pub(crate) struct Settings {
     /// never comes back.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub image_skill_added: bool,
+    /// The folders the assistant finds agent skills in, each searched for
+    /// `SKILL.md`, as the Studio-as-a-setup contract's decision A sets: the
+    /// Spumcake-Skills checkout first, then any others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_folders: Vec<String>,
     /// Anything another Studio wrote, such as the model picked before 0.8,
     /// kept as it was.
     #[serde(flatten)]

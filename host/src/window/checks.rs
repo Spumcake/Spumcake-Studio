@@ -98,6 +98,7 @@ mod editor_checks;
 mod raster_checks;
 mod edit_checks;
 mod items_checks;
+mod skills_checks;
 
 /// A folder of the check's own, which it removes when done.
 fn scratch(name: &str) -> PathBuf {
