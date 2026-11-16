@@ -12,12 +12,14 @@ mod items;
 mod raster;
 mod timeline;
 mod tools;
+mod view3d;
 pub use cell::*;
 pub use declare::*;
 pub use items::*;
 pub use raster::*;
 pub use timeline::*;
 pub use tools::*;
+pub use view3d::*;
 
 /// The version this crate speaks. A sub-application's first message says
 /// which version it speaks; the host accepts only this one.
@@ -187,6 +189,43 @@ pub enum AppMessage {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         items: Vec<ItemRef>,
+    },
+    /// What a tab whose contents are `view3d` shows, replaced whole: the
+    /// scene file's path in the project, its look, the camera, a published
+    /// render to show with it, the time in seconds into the scene's
+    /// animation, whether objects' names show, and what a drag does. The
+    /// host reads the scene file itself.
+    View3d {
+        tab: String,
+        #[serde(default)]
+        scene: String,
+        #[serde(default)]
+        look: View3dLook,
+        #[serde(default)]
+        camera: CameraChoice,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<View3dReference>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        time: f64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        names: bool,
+        #[serde(default, skip_serializing_if = "View3dTool::is_default")]
+        tool: View3dTool,
+    },
+    /// Asks the host to show that request's report, `requests/<request>.html`
+    /// in the project.
+    OpenReport { request: String },
+    /// Asks the host's runner to file a plain file the workspace wrote, such
+    /// as a layer written out as a PNG, with `request.py resource <path>
+    /// --from <from>`: `path` is the plain file's path in the project, and
+    /// `from` the workspace's file in `work/` it came from, recorded as
+    /// where it came from.
+    FileResource {
+        tab: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        from: String,
     },
 }
 
@@ -419,6 +458,29 @@ pub enum HostMessage {
     /// of that file, such as a video or sound reference's. The answer is
     /// `previewed`.
     Preview { id: String, path: String, media_type: String },
+    /// The user stopped turning a 3D view's free camera, here: where it
+    /// stands, what it looks at, and its horizontal field of view in degrees.
+    View3dCamera {
+        tab: String,
+        #[serde(default)]
+        position: [f64; 3],
+        #[serde(default)]
+        target: [f64; 3],
+        #[serde(default)]
+        fov: f64,
+    },
+    /// The object the user pointed at in a 3D view: its node's name, and its
+    /// label group's key, empty when it has none.
+    View3dPicked {
+        tab: String,
+        #[serde(default)]
+        object: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        label: String,
+    },
+    /// A draft cell is now that chain step: keep only the pointer, as a
+    /// step's cell does, with empty `input`, `versions`, and `output`.
+    CellBecameStep { tab: String, cell: String, step: StepRef },
 }
 
 /// What a selection message does, as the drawing surface's select tool does it.
@@ -476,6 +538,9 @@ pub enum ContentsKind {
     Cells,
     /// An image of pixels the sub-application composites: see `RasterView`.
     Raster,
+    /// A scene file, which the host reads and draws itself: see
+    /// `AppMessage::View3d`.
+    View3d,
 }
 
 /// Where the properties panel sits. Only the right side has a reference.
@@ -609,6 +674,9 @@ impl Declaration {
             | AppMessage::Notices { .. }
             | AppMessage::Previewed { .. }
             | AppMessage::AskAssistant { .. }
+            | AppMessage::View3d { .. }
+            | AppMessage::OpenReport { .. }
+            | AppMessage::FileResource { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -1422,6 +1490,76 @@ mod tests {
             tab: "1".into(),
             path: Some("/home/someone/Inpainter/Lighthouse/Untitled 1.smx".into()),
             error: Some("This location is read-only.".into()),
+        });
+    }
+
+    /// The 3D view's messages, each camera and way of showing a render,
+    /// survive a round trip, and a `view3d` with only its tab reads with
+    /// every default: grey, the free camera, no render, orbit.
+    #[test]
+    fn view3d_messages_round_trip() {
+        let reference = View3dReference {
+            image: "/p/.spumcake/cache/far-end-wall.rgba".into(),
+            width: 1664,
+            height: 928,
+            show: ReferenceShow::Beside,
+            caption: Some(View3dCaption { view: "3D view".into(), reference: "Pre-vis render · 10 Nov".into() }),
+        };
+        round_trip_app(AppMessage::View3d {
+            tab: "1".into(),
+            scene: "prompts/resources/diner-scene.glb".into(),
+            look: View3dLook::Coded,
+            camera: CameraChoice::Named { name: "far-end-wall".into() },
+            reference: Some(reference.clone()),
+            time: 3.5,
+            names: true,
+            tool: View3dTool::Pan,
+        });
+        round_trip_app(AppMessage::View3d {
+            tab: "1".into(),
+            scene: "diner.glb".into(),
+            look: View3dLook::Simple,
+            camera: CameraChoice::Free { start: Some(CameraPose { position: [1.0, 2.0, 1.6], target: [6.0, 3.0, 1.0], fov: 70.0 }) },
+            reference: Some(View3dReference { show: ReferenceShow::Over { opacity: 0.4 }, caption: None, ..reference }),
+            time: 0.0,
+            names: false,
+            tool: View3dTool::Orbit,
+        });
+        assert_eq!(
+            parse_app_message(r#"{"type":"view3d","tab":"1"}"#).unwrap(),
+            AppMessage::View3d {
+                tab: "1".into(),
+                scene: String::new(),
+                look: View3dLook::Grey,
+                camera: CameraChoice::Free { start: None },
+                reference: None,
+                time: 0.0,
+                names: false,
+                tool: View3dTool::Orbit,
+            }
+        );
+        let over: View3dReference = serde_json::from_str(r#"{"image":"r.rgba","width":2,"height":1,"show":{"kind":"over"}}"#).unwrap();
+        assert_eq!(over.show, ReferenceShow::Over { opacity: 0.5 });
+        round_trip_app(AppMessage::Contents { tab: "1".into(), kind: ContentsKind::View3d });
+        round_trip_host(HostMessage::View3dCamera { tab: "1".into(), position: [1.0, 2.0, 1.6], target: [6.0, 3.0, 1.0], fov: 70.0 });
+        round_trip_host(HostMessage::View3dPicked { tab: "1".into(), object: "stool 3".into(), label: "stools".into() });
+        round_trip_host(HostMessage::View3dPicked { tab: "1".into(), object: "north wall".into(), label: String::new() });
+    }
+
+    /// A report asked for, a resource to file, and a draft that became a
+    /// step survive a round trip.
+    #[test]
+    fn report_resource_and_step_messages_round_trip() {
+        round_trip_app(AppMessage::OpenReport { request: "2026-11-16T10-00-00Z-a1b2".into() });
+        round_trip_app(AppMessage::FileResource {
+            tab: "1".into(),
+            path: "library/layers/door-glow.png".into(),
+            from: "work/door.ipx".into(),
+        });
+        round_trip_host(HostMessage::CellBecameStep {
+            tab: "1".into(),
+            cell: "c1".into(),
+            step: StepRef { chain: "door".into(), step: "glow".into() },
         });
     }
 }

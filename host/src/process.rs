@@ -61,6 +61,19 @@ pub struct RasterDisplay {
 /// How many of a tab's latest changes are kept for its image.
 const KEPT_PATCHES: usize = 64;
 
+/// What a 3D view tab shows, as its sub-application last declared it with
+/// `view3d`. 3D Viewport Work's view draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct View3dShown {
+    pub scene: String,
+    pub look: protocol::View3dLook,
+    pub camera: protocol::CameraChoice,
+    pub reference: Option<protocol::View3dReference>,
+    pub time: f64,
+    pub names: bool,
+    pub tool: protocol::View3dTool,
+}
+
 /// A file dialog a sub-application asked for.
 pub struct FileRequest {
     pub id: String,
@@ -109,6 +122,15 @@ pub struct Declared {
     pub stages: HashMap<String, protocol::Stage>,
     /// Each tab's notice cards.
     pub notices: HashMap<String, Vec<protocol::Notice>>,
+    /// The corner each tab's notices sit in, when it is not the default.
+    pub notice_corners: HashMap<String, protocol::NoticeCorner>,
+    /// Each 3D view tab's scene, look, and camera, as last declared.
+    pub views3d: HashMap<String, View3dShown>,
+    /// Requests whose reports it asked to see, oldest first.
+    pub reports: VecDeque<String>,
+    /// Plain files it asked the runner to file: the tab, the file, and the
+    /// workspace file it came from. Chat Assistant Work's runner takes them.
+    pub resources: VecDeque<(String, String, String)>,
     /// Cells the toolbar asked the host to run.
     pub run_cells: VecDeque<(String, String)>,
     /// Cells the toolbar asked the host to stop.
@@ -503,6 +525,9 @@ impl Running {
                 declared
                     .rasters
                     .retain(|id, _| tabs.tabs.iter().any(|tab| tab.id == *id));
+                declared
+                    .views3d
+                    .retain(|id, _| tabs.tabs.iter().any(|tab| tab.id == *id));
                 if let Some(log) = &mut declared.tab_log {
                     log.push(
                         tabs.tabs
@@ -585,13 +610,23 @@ impl Running {
             AppMessage::Stage(stage) => {
                 declared.stages.insert(stage.tab.clone(), stage);
             }
-            AppMessage::Notices { tab, notices, .. } => {
+            AppMessage::Notices { tab, notices, corner } => {
+                if corner.is_default() {
+                    declared.notice_corners.remove(&tab);
+                } else {
+                    declared.notice_corners.insert(tab.clone(), corner);
+                }
                 if notices.is_empty() {
                     declared.notices.remove(&tab);
                 } else {
                     declared.notices.insert(tab, notices);
                 }
             }
+            AppMessage::View3d { tab, scene, look, camera, reference, time, names, tool } => {
+                declared.views3d.insert(tab, View3dShown { scene, look, camera, reference, time, names, tool });
+            }
+            AppMessage::OpenReport { request } => declared.reports.push_back(request),
+            AppMessage::FileResource { tab, path, from } => declared.resources.push_back((tab, path, from)),
             // The Prompt page's previews and prepared requests are drawn by
             // the work that builds them; until then they are read and let go.
             AppMessage::Previewed { .. } | AppMessage::AskAssistant { .. } => {}
