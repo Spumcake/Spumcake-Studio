@@ -1,0 +1,14 @@
+[package]
+name = "layers"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+# What the Image Generator and the Video Generator do alike, since neither
+# may depend on the other: linked files, notes, the pre-vis check's edges,
+# and laying out a round. Never used by the host. `sha2` matches the sha256
+# Spumcake-Skills records for every file, as the 0.15 plan approved.
+[dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+sha2 = "=0.11.1"

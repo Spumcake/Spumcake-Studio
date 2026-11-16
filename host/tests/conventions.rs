@@ -24,7 +24,9 @@ const RETIRED_NAMES: &[&str] = &["simplesketch", "imageeditor", "missioncontrol"
 /// Lines that may keep a retired word: what reads an earlier spelling from
 /// disk, a manifest's former ids, the reference the shell came from, and
 /// a crate's `assets/` folder of fonts and icons.
-const KEPT: &[&str] = &["assets/", "rename = \"", "alias = \"", "formerly", "stored spelling", "simple sketch 1.0.1"];
+/// `"sketch"`, quoted, is the Prompt page's reference role "Sketch", which
+/// the guide approves, not Simple Sketch's retired word.
+const KEPT: &[&str] = &["assets/", "rename = \"", "alias = \"", "formerly", "stored spelling", "simple sketch 1.0.1", "\"sketch\""];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -143,7 +145,7 @@ fn only_the_protocol_names_new_items() {
 #[test]
 fn no_retired_word_is_left() {
     let mut all = Vec::new();
-    for dir in ["apps", "host", "protocol", "draw", "media", "assistant", "client", "docs", "skills"] {
+    for dir in ["apps", "host", "protocol", "draw", "media", "layers", "assistant", "client", "docs", "skills"] {
         files(&root().join(dir), &mut all);
     }
     all.push(root().join("AGENTS.md"));

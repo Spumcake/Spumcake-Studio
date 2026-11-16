@@ -142,7 +142,10 @@ fn object_row(
     dragging: &mut Option<u64>,
     sent: &mut Vec<Sent>,
 ) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+    // A row with a detail line grows by that line; every other row keeps
+    // its height.
+    let height = if node.detail.is_some() { ROW + DETAIL_H } else { ROW };
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     ui.data_mut(|data| data.insert_temp(row_rect_id(ui, node.id), rect));
     if node.selected {
         ui.painter().rect_filled(rect, S.of(4.0), SELECTED);
@@ -177,18 +180,21 @@ fn object_row(
     x += S.of(22.0);
     let lock_x = rect.right() - S.of(22.0);
     let eye_x = lock_x - S.of(24.0);
-    let name_rect = Rect::from_min_max(pos2(x, rect.top()), pos2(eye_x - S.of(4.0), rect.bottom()));
-    name_area(ui, node, name_rect, name_rect, dragging, sent);
-    flag_button(
-        ui,
-        Flag::Eye,
-        flags,
-        node.visible,
-        &node.toggle_visible,
-        eye_x,
-        rect,
-        sent,
-    );
+    let mut right = eye_x - S.of(4.0);
+    if let Some(value) = &node.value {
+        right = paint_value(ui.painter(), value, right, rect.center().y) - VALUE_GAP;
+    }
+    let area = Rect::from_min_max(pos2(x, rect.top()), pos2(right, rect.bottom()));
+    let name_rect = match &node.detail {
+        Some(detail) => {
+            let (name_rect, detail_rect) = name_and_detail(area);
+            paint_detail(ui.painter(), detail, detail_rect);
+            name_rect
+        }
+        None => area,
+    };
+    name_area(ui, node, name_rect, area, dragging, sent);
+    eye_button(ui, node, flags, eye_x, rect, sent);
     flag_button(
         ui,
         Flag::Lock,
@@ -298,6 +304,41 @@ const ROW_RULE: Color32 = Color32::from_rgb(238, 240, 243);
 /// A chosen row with an image, pale blue as the mockup's Background Photo.
 const PICKED: Color32 = Color32::from_rgb(226, 236, 252);
 const PICKED_EDGE: Color32 = Color32::from_rgb(37, 99, 235);
+/// What a detail line adds to a row's height: a plain row's, and a row
+/// with an image's.
+const DETAIL_H: f32 = 16.0;
+const IMAGE_DETAIL_H: f32 = 6.0;
+/// The space between a row's value and what is before it.
+const VALUE_GAP: f32 = 8.0;
+
+/// A row's detail line, gray and smaller than its name.
+fn detail_font() -> egui::FontId {
+    egui::FontId::proportional(12.5)
+}
+
+/// A row's text area split into its name's line and, under it, its detail
+/// line, the pair centered on the row.
+fn name_and_detail(text: Rect) -> (Rect, Rect) {
+    let middle = text.center().y;
+    let name = Rect::from_min_max(pos2(text.left(), middle - 21.0), pos2(text.right(), middle + 1.0));
+    let detail = Rect::from_min_max(pos2(text.left(), middle + 1.0), pos2(text.right(), middle + 19.0));
+    (name, detail)
+}
+
+/// A detail line, cut with an ellipsis at its rect's width.
+fn paint_detail(painter: &egui::Painter, detail: &str, rect: Rect) {
+    let mut job = egui::text::LayoutJob::simple_singleline(detail.to_string(), detail_font(), MUTED);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(1.0));
+    let galley = painter.layout_job(job);
+    painter.galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, MUTED);
+}
+
+/// A row's value, gray, right-aligned to `right` and centered on `y`.
+/// Returns where its words start.
+fn paint_value(painter: &egui::Painter, value: &str, right: f32, y: f32) -> f32 {
+    let placed = painter.text(pos2(right, y), Align2::RIGHT_CENTER, value, name_font(), MUTED);
+    placed.left()
+}
 
 /// A row as the gallery mockup draws it: the eye, the layer's image
 /// in a small box, its name, its mark muted at the right, and its lock when
@@ -314,7 +355,8 @@ fn image_row(
     dragging: &mut Option<u64>,
     sent: &mut Vec<Sent>,
 ) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), IMAGE_ROW), Sense::hover());
+    let height = if node.detail.is_some() { IMAGE_ROW + IMAGE_DETAIL_H } else { IMAGE_ROW };
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     ui.data_mut(|data| data.insert_temp(row_rect_id(ui, node.id), rect));
     let hovered = ui.rect_contains_pointer(rect);
     if node.selected {
@@ -326,13 +368,13 @@ fn image_row(
             Stroke::new(1.0, ROW_RULE),
         );
     }
-    flag_button(ui, Flag::Eye, flags, node.visible, &node.toggle_visible, rect.left() + 2.0, rect, sent);
+    eye_button(ui, node, flags, rect.left() + 2.0, rect, sent);
     // Every row keeps room for a group's disclosure triangle, and each level
     // indents further than that room, so a group's layers sit clearly
     // inside it rather than level with its image.
     let x0 = rect.left() + 34.0 + node.depth as f32 * 20.0;
     if node.group {
-        let spot = Rect::from_min_size(pos2(x0 - 2.0, rect.top()), vec2(14.0, IMAGE_ROW));
+        let spot = Rect::from_min_size(pos2(x0 - 2.0, rect.top()), vec2(14.0, rect.height()));
         let response = ui.interact(spot, ui.id().with(("disclose", node.id)), Sense::click_and_drag());
         disclosure(ui.painter(), spot.center(), open, if response.hovered() { TEXT } else { MUTED });
         if response.clicked() {
@@ -377,19 +419,40 @@ fn image_row(
         toolbar::paint_icon(ui.painter(), pos2(rect.right() - 12.0, rect.center().y), mark, S.of(13.0), MUTED);
         lock_x -= 18.0;
     }
-    // The name runs to the lock when it shows, or else to the mark, or to
-    // the row's end.
+    // A value, such as a sound layer's gain, sits right-aligned before the
+    // mark, as vg-layers shows, and the lock moves before it.
+    let mut value_left = None;
+    if let Some(value) = &node.value {
+        let right = if node.mark.is_some() { rect.right() - 30.0 } else { rect.right() - 12.0 };
+        let left = paint_value(ui.painter(), value, right, rect.center().y);
+        lock_x = lock_x.min(left - VALUE_GAP - S.of(22.0));
+        value_left = Some(left);
+    }
+    // The name runs to the lock when it shows, or else to the value, to the
+    // mark, or to the row's end.
     let name_right = if node.locked || hovered {
         lock_x - 4.0
+    } else if let Some(left) = value_left {
+        left - VALUE_GAP
     } else if node.mark.is_some() {
         rect.right() - 26.0
     } else {
         rect.right() - 6.0
     };
-    let name_rect = Rect::from_min_max(pos2(frame.right() + 12.0, rect.top()), pos2(name_right, rect.bottom()));
+    let text = Rect::from_min_max(pos2(frame.right() + 12.0, rect.top()), pos2(name_right, rect.bottom()));
+    // With a detail line, such as a linked take's file, the name sits above
+    // it, as ig-linked-layer shows.
+    let name_rect = match &node.detail {
+        Some(detail) => {
+            let (name_rect, detail_rect) = name_and_detail(text);
+            paint_detail(ui.painter(), detail, detail_rect);
+            name_rect
+        }
+        None => text,
+    };
     // The whole row between the eye and the lock takes the pointer, so the
     // image is clicked and dragged as the name is.
-    let area = Rect::from_min_max(pos2(frame.left(), rect.top()), name_rect.max);
+    let area = Rect::from_min_max(pos2(frame.left(), rect.top()), text.max);
     name_area(ui, node, name_rect, area, dragging, sent);
     if node.locked || hovered {
         flag_button(ui, Flag::Lock, flags, node.locked, &node.toggle_locked, lock_x, rect, sent);
@@ -693,18 +756,32 @@ fn flag_button(
     row: Rect,
     sent: &mut Vec<Sent>,
 ) {
-    let spot = Rect::from_min_size(pos2(x, row.top()), vec2(S.of(22.0), row.height()));
-    let response = ui.interact(
-        spot,
-        ui.id().with((flag as u8, x.to_bits(), row.top().to_bits())),
-        Sense::click_and_drag(),
-    );
     let icon = match (flag, on) {
         (Flag::Eye, true) => &flags.eye_open,
         (Flag::Eye, false) => &flags.eye_closed,
         (Flag::Lock, true) => &flags.lock_closed,
         (Flag::Lock, false) => &flags.lock_open,
     };
+    flag_spot(ui, flag, icon, action, x, row, sent);
+}
+
+/// A layer row's eye, or, while the layer is shown, the icon it declares
+/// in the eye's place, such as a sound layer's speaker.
+fn eye_button(ui: &mut egui::Ui, node: &LayerRow, flags: &FlagIcons, x: f32, row: Rect, sent: &mut Vec<Sent>) {
+    match &node.toggle_icon {
+        Some(icon) if node.visible => flag_spot(ui, Flag::Eye, icon, &node.toggle_visible, x, row, sent),
+        _ => flag_button(ui, Flag::Eye, flags, node.visible, &node.toggle_visible, x, row, sent),
+    }
+}
+
+/// A row's eye or lock, drawn with `icon`, sending `action` when clicked.
+fn flag_spot(ui: &mut egui::Ui, flag: Flag, icon: &str, action: &Action, x: f32, row: Rect, sent: &mut Vec<Sent>) {
+    let spot = Rect::from_min_size(pos2(x, row.top()), vec2(S.of(22.0), row.height()));
+    let response = ui.interact(
+        spot,
+        ui.id().with((flag as u8, x.to_bits(), row.top().to_bits())),
+        Sense::click_and_drag(),
+    );
     toolbar::paint_icon(
         ui.painter(),
         spot.center(),

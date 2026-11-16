@@ -54,8 +54,9 @@ impl Route {
     pub(crate) fn blocked(&self) -> Option<String> {
         if !self.kind.chats() {
             return Some(format!(
-                "“{}” is a ComfyUI endpoint, which does not answer prompts. Choose a chat endpoint in Settings.",
-                self.name
+                "“{}” is a {} endpoint, which does not answer prompts. Choose a chat endpoint in Settings.",
+                self.name,
+                self.kind.label()
             ));
         }
         if self.kind == EndpointKind::Openrouter && self.key.as_deref().is_none_or(|key| key.trim().is_empty()) {
@@ -99,6 +100,9 @@ pub(crate) enum Status {
     KeyMissing,
     /// It answered with another error.
     Answered(u16),
+    /// A key is kept and nothing was asked: fal.ai's key is used only by
+    /// Skills' `request.py`, so Studio never calls fal.ai itself.
+    KeySaved,
 }
 
 impl Status {
@@ -109,6 +113,7 @@ impl Status {
             Status::NotRunning => "Not running".into(),
             Status::KeyMissing => "Key missing".into(),
             Status::Answered(code) => format!("Error {code}"),
+            Status::KeySaved => "Key saved".into(),
         }
     }
 }
@@ -122,6 +127,7 @@ fn probe_url(kind: EndpointKind, address: &str) -> String {
         EndpointKind::Comfyui => format!("{base}/system_stats"),
         EndpointKind::Openrouter => format!("{base}/key"),
         EndpointKind::Openai => format!("{base}/models"),
+        EndpointKind::Fal => base.to_string(),
     }
 }
 
@@ -130,6 +136,11 @@ fn probe_url(kind: EndpointKind, address: &str) -> String {
 pub(crate) fn check(kind: EndpointKind, address: &str, key: Option<String>) -> Status {
     if kind == EndpointKind::Openrouter && key.as_deref().is_none_or(|key| key.trim().is_empty()) {
         return Status::KeyMissing;
+    }
+    // Studio never calls fal.ai: its key is checked by request.py's first
+    // request, after the person approves its plan.
+    if kind == EndpointKind::Fal {
+        return if key.as_deref().is_none_or(|key| key.trim().is_empty()) { Status::KeyMissing } else { Status::KeySaved };
     }
     status_of(assistant::status(&probe_url(kind, address), key.as_deref(), PROBE_LIMIT))
 }

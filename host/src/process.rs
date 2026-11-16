@@ -128,9 +128,9 @@ pub struct Declared {
     pub views3d: HashMap<String, View3dShown>,
     /// Requests whose reports it asked to see, oldest first.
     pub reports: VecDeque<String>,
-    /// Plain files it asked the runner to file: the tab, the file, and the
-    /// workspace file it came from. Chat Assistant Work's runner takes them.
-    pub resources: VecDeque<(String, String, String)>,
+    /// Plain files it asked the runner to file: the tab, the file, and what
+    /// it came from, the workspace file first, then the linked files beneath. Chat Assistant Work's runner takes them.
+    pub resources: VecDeque<(String, String, Vec<String>)>,
     /// Cells the toolbar asked the host to run.
     pub run_cells: VecDeque<(String, String)>,
     /// Cells the toolbar asked the host to stop.
@@ -139,6 +139,9 @@ pub struct Declared {
     pub claimed: VecDeque<(String, bool)>,
     /// Words to put on the system clipboard, as Copy and Cut answered.
     pub clipboard: VecDeque<String>,
+    /// Prepared requests, such as "use this take", for the conversation's
+    /// composer, each with the items it names.
+    pub ask_assistant: VecDeque<(String, Vec<protocol::ItemRef>)>,
     /// Every tab report, each as its tabs' ids and files, while the host
     /// follows a quit. None when it is not following one.
     pub tab_log: Option<Vec<Vec<(String, Option<String>, String)>>>,
@@ -627,9 +630,10 @@ impl Running {
             }
             AppMessage::OpenReport { request } => declared.reports.push_back(request),
             AppMessage::FileResource { tab, path, from } => declared.resources.push_back((tab, path, from)),
-            // The Prompt page's previews and prepared requests are drawn by
-            // the work that builds them; until then they are read and let go.
-            AppMessage::Previewed { .. } | AppMessage::AskAssistant { .. } => {}
+            AppMessage::AskAssistant { text, items } => declared.ask_assistant.push_back((text, items)),
+            // The Prompt page's previews are drawn by the work that builds
+            // them; until then they are read and let go.
+            AppMessage::Previewed { .. } => {}
         }
     }
 

@@ -796,6 +796,11 @@ pub(crate) struct Settings {
     /// never comes back.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub image_skill_added: bool,
+    /// The folders the assistant finds agent skills in, each searched for
+    /// `SKILL.md`, as the Studio-as-a-setup contract's decision A sets: the
+    /// Spumcake-Skills checkout first, then any others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_folders: Vec<String>,
     /// Anything another Studio wrote, such as the model picked before 0.8,
     /// kept as it was.
     #[serde(flatten)]
@@ -812,16 +817,21 @@ pub(crate) enum EndpointKind {
     Openrouter,
     Openai,
     Comfyui,
+    /// fal.ai, which Studio never sends to: it only holds the key the
+    /// runner hands Spumcake-Skills' `request.py` as `FAL_KEY`, since
+    /// `request.py` is the only runner, as the owner decided on 2026-11-15.
+    Fal,
 }
 
 impl EndpointKind {
-    pub(crate) const ALL: [EndpointKind; 3] = [EndpointKind::Openrouter, EndpointKind::Openai, EndpointKind::Comfyui];
+    pub(crate) const ALL: [EndpointKind; 4] = [EndpointKind::Openrouter, EndpointKind::Openai, EndpointKind::Comfyui, EndpointKind::Fal];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             EndpointKind::Openrouter => "OpenRouter",
             EndpointKind::Openai => "OpenAI-compatible",
             EndpointKind::Comfyui => "ComfyUI",
+            EndpointKind::Fal => "fal.ai",
         }
     }
 
@@ -831,12 +841,15 @@ impl EndpointKind {
             EndpointKind::Openrouter => ("OpenRouter", "https://openrouter.ai/api/v1"),
             EndpointKind::Openai => ("Ollama", "http://localhost:11434/v1"),
             EndpointKind::Comfyui => ("Local ComfyUI", "http://127.0.0.1:8188"),
+            // Studio never sends to it, so its address only says whose key it is.
+            EndpointKind::Fal => ("fal.ai", "https://fal.ai"),
         }
     }
 
-    /// A chat endpoint answers prompts; ComfyUI runs graphs.
+    /// A chat endpoint answers prompts; ComfyUI runs graphs, and fal.ai
+    /// only holds a key for Skills' `request.py`.
     pub(crate) fn chats(self) -> bool {
-        self != EndpointKind::Comfyui
+        !matches!(self, EndpointKind::Comfyui | EndpointKind::Fal)
     }
 }
 

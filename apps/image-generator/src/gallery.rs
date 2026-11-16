@@ -1,12 +1,14 @@
-//! A tab's gallery: its images in order, which one is shown, and the
-//! filmstrip's own history. Each image keeps its own layers, selection,
-//! crop box, and history in its `Doc`. Adding, duplicating, removing,
-//! renaming, and moving images are steps of the strip's history instead,
-//! undone while the strip has the keyboard, as the owner set on 2026-10-30.
+//! A tab's gallery: its images in order, which one is shown, its cells,
+//! and the filmstrip's own history. Each image keeps its own layers,
+//! selection, crop box, and history in its `Doc`. Adding, duplicating,
+//! removing, renaming, and moving images are steps of the strip's history
+//! instead, undone while the strip has the keyboard, as the owner set on
+//! 2026-10-30, and so are changes to the tab's cells: a prompt edited on
+//! the Prompt page, and a next round made from a take.
 
 use crate::doc::Doc;
 use crate::files::PngCache;
-use protocol::{DocumentCamera, Thumbnail};
+use protocol::{Cell, CellState, DocumentCamera, StepRef, Thumbnail};
 use std::collections::HashMap;
 
 /// One image of a gallery: a frame of its filmstrip.
@@ -49,6 +51,8 @@ enum Change {
     Rename { at: usize, before: String, after: String },
     /// `to` counted after the moved image is taken out.
     Move { from: usize, to: usize },
+    /// The tab's cells and the one the Prompt page shows, before and after.
+    Cells { before: (Vec<Cell>, Option<String>), after: (Vec<Cell>, Option<String>) },
 }
 
 struct Step {
@@ -69,12 +73,26 @@ pub struct Gallery {
     /// The cell and image this gallery was opened from as new work, kept
     /// in its file.
     pub source: Option<protocol::OpenedFrom>,
+    /// The tab's cells, each a pointer to a chain step or a draft before
+    /// its first run, kept in its file, and the one the Prompt page shows.
+    pub cells: Vec<Cell>,
+    pub cell: Option<String>,
 }
 
 impl Gallery {
     /// A gallery of `images`, named, showing `shown`.
     pub fn new(images: Vec<(String, Doc)>, shown: usize) -> Self {
-        let mut gallery = Self { frames: Vec::new(), shown: 0, undo: Vec::new(), redo: Vec::new(), edits: 0, next_uid: 1, source: None };
+        let mut gallery = Self {
+            frames: Vec::new(),
+            shown: 0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            edits: 0,
+            next_uid: 1,
+            source: None,
+            cells: Vec::new(),
+            cell: None,
+        };
         for (name, doc) in images {
             let frame = gallery.frame_of(&name, doc);
             gallery.frames.push(frame);
@@ -86,6 +104,12 @@ impl Gallery {
 
     pub fn one(name: &str, doc: Doc) -> Self {
         Self::new(vec![(name.to_string(), doc)], 0)
+    }
+
+    /// A frame that is no image of the gallery, such as a take shown in
+    /// the working area, with a number no image of the tab has.
+    pub fn frame_for(&mut self, name: &str, doc: Doc) -> Frame {
+        self.frame_of(name, doc)
     }
 
     fn frame_of(&mut self, name: &str, doc: Doc) -> Frame {
@@ -167,8 +191,71 @@ impl Gallery {
         source.doc.finish_edit();
         let mut doc = Doc::new(source.doc.image.clone());
         doc.active = source.doc.active;
+        doc.notes = source.doc.notes.clone();
+        doc.notes_hidden = source.doc.notes_hidden;
+        doc.previs = source.doc.previs.clone();
         let name = format!("{} copy", source.name);
         Ok(self.add(&name, doc, Some(index + 1)))
+    }
+
+    /// The cell the Prompt page shows.
+    pub fn current_cell(&self) -> Option<&Cell> {
+        let id = self.cell.as_deref()?;
+        self.cells.iter().find(|cell| cell.id == id)
+    }
+
+    /// Makes the Prompt page's cell, an empty draft, when the tab has none.
+    /// It is no step: nothing was asked for. Returns whether it made one.
+    pub fn ensure_cell(&mut self) -> bool {
+        if self.current_cell().is_some() {
+            return false;
+        }
+        if let Some(last) = self.cells.last() {
+            self.cell = Some(last.id.clone());
+            return false;
+        }
+        let draft = empty_draft();
+        self.cell = Some(draft.id.clone());
+        self.cells.push(draft);
+        true
+    }
+
+    /// Replaces the tab's cells and the one shown. One step; the same
+    /// cells are none. Returns whether they changed.
+    pub fn set_cells(&mut self, cells: Vec<Cell>, cell: Option<String>) -> bool {
+        let after = (cells, cell);
+        if after.0 == self.cells && after.1 == self.cell {
+            return false;
+        }
+        let before = (std::mem::replace(&mut self.cells, after.0.clone()), std::mem::replace(&mut self.cell, after.1.clone()));
+        let shown = self.shown;
+        self.commit(Change::Cells { before, after }, shown);
+        true
+    }
+
+    /// The draft cell `id` is now that chain step: it keeps only the
+    /// pointer, here and in every step of the history that holds it, so
+    /// no undo brings its draft back. Not a step itself. Returns whether
+    /// the tab has that cell.
+    pub fn point_at_step(&mut self, id: &str, step: &StepRef) -> bool {
+        let point = |cells: &mut Vec<Cell>| {
+            for cell in cells.iter_mut().filter(|cell| cell.id == id) {
+                cell.step = Some(step.clone());
+                *cell = crate::files::stored_cell(cell);
+            }
+        };
+        let found = self.cells.iter().any(|cell| cell.id == id);
+        point(&mut self.cells);
+        for kept in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if let Change::Cells { before, after } = &mut kept.change {
+                point(&mut before.0);
+                point(&mut after.0);
+            }
+        }
+        if found {
+            self.edits += 1;
+        }
+        found
     }
 
     /// Takes an image out. The gallery keeps at least one. One step.
@@ -271,6 +358,10 @@ impl Gallery {
                 self.shift(*to, *from);
                 self.shown = *from;
             }
+            Change::Cells { before, .. } => {
+                self.cells = before.0.clone();
+                self.cell = before.1.clone();
+            }
         }
         self.redo.push(step);
         self.edits += 1;
@@ -300,11 +391,24 @@ impl Gallery {
                 self.shift(*from, *to);
                 self.shown = *to;
             }
+            Change::Cells { after, .. } => {
+                self.cells = after.0.clone();
+                self.cell = after.1.clone();
+            }
         }
         self.undo.push(step);
         self.edits += 1;
         true
     }
+}
+
+/// A new image cell with no prompt, as the Prompt page starts.
+pub fn empty_draft() -> Cell {
+    let mut cell = Cell::text(protocol::cell_id(), "");
+    cell.kind = String::from(protocol::IMAGE_KIND);
+    cell.input = Vec::new();
+    cell.state = CellState::Idle;
+    cell
 }
 
 #[cfg(test)]
@@ -401,5 +505,27 @@ mod tests {
         gallery.move_to(1, 2).unwrap();
         assert_eq!(names(&gallery), ["B", "C", "A", "D"]);
         assert_eq!(gallery.frame().name, "C");
+    }
+
+    /// Catches a cell edit that is no step, or a tab with no cell: a new
+    /// tab makes an empty draft, which is no step; a change to the cells
+    /// is one step that undo puts back and redo does again, and the same
+    /// cells are none.
+    #[test]
+    fn the_cells_change_as_steps_of_the_strip() {
+        let mut gallery = Gallery::one("Only", blank());
+        assert!(gallery.ensure_cell());
+        assert!(!gallery.ensure_cell());
+        assert!(!gallery.can_undo(), "making the first draft was a step");
+        let draft = gallery.current_cell().unwrap().clone();
+        assert_eq!((draft.kind.as_str(), draft.prompt().as_str()), (protocol::IMAGE_KIND, ""));
+        let mut edited = draft.clone();
+        edited.input = vec![protocol::CellPart::Text { text: "A lighthouse.".into() }];
+        assert!(gallery.set_cells(vec![edited.clone()], Some(draft.id.clone())));
+        assert!(!gallery.set_cells(vec![edited], Some(draft.id.clone())), "the same cells were a step");
+        assert!(gallery.undo());
+        assert_eq!(gallery.current_cell().unwrap().prompt(), "");
+        assert!(gallery.redo());
+        assert_eq!(gallery.current_cell().unwrap().prompt(), "A lighthouse.");
     }
 }

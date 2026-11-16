@@ -4,9 +4,13 @@
 //! region that changed, before and after, not the whole image.
 
 use crate::paint::{self, Brush, Combine, Mask};
-use crate::layered::{Beneath, Blend, Curves, Grade, Kind, LayerMask, Node, LayeredImage, Pixels, Place, Rect};
+use crate::layered::{Beneath, Blend, Curves, Grade, Kind, LayerMask, LinkState, Linked, Node, LayeredImage, Pixels, Place, Rect};
+use crate::previs::Previs;
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use crate::text::{self, Style, Text};
+use layers::Rgba;
+use layers::notes::{Mark, Notes, Pin};
 use protocol::{TextInput, TextKey};
 
 /// One part of a step, which undo puts back and redo puts forward.
@@ -21,6 +25,8 @@ enum Change {
     Active { before: Option<u64>, after: Option<u64> },
     Selection { before: Option<Mask>, after: Option<Mask> },
     Size { before: [u32; 2], after: [u32; 2] },
+    /// The image's notes, which hold no pixels.
+    Notes { before: Notes, after: Notes },
 }
 
 /// A brush that copies from the image: the clone stamp, or the healing
@@ -97,6 +103,16 @@ struct Typing {
     named: bool,
 }
 
+/// A pin's words being typed in: the pin, its caret and the other end of
+/// its selection, and the notes before the editing began, so it becomes
+/// one step.
+struct NoteTyping {
+    number: u32,
+    caret: usize,
+    anchor: usize,
+    before: Notes,
+}
+
 /// A text being typed in, as the host draws it: its box, its caret, and
 /// its selected spans, in image pixels.
 pub struct Editing {
@@ -167,6 +183,18 @@ pub struct Doc {
     /// How many layers and groups have been made, for their names.
     made_layers: u32,
     made_groups: u32,
+    /// The image's notes, apart from its layers, and whether their row's
+    /// eye hides them. They are drawn over the image shown, never into the
+    /// composite.
+    pub notes: Notes,
+    pub notes_hidden: bool,
+    /// A pin's words being typed in, and a mark being drawn.
+    note_typing: Option<NoteTyping>,
+    live_mark: Option<Mark>,
+    /// The notes drawn on a clear image the image's size, until they change.
+    notes_drawn: Option<Rgba>,
+    /// The pre-vis check, drawn over the image shown.
+    pub previs: Previs,
 }
 
 impl Doc {
@@ -198,6 +226,12 @@ impl Doc {
             outlines: None,
             made_layers,
             made_groups: 0,
+            notes: Notes::default(),
+            notes_hidden: false,
+            note_typing: None,
+            live_mark: None,
+            notes_drawn: None,
+            previs: Previs::default(),
         };
         doc.made_groups = doc.count_groups();
         doc.image.sync_texts();
@@ -422,10 +456,11 @@ impl Doc {
         self.outlines.clone().unwrap_or_default()
     }
 
-    fn commit(&mut self, changes: Vec<Change>, group: Option<&str>) {
+    fn commit(&mut self, mut changes: Vec<Change>, group: Option<&str>) {
         if changes.is_empty() {
             return;
         }
+        self.mark_edited(&mut changes);
         self.edits += 1;
         self.redo.clear();
         if let Some(group) = group
@@ -439,6 +474,36 @@ impl Doc {
             changes,
             group: group.map(String::from),
         });
+    }
+
+    /// A linked layer whose pixels a step changes is edited from then: its
+    /// pixels are kept in the image's file, and its link says what it was
+    /// edited from. The mark is part of the step, so undoing the step that
+    /// first changed its pixels makes it unedited again.
+    fn mark_edited(&mut self, changes: &mut Vec<Change>) {
+        let painted: Vec<u64> = changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Pixels { id, .. } | Change::Buffer { id, .. } => Some(*id),
+                _ => None,
+            })
+            .filter(|id| self.image.find(*id).and_then(|node| node.link.as_ref()).is_some_and(|linked| !linked.edited))
+            .collect();
+        if painted.is_empty() {
+            return;
+        }
+        let before = self.image.nodes.clone();
+        for id in painted {
+            if let Some(linked) = self.image.find_mut(id).and_then(|node| node.link.as_mut()) {
+                linked.edited = true;
+                // Painted on the file's changed bytes: the link names them.
+                if let Some(read) = linked.read.take() {
+                    linked.link.sha256 = read;
+                    linked.state = LinkState::Holds;
+                }
+            }
+        }
+        changes.push(Change::Tree { before, after: self.image.nodes.clone() });
     }
 
     pub fn undo(&mut self) -> bool {
@@ -502,6 +567,10 @@ impl Doc {
                 self.image.width = size[0];
                 self.image.height = size[1];
                 self.touch_all();
+            }
+            Change::Notes { before, after } => {
+                self.notes = if forward { after.clone() } else { before.clone() };
+                self.touch_notes();
             }
         }
     }
@@ -788,14 +857,17 @@ impl Doc {
         }
     }
 
-    /// A stroke is being drawn on it, or selected pixels moved.
+    /// A stroke or a mark is being drawn on it, or selected pixels moved.
     pub fn drawing(&self) -> bool {
-        self.live.is_some() || self.float.is_some()
+        self.live.is_some() || self.float.is_some() || self.live_mark.is_some()
     }
 
-    /// Takes the stroke being drawn off its layer, if there is one, and
-    /// puts back selected pixels being moved.
+    /// Takes the stroke or mark being drawn off its layer, if there is one,
+    /// and puts back selected pixels being moved.
     pub fn end_live(&mut self) {
+        if let Some(mark) = self.live_mark.take() {
+            self.touch_shown(mark_rect(&mark));
+        }
         if let Some(float) = self.float.take() {
             let rect = float.rect.union(&Rect::new(float.rect.x + float.delta[0], float.rect.y + float.delta[1], float.rect.w, float.rect.h));
             self.image.pixels.insert(float.id, float.before);
@@ -1083,6 +1155,23 @@ impl Doc {
         });
         let selection = self.selection.as_ref().map(|mask| mask.cut(crop)).filter(|mask| !mask.is_clear());
         changes.push(Change::Selection { before: self.selection.clone(), after: selection.clone() });
+        // The notes stay where they were on the image.
+        if !self.notes.is_empty() {
+            let before = self.notes.clone();
+            let (dx, dy) = (crop.x as f32, crop.y as f32);
+            for pin in &mut self.notes.pins {
+                pin.x -= dx;
+                pin.y -= dy;
+            }
+            for mark in &mut self.notes.marks {
+                for point in &mut mark.points {
+                    point[0] -= dx;
+                    point[1] -= dy;
+                }
+            }
+            changes.push(Change::Notes { before, after: self.notes.clone() });
+            self.notes_drawn = None;
+        }
         self.image.width = crop.w as u32;
         self.image.height = crop.h as u32;
         self.selection = selection;
@@ -1137,27 +1226,29 @@ impl Doc {
         };
         self.refuse_inside_locked(place.parent)?;
         let pixels = Pixels::clear(self.image.width, self.image.height);
-        self.add_node(name, pixels, [0, 0], place, by)
+        self.add_node(name, pixels, [0, 0], place, by, None)
     }
 
-    /// An image as a new layer, centred, above the active layer. One step.
-    pub fn add_image(&mut self, name: &str, pixels: Pixels) -> Result<u64, Refusal> {
+    /// An image as a new layer, centred, above the active layer, linked to
+    /// the file it was read from when there is one. One step.
+    pub fn add_linked(&mut self, name: &str, pixels: Pixels, link: Option<layers::link::Link>) -> Result<u64, Refusal> {
         let place = self.new_place();
         self.refuse_inside_locked(place.parent)?;
         let offset = [
             (self.image.width as i32 - pixels.width as i32) / 2,
             (self.image.height as i32 - pixels.height as i32) / 2,
         ];
-        self.add_node(name, pixels, offset, place, None)
+        self.add_node(name, pixels, offset, place, None, link)
     }
 
-    fn add_node(&mut self, name: &str, pixels: Pixels, offset: [i32; 2], place: Place, by: Option<&str>) -> Result<u64, Refusal> {
+    fn add_node(&mut self, name: &str, pixels: Pixels, offset: [i32; 2], place: Place, by: Option<&str>, link: Option<layers::link::Link>) -> Result<u64, Refusal> {
         let id = self.image.take_id();
         self.made_layers += 1;
         let name = if name.trim().is_empty() { format!("Layer {}", self.made_layers) } else { name.trim().to_string() };
         self.image.pixels.insert(id, pixels);
         let mut node = Node::layer(id, &name);
         node.offset = offset;
+        node.link = link.map(Linked::new);
         self.edit_tree(by, |doc| {
             if !doc.image.insert(node, place) {
                 return Err("There is nowhere to put the layer.".into());
@@ -1688,127 +1779,30 @@ impl Doc {
         }
     }
 
-    /// What the keyboard and the pointer do to the text being typed in.
-    /// Returns the words for the clipboard, for Copy and Cut.
+    /// What the keyboard and the pointer do to the text being typed in,
+    /// or to a pin's words. Returns the words for the clipboard, for Copy
+    /// and Cut.
     pub fn text_input(&mut self, input: &TextInput) -> Option<String> {
+        if self.note_typing.is_some() {
+            return self.note_input(input);
+        }
         let typing = self.typing.as_ref()?;
         let node = self.image.find(typing.id)?;
         let text = node.text()?.clone();
-        let offset = node.offset;
-        let layout = text::lay(&text);
-        let chars: Vec<char> = text.words.chars().collect();
-        let (mut caret, mut anchor) = (typing.caret.min(chars.len()), typing.anchor.min(chars.len()));
-        let (low, high) = (caret.min(anchor), caret.max(anchor));
-        let local = |at: [f64; 2]| [(at[0] - f64::from(offset[0])) as f32, (at[1] - f64::from(offset[1])) as f32];
-        let selected: String = chars[low..high].iter().collect();
-        let mut words: Option<Vec<char>> = None;
-        let mut clipboard = None;
-        let replace = |from: usize, to: usize, with: &[char]| {
-            let mut next = chars[..from].to_vec();
-            next.extend_from_slice(with);
-            next.extend_from_slice(&chars[to..]);
-            next
-        };
-        match input {
-            TextInput::Insert { text } => {
-                let typed: Vec<char> = text.chars().filter(|c| *c == '\n' || !c.is_control()).map(|c| if c == '\t' { ' ' } else { c }).collect();
-                words = Some(replace(low, high, &typed));
-                caret = low + typed.len();
-                anchor = caret;
-            }
-            TextInput::Place { at, extend } => {
-                caret = layout.hit(local(*at));
-                if !extend {
-                    anchor = caret;
-                }
-            }
-            TextInput::Select { at } => caret = layout.hit(local(*at)),
-            TextInput::Word { at } => {
-                let place = layout.hit(local(*at));
-                let (start, end) = text::word_at(&text.words, place);
-                anchor = start;
-                caret = end;
-            }
-            TextInput::Key { key, shift, word } => {
-                let step = |at: usize, forward: bool| {
-                    if *word {
-                        text::word_step(&text.words, at, forward)
-                    } else if forward {
-                        (at + 1).min(chars.len())
-                    } else {
-                        at.saturating_sub(1)
-                    }
-                };
-                match key {
-                    TextKey::Backspace | TextKey::Delete => {
-                        let forward = *key == TextKey::Delete;
-                        let (from, to) = if low < high { (low, high) } else if forward { (caret, step(caret, true)) } else { (step(caret, false), caret) };
-                        if from < to {
-                            words = Some(replace(from, to, &[]));
-                        }
-                        caret = from;
-                        anchor = from;
-                    }
-                    TextKey::Left | TextKey::Right => {
-                        let forward = *key == TextKey::Right;
-                        caret = if low < high && !shift { if forward { high } else { low } } else { step(caret, forward) };
-                        if !shift {
-                            anchor = caret;
-                        }
-                    }
-                    TextKey::Up | TextKey::Down => {
-                        let row = layout.line_of(caret);
-                        let x = layout.x_of(caret);
-                        caret = match key {
-                            TextKey::Up if row == 0 => 0,
-                            TextKey::Up => layout.place_on(row - 1, x),
-                            _ if row + 1 >= layout.lines.len() => chars.len(),
-                            _ => layout.place_on(row + 1, x),
-                        };
-                        if !shift {
-                            anchor = caret;
-                        }
-                    }
-                    TextKey::Home | TextKey::End => {
-                        let line = &layout.lines[layout.line_of(caret)];
-                        caret = if *key == TextKey::Home { line.start } else { line.end };
-                        if !shift {
-                            anchor = caret;
-                        }
-                    }
-                    TextKey::Enter => {
-                        words = Some(replace(low, high, &['\n']));
-                        caret = low + 1;
-                        anchor = caret;
-                    }
-                    TextKey::Escape => {
-                        self.end_typing();
-                        return None;
-                    }
-                    TextKey::SelectAll => {
-                        anchor = 0;
-                        caret = chars.len();
-                    }
-                    TextKey::Copy => clipboard = (low < high).then(|| selected.clone()),
-                    TextKey::Cut => {
-                        if low < high {
-                            clipboard = Some(selected.clone());
-                            words = Some(replace(low, high, &[]));
-                            caret = low;
-                            anchor = low;
-                        }
-                    }
-                }
-            }
+        let corner = [f64::from(node.offset[0]), f64::from(node.offset[1])];
+        let edit = edit_words(&text, corner, typing.caret, typing.anchor, input);
+        if edit.escape {
+            self.end_typing();
+            return None;
         }
         if let Some(typing) = &mut self.typing {
-            typing.caret = caret;
-            typing.anchor = anchor;
+            typing.caret = edit.caret;
+            typing.anchor = edit.anchor;
         }
-        if let Some(words) = words {
-            self.change_words(words.into_iter().collect());
+        if let Some(words) = edit.words {
+            self.change_words(words);
         }
-        clipboard
+        edit.clipboard
     }
 
     /// A change to the text being typed in, other than its words: the
@@ -1887,8 +1881,9 @@ impl Doc {
     }
 
     /// Ends editing: the typing becomes its step, and a text left empty is
-    /// taken away.
+    /// taken away. A pin's words being typed in become theirs too.
     pub fn end_typing(&mut self) {
+        self.end_note_typing();
         let Some(typing) = self.typing.take() else {
             return;
         };
@@ -1910,8 +1905,21 @@ impl Doc {
         self.commit(changes, None);
     }
 
-    /// The text being typed in, as the host draws it.
+    /// The text being typed in, or a pin's words, as the host draws it.
     pub fn editing(&self) -> Option<Editing> {
+        if let Some(typing) = &self.note_typing {
+            let pin = self.notes.pins.iter().find(|pin| pin.number == typing.number)?;
+            let card = crate::notes::card(pin, self.image.width, self.image.height);
+            let layout = text::lay(&card.text);
+            let (x, y) = (f64::from(card.corner[0]), f64::from(card.corner[1]));
+            let place = |rect: [f32; 4]| [x + f64::from(rect[0]), y + f64::from(rect[1]), f64::from(rect[2]), f64::from(rect[3])];
+            let (low, high) = (typing.caret.min(typing.anchor), typing.caret.max(typing.anchor));
+            return Some(Editing {
+                rect: [x, y, f64::from(card.rect[2] - 2.0 * (card.corner[0] - card.rect[0])), f64::from(layout.height.max(layout.advance))],
+                caret: place(layout.caret(typing.caret, card.text.style.size)),
+                selection: if low < high { layout.spans(low, high).into_iter().map(place).collect() } else { Vec::new() },
+            });
+        }
         let typing = self.typing.as_ref()?;
         let node = self.image.find(typing.id)?;
         let text = node.text()?;
@@ -2101,6 +2109,262 @@ impl Doc {
         Ok(())
     }
 
+    // Notes.
+
+    /// The notes changed: they are drawn again, and the view is written
+    /// again.
+    fn touch_notes(&mut self) {
+        self.notes_drawn = None;
+        self.touch_shown(self.image.bounds());
+    }
+
+    /// What is shown over the composite changed in `rect`, such as a mark
+    /// being drawn or the pre-vis check, and nothing of the image's
+    /// pixels: the view is written again there.
+    fn touch_shown(&mut self, rect: Rect) {
+        let rect = rect.intersect(&self.image.bounds());
+        if !rect.is_empty() {
+            self.changed = Some(self.changed.map_or(rect, |changed| changed.union(&rect)));
+        }
+        self.revision += 1;
+    }
+
+    /// The notes changed by `change`, as one step; nothing when they are
+    /// as they were.
+    fn edit_notes(&mut self, change: impl FnOnce(&mut Notes)) {
+        self.end_live();
+        self.settle();
+        let before = self.notes.clone();
+        change(&mut self.notes);
+        if self.notes != before {
+            self.notes_hidden = false;
+            self.commit(vec![Change::Notes { before, after: self.notes.clone() }], None);
+            self.touch_notes();
+        }
+    }
+
+    /// A pin's radius on this image, for finding the pin under a click.
+    fn pin_reach(&self) -> f32 {
+        crate::notes::pin_radius(self.image.width, self.image.height) * 1.2
+    }
+
+    /// A click with the notes tool's Pin: while a pin's words are typed
+    /// in, it ends that; on a pin, its words are typed in, the caret at
+    /// their end; elsewhere a new pin is put there, numbered after the
+    /// highest, and its words are typed in. The new pin and its words are
+    /// one step when the typing ends.
+    pub fn note_click(&mut self, at: [f64; 2]) {
+        if self.note_typing.is_some() {
+            self.end_note_typing();
+            return;
+        }
+        if !at[0].is_finite() || !at[1].is_finite() {
+            return;
+        }
+        self.end_live();
+        self.settle();
+        let (x, y) = (at[0] as f32, at[1] as f32);
+        let before = self.notes.clone();
+        let number = match self.notes.pin_at(x, y, self.pin_reach()) {
+            Some(number) => number,
+            None => {
+                let number = self.notes.next_number();
+                self.notes.pins.push(Pin { number, x, y, text: String::new() });
+                number
+            }
+        };
+        let end = self.notes.pins.iter().find(|pin| pin.number == number).map_or(0, |pin| pin.text.chars().count());
+        self.note_typing = Some(NoteTyping { number, caret: end, anchor: end, before });
+        self.notes_hidden = false;
+        self.edits += 1;
+        self.touch_notes();
+    }
+
+    /// A drag with the notes tool's Pin: from a pin, it moves the pin
+    /// there, one step; from elsewhere, it is a click where it began.
+    pub fn note_drag(&mut self, from: [f64; 2], to: [f64; 2]) {
+        if self.note_typing.is_some() {
+            self.end_note_typing();
+        }
+        if !from.iter().chain(&to).all(|value| value.is_finite()) {
+            return;
+        }
+        let reach = self.pin_reach();
+        match self.notes.pin_at(from[0] as f32, from[1] as f32, reach) {
+            Some(number) => self.edit_notes(|notes| {
+                if let Some(pin) = notes.pins.iter_mut().find(|pin| pin.number == number) {
+                    pin.x = to[0] as f32;
+                    pin.y = to[1] as f32;
+                }
+            }),
+            None => self.note_click(from),
+        }
+    }
+
+    /// The newest points of a mark being drawn with the notes tool's Draw,
+    /// drawn at once with no step: `from` is how many points came before.
+    pub fn mark_live(&mut self, from: usize, points: &[[f64; 3]], width: f32, colour: [u8; 4]) {
+        if from == 0 {
+            self.end_live();
+            self.settle();
+            self.live_mark = Some(Mark { points: Vec::new(), width, colour });
+        }
+        let Some(mark) = self.live_mark.as_mut() else {
+            return;
+        };
+        if mark.points.len() != from {
+            return;
+        }
+        let start = from.saturating_sub(1);
+        mark.points.extend(points.iter().filter(|point| point[0].is_finite() && point[1].is_finite()).map(|point| [point[0] as f32, point[1] as f32]));
+        let piece = Mark { points: mark.points[start..].to_vec(), width, colour };
+        self.touch_shown(mark_rect(&piece));
+    }
+
+    /// A finished mark, one step. The mark drawn as it came becomes the
+    /// step as it is.
+    pub fn add_mark(&mut self, points: &[[f64; 3]], width: f32, colour: [u8; 4]) {
+        let points: Vec<[f32; 2]> = points.iter().filter(|point| point[0].is_finite() && point[1].is_finite()).map(|point| [point[0] as f32, point[1] as f32]).collect();
+        let drawn = self.live_mark.take().filter(|mark| mark.points == points);
+        let mark = drawn.unwrap_or(Mark { points, width, colour });
+        if mark.points.is_empty() {
+            return;
+        }
+        self.edit_notes(|notes| notes.marks.push(mark));
+    }
+
+    /// Shows or hides the notes, as their row's eye does. Not a step, as
+    /// it changes no note, but kept in the image's file.
+    pub fn set_notes_hidden(&mut self, hidden: bool) {
+        if self.notes_hidden != hidden {
+            self.end_note_typing();
+            self.notes_hidden = hidden;
+            self.edits += 1;
+            self.touch_notes();
+        }
+    }
+
+    /// Takes every note away, one step.
+    pub fn clear_notes(&mut self) {
+        self.edit_notes(|notes| *notes = Notes::default());
+    }
+
+    /// The pin whose words are typed in, if any.
+    pub fn note_open(&self) -> Option<u32> {
+        self.note_typing.as_ref().map(|typing| typing.number)
+    }
+
+    /// What the keyboard and the pointer do to a pin's words. Backspace or
+    /// Delete in a pin with no words takes the pin away.
+    fn note_input(&mut self, input: &TextInput) -> Option<String> {
+        let typing = self.note_typing.as_ref()?;
+        let number = typing.number;
+        let pin = self.notes.pins.iter().find(|pin| pin.number == number)?;
+        if pin.text.is_empty() && matches!(input, TextInput::Key { key: TextKey::Backspace | TextKey::Delete, .. }) {
+            self.notes.pins.retain(|pin| pin.number != number);
+            self.end_note_typing();
+            return None;
+        }
+        let card = crate::notes::card(pin, self.image.width, self.image.height);
+        let corner = [f64::from(card.corner[0]), f64::from(card.corner[1])];
+        let edit = edit_words(&card.text, corner, typing.caret, typing.anchor, input);
+        if edit.escape {
+            self.end_note_typing();
+            return None;
+        }
+        if let Some(typing) = &mut self.note_typing {
+            typing.caret = edit.caret;
+            typing.anchor = edit.anchor;
+        }
+        if let Some(words) = edit.words
+            && let Some(pin) = self.notes.pins.iter_mut().find(|pin| pin.number == number)
+        {
+            pin.text = words;
+            self.edits += 1;
+        }
+        self.touch_notes();
+        edit.clipboard
+    }
+
+    /// Ends typing a pin's words: the pin and its words become one step.
+    fn end_note_typing(&mut self) {
+        let Some(typing) = self.note_typing.take() else {
+            return;
+        };
+        if self.notes != typing.before {
+            self.commit(vec![Change::Notes { before: typing.before, after: self.notes.clone() }], None);
+        }
+        self.touch_notes();
+    }
+
+    /// The pins' words, as a next round's prompt carries them.
+    pub fn notes_words(&self) -> Vec<String> {
+        self.notes.as_words()
+    }
+
+    /// The image with its notes on it, as a next round sends it: the
+    /// composite, every mark, and every pin with its number, whether or
+    /// not the notes are hidden.
+    pub fn marked_image(&mut self) -> Rgba {
+        let (width, height) = (self.image.width, self.image.height);
+        let notes = self.notes.clone();
+        crate::notes::marked(self.composite(), width, height, &notes)
+    }
+
+    // The image shown.
+
+    /// Whether anything is drawn over the composite in the image shown:
+    /// the pre-vis check, or notes not hidden.
+    fn shows_more(&self) -> bool {
+        self.previs.showing() || self.live_mark.is_some() || (!self.notes_hidden && (!self.notes.is_empty() || self.note_typing.is_some()))
+    }
+
+    /// The image as the host shows it: the composite, with the pre-vis
+    /// check and the notes drawn over it.
+    pub fn shown(&mut self) -> Cow<'_, [u8]> {
+        if !self.shows_more() {
+            return Cow::Borrowed(self.composite());
+        }
+        let bounds = self.image.bounds();
+        Cow::Owned(self.shown_rows(bounds))
+    }
+
+    /// The rows of `rect` of the image as the host shows it.
+    pub fn shown_rows(&mut self, rect: Rect) -> Vec<u8> {
+        let (width, height) = (self.image.width, self.image.height);
+        let rect = rect.intersect(&self.image.bounds());
+        let composite = self.composite();
+        let mut rows = Vec::with_capacity(rect.w.max(0) as usize * rect.h.max(0) as usize * 4);
+        for y in rect.y..rect.bottom() {
+            let start = (y as usize * width as usize + rect.x as usize) * 4;
+            rows.extend_from_slice(&composite[start..start + rect.w as usize * 4]);
+        }
+        if rect.is_empty() {
+            return rows;
+        }
+        self.previs.draw(width, height, rect, &mut rows);
+        if !self.notes_hidden && (!self.notes.is_empty() || self.note_typing.is_some()) {
+            if self.notes_drawn.as_ref().is_none_or(|drawn| (drawn.width, drawn.height) != (width, height)) {
+                let mut drawn = Rgba::new(width, height, [0, 0, 0, 0]);
+                crate::notes::draw(&mut drawn, &self.notes, self.note_open());
+                self.notes_drawn = Some(drawn);
+            }
+            if let Some(drawn) = &self.notes_drawn {
+                crate::notes::lay_over(drawn, rect, &mut rows);
+            }
+        }
+        if let Some(mark) = &self.live_mark {
+            crate::notes::draw_mark_over(mark, rect, &mut rows);
+        }
+        rows
+    }
+
+    /// The pre-vis check changed what is shown: the view is written again.
+    pub fn touch_previs(&mut self) {
+        self.edits += 1;
+        self.touch_shown(self.image.bounds());
+    }
+
     /// A held slider was let go: its changes become one step.
     pub fn finish_edit(&mut self) {
         let Some((before, active)) = self.pending.take() else {
@@ -2116,6 +2380,143 @@ impl Doc {
             );
         }
     }
+}
+
+/// What the keyboard or the pointer did to words being typed in: the
+/// words, when they changed, the caret and the other end of the
+/// selection, the words for the clipboard, and whether Escape ended the
+/// editing.
+struct WordsEdit {
+    words: Option<String>,
+    caret: usize,
+    anchor: usize,
+    clipboard: Option<String>,
+    escape: bool,
+}
+
+/// Words being typed in, laid out as `text` is with its box's corner at
+/// `corner`, changed by `input`, a text's or a pin's alike.
+fn edit_words(text: &Text, corner: [f64; 2], caret: usize, anchor: usize, input: &TextInput) -> WordsEdit {
+    let layout = text::lay(text);
+    let chars: Vec<char> = text.words.chars().collect();
+    let (mut caret, mut anchor) = (caret.min(chars.len()), anchor.min(chars.len()));
+    let (low, high) = (caret.min(anchor), caret.max(anchor));
+    let local = |at: [f64; 2]| [(at[0] - corner[0]) as f32, (at[1] - corner[1]) as f32];
+    let selected: String = chars[low..high].iter().collect();
+    let mut words: Option<Vec<char>> = None;
+    let mut clipboard = None;
+    let replace = |from: usize, to: usize, with: &[char]| {
+        let mut next = chars[..from].to_vec();
+        next.extend_from_slice(with);
+        next.extend_from_slice(&chars[to..]);
+        next
+    };
+    match input {
+        TextInput::Insert { text } => {
+            let typed: Vec<char> = text.chars().filter(|c| *c == '\n' || !c.is_control()).map(|c| if c == '\t' { ' ' } else { c }).collect();
+            words = Some(replace(low, high, &typed));
+            caret = low + typed.len();
+            anchor = caret;
+        }
+        TextInput::Place { at, extend } => {
+            caret = layout.hit(local(*at));
+            if !extend {
+                anchor = caret;
+            }
+        }
+        TextInput::Select { at } => caret = layout.hit(local(*at)),
+        TextInput::Word { at } => {
+            let place = layout.hit(local(*at));
+            let (start, end) = text::word_at(&text.words, place);
+            anchor = start;
+            caret = end;
+        }
+        TextInput::Key { key, shift, word } => {
+            let step = |at: usize, forward: bool| {
+                if *word {
+                    text::word_step(&text.words, at, forward)
+                } else if forward {
+                    (at + 1).min(chars.len())
+                } else {
+                    at.saturating_sub(1)
+                }
+            };
+            match key {
+                TextKey::Backspace | TextKey::Delete => {
+                    let forward = *key == TextKey::Delete;
+                    let (from, to) = if low < high { (low, high) } else if forward { (caret, step(caret, true)) } else { (step(caret, false), caret) };
+                    if from < to {
+                        words = Some(replace(from, to, &[]));
+                    }
+                    caret = from;
+                    anchor = from;
+                }
+                TextKey::Left | TextKey::Right => {
+                    let forward = *key == TextKey::Right;
+                    caret = if low < high && !shift { if forward { high } else { low } } else { step(caret, forward) };
+                    if !shift {
+                        anchor = caret;
+                    }
+                }
+                TextKey::Up | TextKey::Down => {
+                    let row = layout.line_of(caret);
+                    let x = layout.x_of(caret);
+                    caret = match key {
+                        TextKey::Up if row == 0 => 0,
+                        TextKey::Up => layout.place_on(row - 1, x),
+                        _ if row + 1 >= layout.lines.len() => chars.len(),
+                        _ => layout.place_on(row + 1, x),
+                    };
+                    if !shift {
+                        anchor = caret;
+                    }
+                }
+                TextKey::Home | TextKey::End => {
+                    let line = &layout.lines[layout.line_of(caret)];
+                    caret = if *key == TextKey::Home { line.start } else { line.end };
+                    if !shift {
+                        anchor = caret;
+                    }
+                }
+                TextKey::Enter => {
+                    words = Some(replace(low, high, &['\n']));
+                    caret = low + 1;
+                    anchor = caret;
+                }
+                TextKey::Escape => {
+                    return WordsEdit { words: None, caret, anchor, clipboard: None, escape: true };
+                }
+                TextKey::SelectAll => {
+                    anchor = 0;
+                    caret = chars.len();
+                }
+                TextKey::Copy => clipboard = (low < high).then(|| selected.clone()),
+                TextKey::Cut => {
+                    if low < high {
+                        clipboard = Some(selected.clone());
+                        words = Some(replace(low, high, &[]));
+                        caret = low;
+                        anchor = low;
+                    }
+                }
+            }
+        }
+    }
+    WordsEdit { words: words.map(|words| words.into_iter().collect()), caret, anchor, clipboard, escape: false }
+}
+
+/// The part of the image a mark reaches.
+fn mark_rect(mark: &Mark) -> Rect {
+    let reach = mark.width / 2.0 + 2.0;
+    let mut rect: Option<Rect> = None;
+    for point in &mark.points {
+        let x = (point[0] - reach).floor() as i32;
+        let y = (point[1] - reach).floor() as i32;
+        let side = (2.0 * reach).ceil() as i32 + 1;
+        let here = Rect::new(x, y, side, side);
+        rect = Some(rect.map_or(here, |rect| rect.union(&here)));
+    }
+    rect.unwrap_or(Rect::new(0, 0, 0, 0))
 }
 
 /// A Curves layer's histograms, one for each channel, and what they were
@@ -3034,6 +3435,119 @@ mod tests {
         doc.end_typing();
         assert!(doc.image.find(empty).is_none());
         assert_eq!(doc.undo.len(), steps);
+    }
+
+    /// A linked image of one layer, white, its file named `take.png`.
+    fn linked(width: u32, height: u32) -> Doc {
+        let link = layers::link::Link { path: "takes/take.png".into(), sha256: "ab".into() };
+        let mut pixels = Pixels::filled(width, height, [255, 255, 255, 255]);
+        for (index, byte) in pixels.data.iter_mut().enumerate().filter(|(index, _)| index % 4 == 0) {
+            *byte = (index / 4 % 251) as u8;
+        }
+        Doc::new(LayeredImage::linked("Take", pixels, link))
+    }
+
+    fn edited(doc: &Doc) -> bool {
+        doc.image.nodes[0].link.as_ref().unwrap().edited
+    }
+
+    /// Catches a linked layer painted on that still counts as its file, or
+    /// one that stays edited after the painting is undone: a stroke, the
+    /// stamp, a crop, or a move of selected pixels each makes it edited,
+    /// one Undo makes it the file again, and a move of the whole layer or
+    /// a change to its settings leaves it the file.
+    #[test]
+    fn a_linked_layer_painted_on_is_edited_until_undone() {
+        let mut doc = linked(64, 40);
+        let id = doc.image.nodes[0].id;
+        doc.move_active(3, 2).unwrap();
+        doc.set_setting(Setting::Opacity(0.5), false).unwrap();
+        assert!(!edited(&doc), "moving or setting the layer edited it");
+        doc.stroke(&line(), &brush()).unwrap();
+        assert!(edited(&doc), "painting did not edit the layer");
+        doc.undo();
+        assert!(!edited(&doc), "the painting undone left the layer edited");
+        assert_eq!(doc.image.pixels[&id], linked(64, 40).image.pixels[&id]);
+        doc.redo();
+        assert!(edited(&doc));
+        doc.undo();
+        doc.sample_stroke(&[[30.0, 20.0, 1.0], [40.0, 20.0, 1.0]], &sampler(10.0, [4, 0], false)).unwrap();
+        assert!(edited(&doc), "the stamp did not edit the layer");
+        doc.undo();
+        doc.crop([0.0, 0.0, 32.0, 20.0]).unwrap();
+        assert!(edited(&doc), "a crop did not edit the layer");
+        doc.undo();
+        assert!(!edited(&doc));
+        doc.select(Mask::rect(64, 40, [10.0, 10.0], [20.0, 20.0]), Combine::New, 0.0);
+        doc.drag_part([15.0, 15.0], [25.0, 15.0]).unwrap();
+        doc.drop_pixels([15.0, 15.0], [25.0, 15.0]).unwrap();
+        assert!(edited(&doc), "moving selected pixels did not edit the layer");
+    }
+
+    /// Catches notes that are not steps, or that reach the image's pixels:
+    /// a pin and its words are one step, a mark another, a moved pin a
+    /// third; each undoes alone; Backspace in a pin with no words takes it
+    /// away; and the composite never changes.
+    #[test]
+    fn notes_are_steps_apart_from_the_pixels() {
+        let mut doc = Doc::new(LayeredImage::blank(240, 160));
+        let composite = doc.composite().to_vec();
+        let generation = doc.generation;
+        doc.note_click([50.0, 40.0]);
+        assert_eq!(doc.note_open(), Some(1));
+        assert!(doc.editing().is_some(), "the pin's words are not typed in");
+        doc.text_input(&TextInput::Insert { text: "less rain".into() });
+        doc.note_click([200.0, 150.0]);
+        assert_eq!(doc.note_open(), None, "a click outside did not end the typing");
+        assert_eq!(doc.notes.pins, [Pin { number: 1, x: 50.0, y: 40.0, text: "less rain".into() }]);
+        doc.mark_live(0, &[[10.0, 100.0, 1.0], [60.0, 100.0, 1.0]], 4.0, layers::notes::RED);
+        assert!(doc.drawing());
+        doc.add_mark(&[[10.0, 100.0, 1.0], [60.0, 100.0, 1.0]], 4.0, layers::notes::RED);
+        assert_eq!(doc.notes.marks.len(), 1);
+        doc.note_drag([50.0, 40.0], [80.0, 60.0]);
+        assert_eq!((doc.notes.pins[0].x, doc.notes.pins[0].y), (80.0, 60.0));
+        assert_eq!(doc.composite(), &composite[..], "the notes reached the composite");
+        assert_eq!(doc.generation, generation, "the notes changed the pixels' generation");
+        assert_eq!(doc.notes_words(), ["1. less rain"]);
+        doc.undo();
+        assert_eq!((doc.notes.pins[0].x, doc.notes.pins[0].y), (50.0, 40.0));
+        doc.undo();
+        assert!(doc.notes.marks.is_empty());
+        doc.undo();
+        assert!(doc.notes.is_empty(), "the pin and its words were not one step");
+        doc.redo();
+        doc.crop([20.0, 10.0, 200.0, 140.0]).unwrap();
+        assert_eq!((doc.notes.pins[0].x, doc.notes.pins[0].y), (30.0, 30.0), "a crop left the pin where it was in the window");
+        doc.undo();
+        assert_eq!((doc.notes.pins[0].x, doc.notes.pins[0].y), (50.0, 40.0));
+        doc.undo();
+        doc.note_click([100.0, 100.0]);
+        doc.text_input(&TextInput::Key { key: TextKey::Backspace, shift: false, word: false });
+        assert!(doc.notes.is_empty(), "Backspace in an empty note left its pin");
+        assert_eq!(doc.note_open(), None);
+    }
+
+    /// Catches notes drawn into the image shown but not the marked image, or
+    /// the other way: with a pin and a mark, the image shown and the marked
+    /// image have red where the composite is white, hidden notes leave the
+    /// image shown as the composite, and the marked image keeps them.
+    #[test]
+    fn the_notes_are_drawn_where_they_are_shown() {
+        let mut doc = Doc::new(LayeredImage::blank(240, 160));
+        let white = doc.composite().to_vec();
+        doc.note_click([50.0, 40.0]);
+        doc.end_typing();
+        doc.add_mark(&[[10.0, 100.0, 1.0], [200.0, 100.0, 1.0]], 4.0, layers::notes::RED);
+        let at = |bytes: &[u8], x: usize, y: usize| bytes[(y * 240 + x) * 4..(y * 240 + x) * 4 + 4].to_vec();
+        let shown = doc.shown().to_vec();
+        assert_eq!(at(&shown, 100, 100), layers::notes::RED, "the mark is not shown");
+        assert_ne!(at(&shown, 46, 40), at(&white, 46, 40), "the pin is not shown");
+        let marked = doc.marked_image();
+        assert_eq!(marked.pixel(100, 100), layers::notes::RED);
+        assert_eq!(marked.data.len(), white.len());
+        doc.set_notes_hidden(true);
+        assert_eq!(doc.shown().to_vec(), white, "hidden notes were shown");
+        assert_eq!(doc.marked_image(), marked, "hidden notes left the marked image");
     }
 
     /// Catches typing keys that land in the wrong place: a word selected

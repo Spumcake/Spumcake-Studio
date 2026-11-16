@@ -110,6 +110,14 @@ fn the_host_depends_on_no_media_library() {
     }
 }
 
+/// Catches the host drawing a workspace's notes, links, or pre-vis check
+/// itself: those belong to the workspaces that share `layers/`.
+#[test]
+fn the_host_depends_on_no_layers_crate() {
+    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("the host's manifest");
+    assert!(!manifest.contains("layers"), "the host depends on layers:\n{manifest}");
+}
+
 /// The tool groups a built sub-application declares, read from its greeting.
 fn declared_tool_groups(program: &str) -> Vec<(String, protocol::ToolGroup)> {
     use std::io::{BufRead, BufReader};

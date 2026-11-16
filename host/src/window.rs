@@ -154,6 +154,8 @@ struct HostWindow {
     next_render: u64,
     /// Endpoint keys, read once each from the keyring.
     keys: crate::keys::Keys,
+    /// The script runner: what waits for the person's yes, and what runs.
+    runner: crate::runner::Runner,
     /// Connection tests and model lists, by endpoint.
     probes: crate::endpoints::Probes,
     /// The assistant's endpoint and prompt as last sent, so a change in
@@ -279,6 +281,7 @@ impl HostWindow {
             renders: HashMap::new(),
             next_render: 0,
             keys: crate::keys::Keys::default(),
+            runner: crate::runner::Runner::default(),
             probes: crate::endpoints::Probes::default(),
             configured: None,
             level: None,
@@ -696,6 +699,7 @@ impl eframe::App for HostWindow {
         self.show_levels(&known);
         self.configure_assistant();
         let mut pending = false;
+        let mut prepared = Vec::new();
         for started in &mut self.apps {
             started.running.poll();
             pending |= started.running.pending();
@@ -703,6 +707,12 @@ impl eframe::App for HostWindow {
             while let Some(text) = started.running.declared.clipboard.pop_front() {
                 ctx.copy_text(text);
             }
+            prepared.extend(started.running.declared.ask_assistant.drain(..));
+        }
+        // A workspace's prepared request waits in the composer, with the
+        // files it names as chips, for the person to send.
+        for (text, items) in prepared {
+            crate::chat::prepare(&mut self.chat, &text, &items, self.project.as_ref().map(|project| project.folder.as_path()));
         }
         if pending {
             ctx.request_repaint();
@@ -797,6 +807,14 @@ impl eframe::App for HostWindow {
             });
         self.sessions = menu;
         self.draw_settings(&ctx, frame);
+        // What the runner asks the person, over the conversation.
+        self.runner.wake_with(&ctx);
+        if let Some(asking) = self.runner.asking()
+            && let Some(approved) = crate::plan_card::show(&ctx, asking)
+            && let Some(answer) = self.runner.answer(approved)
+        {
+            self.assistant.send(Command::Result(answer));
+        }
         self.draw_model_menu(&ctx);
         if bar_pressed {
             self.toggle_workspace();
@@ -1028,7 +1046,7 @@ impl HostWindow {
             model: level.as_ref().map(|level| level.model.clone()).unwrap_or_default(),
             effort: level.and_then(|level| level.effort).map(|effort| effort.word().to_string()),
             selected,
-            targets: route::targets(&self.apps, &self.settings),
+            targets: route::targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path())),
         };
         self.assistant.send(Command::Send(request));
         for path in unread {
@@ -1069,6 +1087,7 @@ impl HostWindow {
             })
         {
             pending.ok = entry.ok;
+            pending.attachments = entry.attachments;
             return;
         }
         self.chat.conversation.push(entry);
@@ -1157,6 +1176,54 @@ impl HostWindow {
                     let open = self.model_menu.as_ref().is_some_and(|(open, _)| *open == id);
                     self.model_menu = if open { None } else { Some((id, at)) };
                 }
+            }
+        }
+    }
+
+    /// The cell a tab's panel shows as its card: the one it declared with
+    /// `cells`, with a model chosen from a chevron shown before the run
+    /// records it.
+    fn panel_cell(&self, app: usize, tab: &str, id: &str) -> Option<protocol::Cell> {
+        let mut cell = self
+            .apps
+            .get(app)?
+            .running
+            .declared
+            .cells
+            .get(tab)?
+            .0
+            .iter()
+            .find(|cell| cell.id == id)
+            .cloned()?;
+        if let Some((endpoint, model, effort)) = self.board.chosen.get(id) {
+            cell.endpoint = Some(endpoint.clone());
+            cell.model = Some(model.clone());
+            cell.effort = effort.clone();
+        }
+        Some(cell)
+    }
+
+    /// What the panel's card asked: Run and Stop as a cell card's, an edit
+    /// to the cell's owner, and its report.
+    fn note_card_events(&mut self, events: Vec<panel::CardEvent>) {
+        for event in events {
+            match event {
+                panel::CardEvent::Run { cell } => self.run_from_card(&cell),
+                panel::CardEvent::Stop { cell } => self.stop_one(&cell),
+                panel::CardEvent::Edit { cell, input, settings } => {
+                    let Some((app, tab)) = self.cell_home(&cell) else {
+                        continue;
+                    };
+                    self.send(app, HostMessage::EditCell { tab, cell, input, settings, endpoint: None, model: None });
+                }
+                // TODO: the failed round's request comes with the runner's
+                // rounds (Chat Assistant Work's slice 2b), which then opens it
+                // with `open_report`, as a workspace's OpenReport does. Until
+                // then the host knows no report for a cell.
+                panel::CardEvent::OpenReport { .. } => self.tell(String::from("This cell's report is not known yet.")),
+                // TODO: "Add reference" and Choose… open the picker, which
+                // does not exist yet.
+                panel::CardEvent::AddReference { .. } | panel::CardEvent::Choose { .. } => {}
             }
         }
     }
@@ -1331,6 +1398,7 @@ impl HostWindow {
         image: bool,
     ) {
         self.board.runs.retain(|run| run.id != id);
+        self.board.failed.remove(&id);
         let (endpoint, model, effort) = match &run_on {
             Ok(route) => (route.endpoint.clone(), route.model.clone(), route.effort.map(|effort| effort.word().to_string())),
             Err(_) => (String::new(), String::new(), None),
@@ -1437,10 +1505,15 @@ impl HostWindow {
             asked.extend(started.running.declared.reports.drain(..));
         }
         for request in asked {
-            match self.report_page(&request) {
-                Ok(page) => self.ctx.open_url(egui::OpenUrl::new_tab(page.display().to_string())),
-                Err(reason) => self.tell(reason),
-            }
+            self.open_report(&request);
+        }
+    }
+
+    /// Opens a request's report page, or says why there is none.
+    fn open_report(&mut self, request: &str) {
+        match self.report_page(request) {
+            Ok(page) => self.ctx.open_url(egui::OpenUrl::new_tab(page.display().to_string())),
+            Err(reason) => self.tell(reason),
         }
     }
 
@@ -1684,6 +1757,9 @@ impl HostWindow {
                 }
             }
             Some((app, tab)) => {
+                if let Some(reason) = &error {
+                    self.board.failed.insert(id.clone(), reason.clone());
+                }
                 if !self.tab_open(app, &tab) {
                     return;
                 }
@@ -2396,7 +2472,14 @@ impl HostWindow {
             .get(app)
             .and_then(|started| started.running.declared.notices.get(&tab).cloned())
             .unwrap_or_default();
-        chosen.extend(crate::notices::show(ui, &notices, rect, locked));
+        // In a raster tab, `show_in` keeps them above the filmstrip drawn
+        // this frame.
+        let corner = self
+            .apps
+            .get(app)
+            .and_then(|started| started.running.declared.notice_corners.get(&tab).copied())
+            .unwrap_or_default();
+        chosen.extend(crate::notices::show_in(ui, &notices, corner, rect, locked));
         self.paint_status(ui, app, rect);
 
         // A menu's Properties can open the panel after this frame was
@@ -2409,12 +2492,37 @@ impl HostWindow {
                 column.style_mut().visuals.disabled_alpha = LOCKED_ALPHA;
                 column.disable();
             }
-            let edits = panel::show(&mut column, properties.as_ref(), panel_rect);
+            // A declared cell shows as the Prompt page's card, with what
+            // the host knows of it: the cell, its run, and its model.
+            let card_cell = properties
+                .as_ref()
+                .and_then(|properties| properties.cell.as_ref())
+                .and_then(|declared| self.panel_cell(app, &tab, &declared.cell));
+            let edits = match &card_cell {
+                Some(cell) => {
+                    let model = cell.model.as_deref().map(|model| crate::cells::model_name(ui.ctx(), model));
+                    let root = self.project.as_ref().map(|project| project.folder.clone());
+                    let card = panel::CardState {
+                        cell: Some(cell),
+                        running: self.board.running(&cell.id).is_some(),
+                        error: self.board.failed.get(&cell.id).map(String::as_str),
+                        model: model.as_deref(),
+                        root: root.as_deref(),
+                        ..Default::default()
+                    };
+                    panel::show_with(&mut column, properties.as_ref(), &card, panel_rect)
+                }
+                None => panel::show(&mut column, properties.as_ref(), panel_rect),
+            };
             if !locked {
                 sent.extend(edits);
             }
         } else if open {
             ui.ctx().request_repaint();
+        }
+        let card_events = panel::take_card_events(ui.ctx());
+        if !locked {
+            self.note_card_events(card_events);
         }
         if has_panel {
             let tip = properties
@@ -2466,6 +2574,19 @@ impl HostWindow {
                     group,
                 } => {
                     if app == route::HOST_ID {
+                        let folder = self.project.as_ref().map(|project| project.folder.clone());
+                        let (settings, keys, data) = (&self.settings, &mut self.keys, self.data.clone());
+                        let env = |skills: &[crate::skills_setup::Skill]| {
+                            crate::runner::script_env(settings, &mut |id| keys.get(id), data.as_deref(), crate::runner::scripts_folder(skills))
+                        };
+                        match route::project_call(folder.as_deref(), settings, &mut self.runner, env, &call, &tool, &input) {
+                            route::ProjectAnswer::Now(answer) => {
+                                self.assistant.send(Command::Result(answer));
+                                continue;
+                            }
+                            route::ProjectAnswer::Later => continue,
+                            route::ProjectAnswer::NotMine => {}
+                        }
                         self.begin_host_cell(call, &tool, input);
                         continue;
                     }
@@ -2485,7 +2606,18 @@ impl HostWindow {
         for answer in self.routing.poll(&mut self.apps) {
             self.assistant.send(answer);
         }
-        if let Some(targets) = self.routing.changed_targets(&self.apps, &self.settings) {
+        // The runner's commands: answers for those that ended, and the
+        // output of those running, in their tool rows.
+        let (answers, live) = self.runner.poll();
+        for answer in answers {
+            self.assistant.send(Command::Result(answer));
+        }
+        for (tool, text) in live {
+            if let Some(row) = self.chat.conversation.iter_mut().rev().find(|entry| entry.role == assistant::Role::Tool && entry.tool.as_deref() == Some(tool.as_str())) {
+                row.text = text;
+            }
+        }
+        if let Some(targets) = self.routing.changed_targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path())) {
             self.assistant.send(Command::Targets(targets));
         }
     }
@@ -2513,6 +2645,9 @@ impl HostWindow {
             ChatEvent::Stop => {
                 self.chat.queued.clear();
                 self.stop_conversation_cells();
+                for answer in self.runner.stop() {
+                    self.assistant.send(Command::Result(answer));
+                }
                 self.assistant.send(Command::Stop);
             }
             ChatEvent::Attach => {
@@ -3366,7 +3501,7 @@ mod tests {
         assert_eq!(out, vec![Command::Result(answer("c2"))]);
         assert!(routing.poll(&mut apps).is_empty());
 
-        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default());
+        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default(), None);
         assert!(targets.iter().all(|target| target.app != "gone"), "an exited process is offered");
         let here = targets.iter().find(|target| target.app == "here").expect("the living process was dropped");
         assert_eq!(here.tabs[0].label, "Template");
