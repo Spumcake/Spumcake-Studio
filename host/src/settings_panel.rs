@@ -825,7 +825,7 @@ fn status_mark(ui: &egui::Ui, right: f32, center_y: f32, status: &Status) -> f32
     let color = match status {
         Status::Connected => CONNECTED,
         Status::KeyMissing | Status::Answered(_) => WARNING,
-        Status::Checking | Status::NotRunning => HINT,
+        Status::Checking | Status::NotRunning | Status::KeySaved => HINT,
     };
     let label = status.label();
     let galley = ui.painter().layout_no_wrap(label, ts::small(), MUTED);
@@ -895,7 +895,8 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
     let kinds: Vec<String> = EndpointKind::ALL.iter().map(|kind| kind.label().to_string()).collect();
     let chosen = EndpointKind::ALL.iter().position(|kind| *kind == form.kind);
     let type_rect = control(rows[0], CONTROL_W, 0.0);
-    row_text(ui, rows[0], rows[0].left() + PAD, type_rect.left() - 8.0, "Type", "What kind of service this is");
+    let type_line = if form.kind == EndpointKind::Fal { "Used by Skills' request.py" } else { "What kind of service this is" };
+    row_text(ui, rows[0], rows[0].left() + PAD, type_rect.left() - 8.0, "Type", type_line);
     if let Some(index) = select(ui, type_rect, "endpoint-type", form.kind.label(), &kinds, chosen) {
         let old = form.kind.suggested();
         let kind = EndpointKind::ALL[index];
@@ -972,7 +973,9 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
 
 /// The endpoint choices a skill or level offers, and which is chosen.
 fn endpoint_options(settings: &Settings, current: Option<&str>, chats_only: bool) -> (Vec<String>, Vec<String>, Option<usize>) {
-    let offered: Vec<&EndpointSetting> = settings.endpoints.iter().filter(|endpoint| !chats_only || endpoint.kind.chats()).collect();
+    // fal.ai only holds the key Skills' request.py uses: no skill or level sends to it.
+    let offered: Vec<&EndpointSetting> =
+        settings.endpoints.iter().filter(|endpoint| endpoint.kind != EndpointKind::Fal && (!chats_only || endpoint.kind.chats())).collect();
     let names = offered.iter().map(|endpoint| endpoint.name.clone()).collect();
     let ids: Vec<String> = offered.iter().map(|endpoint| endpoint.id.clone()).collect();
     let chosen = current.and_then(|current| ids.iter().position(|id| id == current));

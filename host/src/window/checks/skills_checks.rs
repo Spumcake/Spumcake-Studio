@@ -91,3 +91,112 @@ fn the_assistant_reads_a_skills_project_and_its_skills() {
     assert!(!folder.join("library/x.png").exists());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A stand-in for Spumcake-Skills' request.py: `plan` prints the plan of a
+/// spec with a hash of the spec, and `run` refuses unless `--expect` is
+/// that hash, then files an output and prints what to tell the person.
+const STAND_IN_REQUEST: &str = r#"import hashlib, json, os, sys
+cmd, spec = sys.argv[1], sys.argv[2]
+text = open(spec).read()
+h = hashlib.sha256(text.encode()).hexdigest()
+def plan():
+    s = json.loads(text)
+    print(json.dumps({"plan": 1, "endpoint": {"kind": "fal", "model": "stand-in/model", "settings": {"seed": 7}},
+                      "prompt": s["prompt"], "references": [], "requests": 1, "estimate": "unknown: no price", "hash": h}))
+if cmd == "plan":
+    plan()
+elif cmd == "run":
+    expect = sys.argv[sys.argv.index("--expect") + 1]
+    if expect != h:
+        sys.exit("refused: what this would send is not the plan approved")
+    open("library/2026-11-16_12-00-take.png", "wb").write(b"png")
+    print("--- tell the user, word for word ---")
+    print("made library/2026-11-16_12-00-take.png")
+"#;
+
+/// Sends a message without waiting for its reply, which waits here for
+/// the person's yes to a plan.
+fn send_message(window: &mut super::Window, text: &str) {
+    window.app.chat.input = text.to_string();
+    let ctx = window.ctx.clone();
+    let super::Window { app, frame, .. } = window;
+    app.chat_event(crate::chat::ChatEvent::Send, &ctx, frame);
+}
+
+/// Steps the window until the runner asks the person, saying, if it never
+/// does, how long the slowest frame took and what the conversation holds.
+fn wait_for_card(window: &mut super::Window) {
+    let start = std::time::Instant::now();
+    let mut slowest = std::time::Duration::ZERO;
+    while start.elapsed() < std::time::Duration::from_secs(20) {
+        let frame = std::time::Instant::now();
+        window.step();
+        slowest = slowest.max(frame.elapsed());
+        if window.app.runner.asking().is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let entries: Vec<String> = window.app.chat.conversation.iter().map(|entry| format!("{:?} ok={:?} {:?}", entry.role, entry.ok, entry.text)).collect();
+    panic!("no plan card; slowest frame {slowest:?}; {entries:?}");
+}
+
+fn stand_in_skills(at: &Path) {
+    skill_repo(at);
+    std::fs::create_dir_all(at.join("scripts")).unwrap();
+    std::fs::write(at.join("scripts/request.py"), STAND_IN_REQUEST).unwrap();
+}
+
+/// Catches a request sent before the person approves its plan, or one sent
+/// after its spec changed: the plan card waits with the prompt as sent,
+/// nothing runs until its yes, the run carries the approved plan's hash,
+/// and a spec changed after the yes is refused with nothing made.
+#[test]
+fn a_request_runs_only_as_its_approved_plan() {
+    let dir = scratch("skills-plan-card");
+    let send = protocol::tool_key(crate::route::HOST_ID, "project", "send_request");
+    let stand_in = StandIn::start(vec![
+        call_reply(&send, json!({"spec": "agent/spec.json"})),
+        text_reply("It is made."),
+        call_reply(&send, json!({"spec": "agent/spec.json"})),
+        text_reply("It was refused."),
+    ]);
+    let mut window = project_window(Vec::new(), &stand_in, &dir);
+    let folder = window.app.project.as_ref().unwrap().folder.clone();
+    for sub in ["library", "requests", "agent"] {
+        std::fs::create_dir_all(folder.join(sub)).unwrap();
+    }
+    std::fs::write(folder.join("agent/spec.json"), r#"{"name": "take", "prompt": "the cook lifts the towel"}"#).unwrap();
+    let repo = dir.join("spumcake-skills");
+    stand_in_skills(&repo);
+    window.app.settings.skill_folders = vec![repo.display().to_string()];
+    window.app.runner.assume_prerequisites(&folder);
+    let take = folder.join("library/2026-11-16_12-00-take.png");
+
+    send_message(&mut window, "Make the take.");
+    wait_for_card(&mut window);
+    match window.app.runner.asking() {
+        Some(crate::runner::Asking::Plans { plans, runs, .. }) => {
+            assert_eq!(plans[0]["prompt"], "the cook lifts the towel");
+            let hash = plans[0]["hash"].as_str().unwrap();
+            assert!(runs[0].windows(2).any(|pair| pair[0] == "--expect" && pair[1] == hash), "{runs:?}");
+        }
+        other => panic!("no plan card: {other:?}"),
+    }
+    assert!(!take.exists(), "it ran before the yes");
+    let answer = window.app.runner.answer(true);
+    assert!(answer.is_none());
+    window.until(|app| !app.chat.working && stand_in.requests().len() >= 2);
+    assert!(take.exists(), "the approved request did not run");
+    assert!(stand_in.requests()[1].to_string().contains("tell the user, word for word"));
+
+    std::fs::remove_file(&take).unwrap();
+    send_message(&mut window, "Make it again.");
+    wait_for_card(&mut window);
+    std::fs::write(folder.join("agent/spec.json"), r#"{"name": "take", "prompt": "a changed prompt"}"#).unwrap();
+    assert!(window.app.runner.answer(true).is_none());
+    window.until(|app| !app.chat.working && stand_in.requests().len() >= 4);
+    assert!(!take.exists(), "a spec changed after its approval was run");
+    assert!(stand_in.requests()[3].to_string().contains("refused"));
+    let _ = std::fs::remove_dir_all(dir);
+}

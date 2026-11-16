@@ -7,6 +7,7 @@
 //! stops answering, gets the call answered for it with `ok: false`. The host
 //! never knows a skill or a tool by name.
 
+use crate::runner::{self, Begun, Runner, ScriptEnv};
 use crate::skills_setup;
 use crate::window::Started;
 use crate::workspace::{DISCUSSION, Makes, Settings, SkillSetting};
@@ -256,18 +257,42 @@ pub(crate) fn targets(apps: &[Started], settings: &Settings, project: Option<&Pa
     offered
 }
 
-/// A call to the host's project tools, answered at once, or None when the
-/// call is for another of the host's tools.
-pub(crate) fn project_call(project: Option<&Path>, settings: &Settings, call: &str, tool: &str, input: &serde_json::Value) -> Option<ToolResult> {
+/// What a call to the host's project tools comes to.
+pub(crate) enum ProjectAnswer {
+    /// Answered at once.
+    Now(ToolResult),
+    /// The runner answers it, after the person and the command.
+    Later,
+    /// The call is for another of the host's tools.
+    NotMine,
+}
+
+/// A call to the host's project tools. A runner tool waits for the
+/// person's yes; `env` gives what its scripts run with.
+pub(crate) fn project_call(
+    project: Option<&Path>,
+    settings: &Settings,
+    runner: &mut Runner,
+    env: impl FnOnce(&[skills_setup::Skill]) -> ScriptEnv,
+    call: &str,
+    tool: &str,
+    input: &serde_json::Value,
+) -> ProjectAnswer {
     if !skills_setup::is_project_tool(tool) {
-        return None;
+        return ProjectAnswer::NotMine;
     }
-    let (_, _, name) = protocol::split_tool_key(tool)?;
+    let Some((_, _, name)) = protocol::split_tool_key(tool) else { return ProjectAnswer::NotMine };
     let Some(folder) = project.filter(|folder| skills_setup::is_skills_project(folder)) else {
-        return Some(failed(call.to_string(), "No Skills project is open."));
+        return ProjectAnswer::Now(failed(call.to_string(), "No Skills project is open."));
     };
     let skills = skills_setup::listed_skills(&settings.skill_folders);
-    Some(skills_setup::call(folder, &skills, call.to_string(), name, input))
+    if runner::is_runner_tool(name) {
+        return match runner.begin(folder, env(&skills), call, tool, name, input) {
+            Begun::Answered(result) => ProjectAnswer::Now(result),
+            Begun::Waiting => ProjectAnswer::Later,
+        };
+    }
+    ProjectAnswer::Now(skills_setup::call(folder, &skills, call.to_string(), name, input))
 }
 
 fn failed(call: String, reason: &str) -> ToolResult {

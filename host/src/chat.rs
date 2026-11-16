@@ -922,7 +922,7 @@ const SHOWN_HEIGHT: f32 = 120.0;
 
 /// A PNG as a texture, decoded once per file; None for another kind of
 /// image, which shows by its path alone.
-fn shown_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
+pub(crate) fn shown_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
     type Cache = std::collections::HashMap<String, egui::TextureHandle>;
     let id = egui::Id::new("tool-row-images");
     if let Some(known) = ctx.data(|data| data.get_temp::<Cache>(id).and_then(|cache| cache.get(path).cloned())) {
@@ -935,10 +935,38 @@ fn shown_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle>
     Some(texture)
 }
 
-/// One tool call: a Small row with its mark and what it did, and under it
-/// every image the tool showed the model, with its full path.
+/// A prepared request from a workspace, put in the composer as the person
+/// would type it, with each file it names as a chip. It is sent only when
+/// the person sends it.
+pub(crate) fn prepare(chat: &mut Chat, text: &str, items: &[protocol::ItemRef], project: Option<&Path>) {
+    chat.input = text.to_string();
+    for item in items {
+        let path = Path::new(&item.path);
+        let path = match project {
+            Some(project) if path.is_relative() => project.join(path),
+            _ => path.to_path_buf(),
+        };
+        if !chat.chips.contains(&path) {
+            chat.chips.push(path);
+        }
+    }
+}
+
+/// The most lines of a command's output shown under its row.
+const OUTPUT_LINES: usize = 8;
+
+/// One tool call: a Small row with its mark and what it did; under it, a
+/// command's latest output while it runs and after; and every image the
+/// tool showed the model, with its full path.
 fn tool_row(ui: &mut egui::Ui, entry: &Entry, width: f32) {
     tool_line(ui, entry, width);
+    if !entry.text.trim().is_empty() {
+        let lines: Vec<&str> = entry.text.lines().collect();
+        let shown = lines[lines.len().saturating_sub(OUTPUT_LINES)..].join("\n");
+        let galley = ui.painter().layout(shown, ts::code(), ts::MUTED, width - 20.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, galley.size().y + 4.0), Sense::hover());
+        ui.painter().galley(pos2(rect.left() + 20.0, rect.top() + 2.0), galley, ts::MUTED);
+    }
     for path in &entry.attachments {
         if let Some(texture) = shown_texture(ui.ctx(), path) {
             let size = texture.size_vec2();
@@ -1186,6 +1214,18 @@ pub(crate) fn load_attachment(path: &Path) -> Option<Attachment> {
 
 #[cfg(test)]
 mod tests {
+    /// Catches a workspace's prepared request sent for the person, or its
+    /// file lost: it waits in the composer, with the file as a chip.
+    #[test]
+    fn a_prepared_request_waits_in_the_composer() {
+        let mut chat = super::Chat::default();
+        let item = protocol::ItemRef { path: String::from("library/take.png"), item: None };
+        super::prepare(&mut chat, "Use this take.", &[item], Some(Path::new("/film")));
+        assert_eq!(chat.input, "Use this take.");
+        assert_eq!(chat.chips, [std::path::PathBuf::from("/film/library/take.png")]);
+        assert!(chat.conversation.is_empty(), "it was sent");
+    }
+
     use super::*;
 
     /// Catches a step line that shows a workspace by its id: a tool is named

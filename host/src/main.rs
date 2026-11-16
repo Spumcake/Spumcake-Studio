@@ -23,6 +23,8 @@ mod sessions;
 mod settings_panel;
 mod skills_setup;
 mod route;
+mod runner;
+mod plan_card;
 mod tablet;
 mod tabs;
 mod timeline;

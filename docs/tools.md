@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-85 tools.
+88 tools.
 
 ## The host
 
@@ -25,6 +25,9 @@ Read the project and the skills, look at its images, and write by hand where the
 - **`inpainter__project__look_at_file`**: Look at an image of the project, or of a skill's repository: PNG, JPEG, WebP, or GIF. The image is shown to you, and the person sees it with its full path. Takes `path` (string, required).
 - **`inpainter__project__write_file`**: Write a page of brief/, or add a new file to the agent's folder, named by the local time and what it is, with its line in the folder's index. Never anything else. Takes `folder` (string, required), `name` (string, required), `text` (string, required), `about` (string).
 - **`inpainter__project__read_skill`**: Read a skill, unchanged, with its folder and its repository, which its relative links resolve in. Takes `name` (string, required).
+- **`inpainter__project__run_command`**: Run a command in the project, such as a Spumcake-Skills script (request.py and pipeline.py may be named by their file name alone), a builder, or a script of the agent's own, after the person approves it. Its output is answered when it ends. A command that spends is refused: send it with send_request or rerun_step. Takes `command` (array, required), `why` (string, required).
+- **`inpainter__project__send_request`**: Send one request to a model with request.py, from its spec: its plan, worked out offline, is shown to the person with its cost, its prompt as sent, and every reference in order, and it runs only on their yes, exactly as approved. Answers with what request.py tell says. Takes `spec` (string, required), `stand_in` (boolean).
+- **`inpainter__project__rerun_step`**: Make a take of the first step of a pipeline that is out of date, or the first a change reaches, with pipeline.py rerun: its plan is shown to the person and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `fact` (string), `stand_in` (boolean).
 
 ## Image Generator
 

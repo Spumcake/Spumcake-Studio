@@ -176,9 +176,27 @@ pub(crate) fn tool_group(folder: &Path, skills: &[Skill]) -> ToolGroup {
 In this project, request.py is the one renderer: a model is called only through it and the plan card, never through an execution skill or a command. \
 Read a skill with read_skill before following it, and read what it links to with read_file, relative to the skill's folder or its repository. \
 Read the project with list_files and read_file, and look at every image you judge with look_at_file. \
-Write by hand only a page of brief/, or a new file in the agent's folder with its line in its index; every other folder is written by the skills' own scripts.",
+Write by hand only a page of brief/, or a new file in the agent's folder with its line in its index; every other folder is written by the skills' own scripts. \
+Run a script or any other command with run_command, which the person approves first. Send a request to a model only with send_request, from a spec the skill built and you wrote into the agent's folder, or a pipeline's step with rerun_step: the person approves its plan and cost first. Tell the person, word for word, what request.py tell prints for each request. \
+A prompt for a language model is sent the same way, as a request of its own with send_request, never answered by you, so its answer has a report. \
+A request still at its endpoint has a pending record in requests/; finish it with run_command and request.py collect <id>, or cancel it with request.py cancel <id>, neither of which spends.",
         folder.display()
     );
+    // Requests still at their endpoint, which the person can have
+    // collected or cancelled.
+    let mut pending: Vec<String> = std::fs::read_dir(folder.join("requests"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().strip_suffix(".pending.json").map(String::from))
+        .collect();
+    pending.sort();
+    if !pending.is_empty() {
+        instructions.push_str(&format!(
+            "\n\nPending at their endpoint now, already paid for: {}. Tell the person, and offer to collect or cancel each.",
+            pending.join(", ")
+        ));
+    }
     if skills.is_empty() {
         instructions.push_str("\n\nNo skill folder is set, so no skill is listed. Say so when a skill is needed, and stop.");
     } else {
@@ -258,7 +276,10 @@ Write by hand only a page of brief/, or a new file in the agent's folder with it
                 }),
                 implements: Vec::new(),
             },
-        ],
+        ]
+        .into_iter()
+        .chain(crate::runner::tools())
+        .collect(),
     }
 }
 
