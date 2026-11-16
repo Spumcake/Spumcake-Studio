@@ -25,6 +25,7 @@ mod skills_setup;
 mod route;
 mod runner;
 mod plan_card;
+mod prompt_page;
 mod tablet;
 mod tabs;
 mod timeline;

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod flows;
+mod prompt_runs;
 mod settings;
 #[cfg(test)]
 mod checks;
@@ -156,6 +157,8 @@ struct HostWindow {
     keys: crate::keys::Keys,
     /// The script runner: what waits for the person's yes, and what runs.
     runner: crate::runner::Runner,
+    /// The Prompt page's runner duties in a Skills project.
+    prompt_page: crate::prompt_page::PromptPage,
     /// Connection tests and model lists, by endpoint.
     probes: crate::endpoints::Probes,
     /// The assistant's endpoint and prompt as last sent, so a change in
@@ -282,6 +285,7 @@ impl HostWindow {
             next_render: 0,
             keys: crate::keys::Keys::default(),
             runner: crate::runner::Runner::default(),
+            prompt_page: crate::prompt_page::PromptPage::default(),
             probes: crate::endpoints::Probes::default(),
             configured: None,
             level: None,
@@ -813,7 +817,10 @@ impl eframe::App for HostWindow {
             && let Some(approved) = crate::plan_card::show(&ctx, asking)
             && let Some(answer) = self.runner.answer(approved)
         {
-            self.assistant.send(Command::Result(answer));
+            // A cell's cancelled plan goes to the cell, the assistant's to it.
+            for answer in self.note_runner_answers(vec![answer], Vec::new()) {
+                self.assistant.send(Command::Result(answer));
+            }
         }
         self.draw_model_menu(&ctx);
         if bar_pressed {
@@ -1208,19 +1215,27 @@ impl HostWindow {
     fn note_card_events(&mut self, events: Vec<panel::CardEvent>) {
         for event in events {
             match event {
-                panel::CardEvent::Run { cell } => self.run_from_card(&cell),
-                panel::CardEvent::Stop { cell } => self.stop_one(&cell),
+                panel::CardEvent::Run { cell } => {
+                    if !self.run_prompt_cell(&cell) {
+                        self.run_from_card(&cell);
+                    }
+                }
+                panel::CardEvent::Stop { cell } => {
+                    if !self.stop_prompt_cell(&cell) {
+                        self.stop_one(&cell);
+                    }
+                }
                 panel::CardEvent::Edit { cell, input, settings } => {
+                    if self.edit_prompt_step(&cell, &input, settings.as_ref()) {
+                        continue;
+                    }
                     let Some((app, tab)) = self.cell_home(&cell) else {
                         continue;
                     };
                     self.send(app, HostMessage::EditCell { tab, cell, input, settings, endpoint: None, model: None });
                 }
-                // TODO: the failed round's request comes with the runner's
-                // rounds (Chat Assistant Work's slice 2b), which then opens it
-                // with `open_report`, as a workspace's OpenReport does. Until
-                // then the host knows no report for a cell.
-                panel::CardEvent::OpenReport { .. } => self.tell(String::from("This cell's report is not known yet.")),
+                // The failed round's report, from the runner's rounds.
+                panel::CardEvent::OpenReport { cell } => self.open_cell_report(&cell),
                 // TODO: "Add reference" and Choose… open the picker, which
                 // does not exist yet.
                 panel::CardEvent::AddReference { .. } | panel::CardEvent::Choose { .. } => {}
@@ -1397,6 +1412,15 @@ impl HostWindow {
         prompt: String,
         image: bool,
     ) {
+        // In a Skills project nothing is sent to a model directly: every
+        // generation is a request.py request, through the plan card.
+        if let Some(reason) = self.direct_runs_refused() {
+            self.board.failed.insert(id, reason.clone());
+            if let Some(call) = call {
+                self.assistant.send(Command::Result(protocol::ToolResult { call, ok: false, output: serde_json::json!({ "error": reason }), images: Vec::new() }));
+            }
+            return;
+        }
         self.board.runs.retain(|run| run.id != id);
         self.board.failed.remove(&id);
         let (endpoint, model, effort) = match &run_on {
@@ -1564,6 +1588,10 @@ impl HostWindow {
     }
 
     fn start_recipe_run(&mut self, app: usize, tab: &str, id: &str) {
+        // In a Skills project a workspace's cell runs through the runner.
+        if self.run_prompt_cell(id) {
+            return;
+        }
         let Some(cell) = self.apps.get(app).and_then(|started| {
             started.running.declared.cells.get(tab).and_then(|(cells, _)| {
                 cells.iter().find(|cell| cell.id == id).cloned()
@@ -2500,13 +2528,20 @@ impl HostWindow {
                 .and_then(|declared| self.panel_cell(app, &tab, &declared.cell));
             let edits = match &card_cell {
                 Some(cell) => {
-                    let model = cell.model.as_deref().map(|model| crate::cells::model_name(ui.ctx(), model));
+                    // In a Skills project, the runner fills what it knows:
+                    // a step's read, which references are not canon, and
+                    // the cost.
+                    let view = self.prompt_card_view(app, &tab, cell).unwrap_or_default();
+                    let shown = view.cell.as_ref().unwrap_or(cell);
+                    let model = shown.model.as_deref().map(|model| crate::cells::model_name(ui.ctx(), model));
                     let root = self.project.as_ref().map(|project| project.folder.clone());
                     let card = panel::CardState {
-                        cell: Some(cell),
-                        running: self.board.running(&cell.id).is_some(),
+                        cell: Some(shown),
+                        running: self.board.running(&cell.id).is_some() || self.prompt_cell_running(&cell.id),
                         error: self.board.failed.get(&cell.id).map(String::as_str),
                         model: model.as_deref(),
+                        cost: view.cost.as_deref(),
+                        not_canon: &view.not_canon,
                         root: root.as_deref(),
                         ..Default::default()
                     };
@@ -2608,10 +2643,11 @@ impl HostWindow {
         }
         // The runner's commands: answers for those that ended, and the
         // output of those running, in their tool rows.
-        let (answers, live) = self.runner.poll();
-        for answer in answers {
+        let (answers, live, finished) = self.runner.poll_all();
+        for answer in self.note_runner_answers(answers, finished) {
             self.assistant.send(Command::Result(answer));
         }
+        self.file_resources();
         for (tool, text) in live {
             if let Some(row) = self.chat.conversation.iter_mut().rev().find(|entry| entry.role == assistant::Role::Tool && entry.tool.as_deref() == Some(tool.as_str())) {
                 row.text = text;

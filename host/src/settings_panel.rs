@@ -895,7 +895,11 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
     let kinds: Vec<String> = EndpointKind::ALL.iter().map(|kind| kind.label().to_string()).collect();
     let chosen = EndpointKind::ALL.iter().position(|kind| *kind == form.kind);
     let type_rect = control(rows[0], CONTROL_W, 0.0);
-    let type_line = if form.kind == EndpointKind::Fal { "Used by Skills' request.py" } else { "What kind of service this is" };
+    let type_line = match form.kind {
+        EndpointKind::Fal => "Used by Skills' request.py",
+        EndpointKind::Brave => "Used by the assistant's research",
+        _ => "What kind of service this is",
+    };
     row_text(ui, rows[0], rows[0].left() + PAD, type_rect.left() - 8.0, "Type", type_line);
     if let Some(index) = select(ui, type_rect, "endpoint-type", form.kind.label(), &kinds, chosen) {
         let old = form.kind.suggested();
@@ -973,9 +977,13 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
 
 /// The endpoint choices a skill or level offers, and which is chosen.
 fn endpoint_options(settings: &Settings, current: Option<&str>, chats_only: bool) -> (Vec<String>, Vec<String>, Option<usize>) {
-    // fal.ai only holds the key Skills' request.py uses: no skill or level sends to it.
-    let offered: Vec<&EndpointSetting> =
-        settings.endpoints.iter().filter(|endpoint| endpoint.kind != EndpointKind::Fal && (!chats_only || endpoint.kind.chats())).collect();
+    // fal.ai and Brave Search only hold keys, for Skills' request.py and the
+    // assistant's research: no skill or level sends to them.
+    let offered: Vec<&EndpointSetting> = settings
+        .endpoints
+        .iter()
+        .filter(|endpoint| !matches!(endpoint.kind, EndpointKind::Fal | EndpointKind::Brave) && (!chats_only || endpoint.kind.chats()))
+        .collect();
     let names = offered.iter().map(|endpoint| endpoint.name.clone()).collect();
     let ids: Vec<String> = offered.iter().map(|endpoint| endpoint.id.clone()).collect();
     let chosen = current.and_then(|current| ids.iter().position(|id| id == current));

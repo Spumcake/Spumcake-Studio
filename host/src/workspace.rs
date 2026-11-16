@@ -821,10 +821,14 @@ pub(crate) enum EndpointKind {
     /// runner hands Spumcake-Skills' `request.py` as `FAL_KEY`, since
     /// `request.py` is the only runner, as the owner decided on 2026-11-15.
     Fal,
+    /// Brave Search, the assistant's web and image search for research, as
+    /// the owner chose on 2026-11-16. Studio sends it only searches the
+    /// person approved, never a prompt.
+    Brave,
 }
 
 impl EndpointKind {
-    pub(crate) const ALL: [EndpointKind; 4] = [EndpointKind::Openrouter, EndpointKind::Openai, EndpointKind::Comfyui, EndpointKind::Fal];
+    pub(crate) const ALL: [EndpointKind; 5] = [EndpointKind::Openrouter, EndpointKind::Openai, EndpointKind::Comfyui, EndpointKind::Fal, EndpointKind::Brave];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -832,6 +836,7 @@ impl EndpointKind {
             EndpointKind::Openai => "OpenAI-compatible",
             EndpointKind::Comfyui => "ComfyUI",
             EndpointKind::Fal => "fal.ai",
+            EndpointKind::Brave => "Brave Search",
         }
     }
 
@@ -843,13 +848,14 @@ impl EndpointKind {
             EndpointKind::Comfyui => ("Local ComfyUI", "http://127.0.0.1:8188"),
             // Studio never sends to it, so its address only says whose key it is.
             EndpointKind::Fal => ("fal.ai", "https://fal.ai"),
+            EndpointKind::Brave => ("Brave Search", "https://api.search.brave.com"),
         }
     }
 
-    /// A chat endpoint answers prompts; ComfyUI runs graphs, and fal.ai
-    /// only holds a key for Skills' `request.py`.
+    /// A chat endpoint answers prompts; ComfyUI runs graphs, fal.ai only
+    /// holds a key for Skills' `request.py`, and Brave Search only searches.
     pub(crate) fn chats(self) -> bool {
-        !matches!(self, EndpointKind::Comfyui | EndpointKind::Fal)
+        !matches!(self, EndpointKind::Comfyui | EndpointKind::Fal | EndpointKind::Brave)
     }
 }
 
