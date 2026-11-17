@@ -17,6 +17,9 @@ const EDGE: [u8; 4] = [200, 200, 204, 255];
 /// A freehand mark's width, in screen pixels: at 100% it is this many
 /// image pixels.
 pub const MARK_WIDTH: f32 = 4.0;
+/// The widest a card's words run before they wrap, in image pixels, as
+/// ig-notes-pin shows a card: about 320 at 100%.
+const CARD_WORDS: f32 = 320.0;
 
 /// A pin's radius, in image pixels: larger on a larger image, so a pin
 /// reads at any size, and the same wherever it is drawn.
@@ -30,8 +33,11 @@ pub fn word_size(width: u32, height: u32) -> f32 {
 }
 
 /// A pin's card: its words as a text, the corner they sit at, and the card
-/// around them, `[x, y, width, height]`, all in image pixels. It sits to
-/// the pin's right, or its left when the right has no room.
+/// around them, `[x, y, width, height]`, all in image pixels. It grows
+/// with its words up to `CARD_WORDS` wide, or the image's width, and then
+/// wraps them, as ig-notes-pin shows. It sits to the pin's right, or its
+/// left when the right has no room, and inside the image when neither
+/// has.
 pub struct Card {
     pub text: Text,
     pub corner: [f32; 2],
@@ -41,14 +47,18 @@ pub struct Card {
 pub fn card(pin: &Pin, width: u32, height: u32) -> Card {
     let radius = pin_radius(width, height);
     let size = word_size(width, height);
-    let text = Text { words: pin.text.clone(), style: Style { size, color: INK, ..Style::default() }, width: None };
-    let layout = text::lay(&text);
     let pad = (size * 0.5).round();
+    let mut text = Text { words: pin.text.clone(), style: Style { size, color: INK, ..Style::default() }, width: None };
+    let most = CARD_WORDS.min(width as f32 - 2.0 * pad).max(size * 6.0);
+    if text::lay(&text).width > most {
+        text.width = Some(most);
+    }
+    let layout = text::lay(&text);
     let w = layout.width.max(size * 6.0) + 2.0 * pad;
     let h = layout.height.max(layout.advance) + 2.0 * pad;
     let mut left = (pin.x + radius * 1.6).round();
-    if left + w > width as f32 && pin.x - radius * 1.6 - w >= 0.0 {
-        left = (pin.x - radius * 1.6 - w).round();
+    if left + w > width as f32 {
+        left = if pin.x - radius * 1.6 - w >= 0.0 { (pin.x - radius * 1.6 - w).round() } else { (width as f32 - w).max(0.0).round() };
     }
     let top = (pin.y - h / 2.0).clamp(0.0, (height as f32 - h).max(0.0)).round();
     Card { text, corner: [left + pad, top + pad], rect: [left, top, w, h] }
@@ -147,15 +157,12 @@ pub fn lay_over(layer: &Rgba, rect: Rect, rows: &mut [u8]) {
     }
 }
 
-/// A pin's number, white and bold, in the middle of its disc.
+/// A pin's number, white and bold, in the middle of its disc, drawn by
+/// `layers::label` as the views' labels are.
 fn number(image: &mut Rgba, pin: &Pin, radius: f32) {
-    let text = Text {
-        words: pin.number.to_string(),
-        style: Style { size: radius * 1.15, bold: true, color: [255, 255, 255], ..Style::default() },
-        width: None,
-    };
-    let layout = text::lay(&text);
-    paint(image, &text::draw(&text), [pin.x - layout.width / 2.0, pin.y - layout.height / 2.0]);
+    let size = radius * 1.15;
+    let look = layers::label::Look { size, colour: [255, 255, 255, 255], bold: true };
+    layers::label::draw(image, &pin.number.to_string(), [pin.x, pin.y - layers::label::height(size) / 2.0], look, layers::label::Anchor::Centre);
 }
 
 /// Straight RGBA pixels drawn onto `image` with their corner at `corner`,
@@ -241,6 +248,24 @@ mod tests {
         let mut open = Rgba::new(width, height, [0, 0, 0, 255]);
         draw(&mut open, &notes(), Some(1));
         assert!(open.pixel(inside[0], inside[1])[0] > 240, "the open pin's card is not drawn");
+    }
+
+    /// Catches a card too narrow for its words, or one past the image's
+    /// edge, as a card scrolling "ess rain on the glas" did: its words fit
+    /// it on one line while they are short, a long note wraps at about
+    /// 320 pixels, and a card near the right edge stays inside the image.
+    #[test]
+    fn a_card_grows_with_its_words_then_wraps() {
+        let pin = |x: f32, words: &str| Pin { number: 1, x, y: 60.0, text: words.into() };
+        let short = card(&pin(40.0, "less rain on the glass"), 1920, 1080);
+        let laid = text::lay(&short.text);
+        assert!(short.text.width.is_none() && short.rect[2] >= laid.width, "a short note does not fit its card");
+        let long = card(&pin(40.0, &"less rain on the glass, and the lamp a little warmer ".repeat(4)), 1920, 1080);
+        assert_eq!(long.text.width, Some(320.0));
+        assert!(text::lay(&long.text).lines.len() > 1, "a long note does not wrap");
+        let edge = card(&pin(150.0, "less rain on the glass"), 160, 90);
+        assert!(edge.rect[0] >= 0.0 && edge.rect[0] + edge.rect[2] <= 160.0 + 0.5, "the card is past the image's edge: {:?}", edge.rect);
+        assert!(text::lay(&edge.text).width <= edge.rect[2], "the card is narrower than its words");
     }
 
     /// Catches notes laid over the view differently from notes drawn onto

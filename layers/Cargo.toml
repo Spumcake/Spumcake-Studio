@@ -7,8 +7,13 @@ publish = false
 
 # What the Image Generator and the Video Generator do alike, since neither
 # may depend on the other: linked files, notes, the pre-vis check's edges,
-# and laying out a round. Never used by the host. `sha2` matches the sha256
-# Spumcake-Skills records for every file, as the 0.15 plan approved.
+# laying out a round, and drawing its labels. Never used by the host.
+# `sha2` matches the sha256 Spumcake-Skills records for every file, as the
+# 0.15 plan approved.
 [dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 sha2 = "=0.11.1"
+# The views' labels, drawn with Inter, which ships in assets/fonts/. The
+# owner's approval of ab_glyph on 2026-10-31 covers it, as the Image and
+# Video build plan's As built records. Already in the lockfile through egui.
+ab_glyph = "=0.2.32"

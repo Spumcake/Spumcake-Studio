@@ -1088,6 +1088,12 @@ impl Session {
             "film_new" => {
                 self.film(|gallery| gallery.add(&protocol::untitled(ITEM), new_doc(), None));
             }
+            // The written-out notice's close mark.
+            "notice_close" => {
+                if let Some(image) = self.active_image() {
+                    out.push(AppMessage::Notices { tab: image.id.clone(), notices: Vec::new(), corner: protocol::NoticeCorner::BottomLeft });
+                }
+            }
             "film_open" => {
                 let Some(image) = self.active_image() else {
                     return;

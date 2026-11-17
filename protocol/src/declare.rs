@@ -310,6 +310,14 @@ pub enum RowKind {
         #[serde(default, skip_serializing_if = "is_false")]
         centered: bool,
     },
+    /// A number typed into a bordered field, with no slider, such as how
+    /// many images a request makes or its seed. `places` decimal places.
+    Field {
+        min: f64,
+        max: f64,
+        #[serde(default)]
+        places: u8,
+    },
     Text,
     /// Text of several lines, `lines` tall.
     Paragraph { lines: u8 },

@@ -218,6 +218,57 @@ const PAGE_TOP: f32 = S.of(14.0);
 /// A page tab's words, and the room on either side of them.
 const PAGE_TEXT: f32 = S.of(15.5);
 const PAGE_PAD: f32 = S.of(14.0);
+/// The least room beside a tab's words while the tabs fit at their size,
+/// and the least once they no longer do.
+const PAGE_PAD_MIN: f32 = S.of(4.0);
+const PAGE_PAD_TIGHT: f32 = S.of(2.5);
+/// A tab's words one step smaller, for tabs too wide for the panel.
+const PAGE_TEXT_SMALL: f32 = S.of(14.0);
+
+/// How a row of page tabs fits its width: the words' size, the room on
+/// either side of each, each tab's words' width, and the tab whose words
+/// are cut with "…", if one is.
+#[derive(Clone, Debug, PartialEq)]
+struct TabRow {
+    size: f32,
+    pad: f32,
+    widths: Vec<f32>,
+    elided: Option<usize>,
+}
+
+/// Fits `count` tabs in `width`, `measure` giving tab `index`'s words'
+/// width at a size. Tabs that fit are laid out as they always were. Too
+/// wide, the room beside the words tightens; then the words are a step
+/// smaller; then the longest is cut to what is left.
+fn tab_row(width: f32, count: usize, measure: impl Fn(usize, f32) -> f32) -> TabRow {
+    let sides = 2.0 * count.max(1) as f32;
+    let at = |size: f32| -> (Vec<f32>, f32) {
+        let widths: Vec<f32> = (0..count).map(|index| measure(index, size)).collect();
+        let words = widths.iter().sum();
+        (widths, words)
+    };
+    let (widths, words) = at(PAGE_TEXT);
+    // As before: narrow panels squeeze the room around the words first.
+    let pad = PAGE_PAD.min(((width - words) / sides).max(PAGE_PAD_MIN));
+    if words + sides * pad <= width {
+        return TabRow { size: PAGE_TEXT, pad, widths, elided: None };
+    }
+    if words + sides * PAGE_PAD_TIGHT <= width {
+        let pad = ((width - words) / sides).min(PAGE_PAD_MIN);
+        return TabRow { size: PAGE_TEXT, pad, widths, elided: None };
+    }
+    let (mut widths, words) = at(PAGE_TEXT_SMALL);
+    let pad = ((width - words) / sides).clamp(PAGE_PAD_TIGHT, PAGE_PAD_MIN);
+    if words + sides * pad <= width {
+        return TabRow { size: PAGE_TEXT_SMALL, pad, widths, elided: None };
+    }
+    let longest = (0..count).max_by(|a, b| widths[*a].total_cmp(&widths[*b]));
+    if let Some(longest) = longest {
+        let others: f32 = widths.iter().enumerate().filter(|(index, _)| *index != longest).map(|(_, width)| width).sum();
+        widths[longest] = (width - sides * pad - others).max(0.0);
+    }
+    TabRow { size: PAGE_TEXT_SMALL, pad, widths, elided: longest }
+}
 
 /// Page tabs across the panel's top, as the gallery mockup shows: the
 /// chosen page underlined, the others in gray,
@@ -227,27 +278,32 @@ fn page_tabs(ui: &mut egui::Ui, pages: &[protocol::PanelPage], sent: &mut Vec<Se
     ui.add_space(PAGE_TOP);
     let width = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(width, PAGE_H), Sense::hover());
-    let font = |active: bool| {
-        if active {
-            widgets::semibold(PAGE_TEXT)
-        } else {
-            egui::FontId::proportional(PAGE_TEXT)
-        }
-    };
+    let fitted = tab_row(width, pages.len(), |index, size| {
+        ui.painter().layout_no_wrap(pages[index].label.clone(), page_font(pages[index].active, size), TEXT).size().x
+    });
     let galleys: Vec<_> = pages
         .iter()
-        .map(|page| ui.painter().layout_no_wrap(page.label.clone(), font(page.active), TEXT))
+        .enumerate()
+        .map(|(index, page)| {
+            let mut job = egui::text::LayoutJob::simple_singleline(page.label.clone(), page_font(page.active, fitted.size), TEXT);
+            if fitted.elided == Some(index) {
+                job.wrap = egui::text::TextWrapping::truncate_at_width(fitted.widths[index].max(1.0));
+            }
+            ui.painter().layout_job(job)
+        })
         .collect();
-    let words: f32 = galleys.iter().map(|galley| galley.size().x).sum();
-    // Narrow panels squeeze the room around the words before the words.
-    let pad = PAGE_PAD.min(((width - words) / (2.0 * pages.len().max(1) as f32)).max(S.of(4.0)));
+    let pad = fitted.pad;
     let mut x = row.left();
     for (index, (page, galley)) in pages.iter().zip(galleys).enumerate() {
         let tab = Rect::from_min_size(pos2(x, row.top()), vec2(galley.size().x + 2.0 * pad, PAGE_H));
         x = tab.right();
         let usable = page.enabled && !page.active && page.action.is_some();
         let sense = if usable { Sense::click() } else { Sense::hover() };
-        let response = ui.interact(tab, ui.id().with(("panel-page", index)), sense);
+        let mut response = ui.interact(tab, ui.id().with(("panel-page", index)), sense);
+        // A cut name shows whole under the pointer.
+        if fitted.elided == Some(index) {
+            response = response.on_hover_text(&page.label);
+        }
         // The chosen page is marked by its underline alone, with no raised
         // tab or shadow, as the owner set on 2026-10-30.
         if page.active {
@@ -275,6 +331,11 @@ fn page_tabs(ui: &mut egui::Ui, pages: &[protocol::PanelPage], sent: &mut Vec<Se
             sent.push(Sent::Run(action.clone()));
         }
     }
+}
+
+/// A page tab's words: the chosen page's semibold.
+fn page_font(active: bool, size: f32) -> egui::FontId {
+    if active { widgets::semibold(size) } else { egui::FontId::proportional(size) }
 }
 
 /// A caption and a row of icons that each turn on and off, as the mockup
@@ -504,6 +565,14 @@ pub(crate) fn draw_row(ui: &mut egui::Ui, desc: &Row, finish: &Action, sent: &mu
                 finish,
                 sent,
             );
+        }
+        (RowKind::Field { min, max, places }, PropValue::Number(number)) => {
+            let control = split_row(ui, row, &desc.label);
+            field_row(ui, prop, control, id, (*min, *max), *places, number, false, finish, sent);
+        }
+        (RowKind::Field { min, max, places }, PropValue::Mixed) => {
+            let control = split_row(ui, row, &desc.label);
+            field_row(ui, prop, control, id, (*min, *max), *places, *min, true, finish, sent);
         }
         (RowKind::Text, PropValue::Text(text)) => {
             let control = split_row(ui, row, &desc.label);
@@ -852,6 +921,42 @@ fn number_row(
         (Some(next), false) => {
             preview(sent, prop, PropValue::Number(f64::from(next) / scale));
         }
+        (None, true) => sent.push(Sent::Run(finish.clone())),
+        (None, false) => {}
+    }
+}
+
+/// A number typed into a bordered field across the row's control, with no
+/// slider: the field sets the value when its typing ends.
+#[allow(clippy::too_many_arguments)]
+fn field_row(
+    ui: &mut egui::Ui,
+    prop: &Value,
+    control: Rect,
+    id: egui::Id,
+    (min, max): (f64, f64),
+    places: u8,
+    value: f64,
+    mixed: bool,
+    finish: &Action,
+    sent: &mut Vec<Sent>,
+) {
+    let scale = 10f64.powi(i32::from(places));
+    let edit = widgets::number_field(
+        ui,
+        control,
+        id.with("field"),
+        (value * scale).round() as i32,
+        ((min * scale).round() as i32, (max * scale).round() as i32),
+        "",
+        mixed,
+        places,
+        false,
+        S,
+    );
+    match (edit.value, edit.finished) {
+        (Some(next), true) => set(sent, prop, PropValue::Number(f64::from(next) / scale)),
+        (Some(next), false) => preview(sent, prop, PropValue::Number(f64::from(next) / scale)),
         (None, true) => sent.push(Sent::Run(finish.clone())),
         (None, false) => {}
     }
@@ -2305,7 +2410,7 @@ fn setting_value(kind: &RowKind, value: Option<&Value>) -> PropValue {
     };
     match kind {
         RowKind::Toggle => PropValue::Bool(value.and_then(Value::as_bool).unwrap_or(false)),
-        RowKind::Number { min, .. } => PropValue::Number(value.and_then(Value::as_f64).unwrap_or(*min)),
+        RowKind::Number { min, .. } | RowKind::Field { min, .. } => PropValue::Number(value.and_then(Value::as_f64).unwrap_or(*min)),
         RowKind::Text | RowKind::Paragraph { .. } => PropValue::Text(words(value)),
         RowKind::Choice { options, .. } | RowKind::Preset { options, .. } => {
             let index = match value {
@@ -2328,7 +2433,9 @@ fn setting_value(kind: &RowKind, value: Option<&Value>) -> PropValue {
 fn setting_json(kind: &RowKind, value: &PropValue) -> Option<Value> {
     match (kind, value) {
         (_, PropValue::Bool(on)) => Some(json!(on)),
-        (RowKind::Number { places: 0, .. }, PropValue::Number(number)) if number.fract() == 0.0 => Some(json!(*number as i64)),
+        (RowKind::Number { places: 0, .. } | RowKind::Field { places: 0, .. }, PropValue::Number(number)) if number.fract() == 0.0 => {
+            Some(json!(*number as i64))
+        }
         (_, PropValue::Number(number)) => Some(json!(number)),
         (_, PropValue::Text(text)) => Some(json!(text)),
         (RowKind::Choice { options, .. } | RowKind::Preset { options, .. }, PropValue::Index(index)) => {
@@ -2343,6 +2450,46 @@ fn setting_json(kind: &RowKind, value: &PropValue) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches page tabs cut at the panel's edge, as "Prompt" was at the
+    /// panel's own width, the narrowest it is drawn: the Image Generator's
+    /// four tabs fit whole, and tabs that already fit keep their look.
+    #[test]
+    fn the_page_tabs_fit_the_panel() {
+        let ctx = egui::Context::default();
+        crate::toolbar::install_fonts(&ctx);
+        let width = WIDTH - 2.0 * PAD;
+        let labels = ["Layers", "Properties", "Adjustments", "Prompt"];
+        let fitting = ["Layers", "Properties"];
+        let mut four = None;
+        let mut two = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), ..Default::default() },
+            |ui| {
+                let painter = ui.painter().clone();
+                // The last tab is the chosen one, in semibold.
+                let measure = |words: &[&str], index: usize, size: f32| {
+                    painter.layout_no_wrap(words[index].to_string(), page_font(index == words.len() - 1, size), TEXT).size().x
+                };
+                four = Some(tab_row(width, labels.len(), |index, size| measure(&labels, index, size)));
+                two = Some(tab_row(width, fitting.len(), |index, size| measure(&fitting, index, size)));
+            },
+        );
+        // The fonts' textures are never drawn here.
+        output.textures_delta.clear();
+        let four = four.expect("the tabs were not laid out");
+        let total: f32 = four.widths.iter().sum::<f32>() + 2.0 * labels.len() as f32 * four.pad;
+        assert!(total <= width + 0.01, "the tabs run past the panel: {four:?}, {total} of {width}");
+        assert_eq!(four.elided, None, "a tab was cut: {four:?}");
+        assert!(four.pad >= PAGE_PAD_TIGHT, "the tabs touch: {four:?}");
+        let two = two.expect("the tabs were not laid out");
+        assert_eq!((two.size, two.pad, two.elided), (PAGE_TEXT, PAGE_PAD, None), "tabs that fit changed their look");
+        // Far too narrow, the longest is cut to what is left.
+        let cut = tab_row(100.0, 3, |index, size| [40.0, 80.0, 30.0][index] * size / PAGE_TEXT);
+        assert_eq!(cut.elided, Some(1));
+        let total: f32 = cut.widths.iter().sum::<f32>() + 6.0 * cut.pad;
+        assert!((total - 100.0).abs() < 0.01, "the cut tab does not fill the row: {cut:?}");
+    }
 
     fn role(label: &str, slot: bool) -> ReferenceRole {
         ReferenceRole { label: label.into(), field: Some(label.to_lowercase()), slot }
@@ -2410,6 +2557,9 @@ mod tests {
         assert_eq!(setting_value(&count, None), PropValue::Number(1.0));
         assert_eq!(setting_json(&count, &PropValue::Number(4.0)), Some(json!(4)));
         assert_eq!(setting_value(&RowKind::Text, Some(&json!(1114))), PropValue::Text("1114".into()));
+        let seed = RowKind::Field { min: 0.0, max: 4_294_967_295.0, places: 0 };
+        assert_eq!(setting_value(&seed, Some(&json!(1114))), PropValue::Number(1114.0));
+        assert_eq!(setting_json(&seed, &PropValue::Number(1114.0)), Some(json!(1114)));
         assert_eq!(reference_key(&file("library/a.png", None)), "library/a.png");
     }
 }

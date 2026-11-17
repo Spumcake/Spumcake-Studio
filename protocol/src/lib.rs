@@ -1436,6 +1436,7 @@ mod tests {
                 settings: vec![
                     CellSetting { key: "seconds".into(), label: "Duration".into(), kind: RowKind::Number { min: 1.0, max: 10.0, percent: false, places: 1, centered: false } },
                     CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Choice { options: vec!["1024".into()], segmented: true, preview: ChoicePreview::Label } },
+                    CellSetting { key: "seed".into(), label: "Seed".into(), kind: RowKind::Field { min: 0.0, max: 4_294_967_295.0, places: 0 } },
                 ],
                 menu: Vec::new(),
             }),
@@ -1445,6 +1446,9 @@ mod tests {
             panic!("a panel without a cell did not read");
         };
         assert_eq!(plain.cell, None);
+        // A field with no places given reads as whole numbers.
+        let field: RowKind = serde_json::from_str(r#"{"kind":"field","min":0,"max":8}"#).expect("a field row did not read");
+        assert_eq!(field, RowKind::Field { min: 0.0, max: 8.0, places: 0 });
         round_trip_host(HostMessage::EditCell {
             tab: "1".into(),
             cell: "c2".into(),
