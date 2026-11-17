@@ -337,7 +337,7 @@ impl Rounds {
                 continue;
             }
             last = Some(key);
-            let model = self.round_of(tile).map_or("", |round| round.model.as_str());
+            let model = self.round_of(tile).map_or("", model_name);
             groups.push((format!("Round {} · {model}", tile.number), 1));
         }
         groups
@@ -504,7 +504,7 @@ impl Rounds {
     /// grid of numbered takes, the one shown outlined with a star.
     fn draw_grid(&self, canvas: &mut Rgba, round: &Round, tiles: &[usize], shown: usize) {
         let (width, height) = (canvas.width, canvas.height);
-        let label = format!("Round {} · {} · {}", round.number, round.model, takes_word(tiles.len()));
+        let label = format!("Round {} · {} · {}", round.number, model_name(round), takes_word(tiles.len()));
         let mut top = MARGIN as f32;
         top += line(canvas, &label, [MARGIN as f32, top], TITLE, MUTED, false) + 12.0;
         let column = if round.references.is_empty() { 0 } else { (width as f32 * 0.16).clamp(110.0, 220.0) as u32 };
@@ -543,7 +543,7 @@ impl Rounds {
         for (place, (round, tiles)) in pair.iter().enumerate() {
             let top = MARGIN + place as u32 * (section + GAP);
             let mut y = top as f32;
-            y += line(canvas, &format!("Round {} · {}", round.number, round.model), [MARGIN as f32, y], TITLE, INK, true) + 2.0;
+            y += line(canvas, &format!("Round {} · {}", round.number, model_name(round)), [MARGIN as f32, y], TITLE, INK, true) + 2.0;
             y += line(canvas, &first_words(&round.prompt), [MARGIN as f32, y], LABEL, MUTED, false) + 10.0;
             let area = Rect { x: MARGIN as i32, y: y as i32, w: wide, h: ((top + section) as f32 - y).max(1.0) as u32 };
             let rects = layout::cells(area, 1, tiles.len().max(1) as u32, 8, self.aspect());
@@ -608,6 +608,12 @@ pub fn take_item(path: &str) -> String {
 }
 
 /// "1 take", "4 takes".
+/// The model as a round's label reads it: its name, "GPT Image 2.5", or
+/// its id when the host does not know the name.
+pub fn model_name(round: &Round) -> &str {
+    if round.model_name.is_empty() { &round.model } else { &round.model_name }
+}
+
 fn takes_word(count: usize) -> String {
     if count == 1 { String::from("1 take") } else { format!("{count} takes") }
 }
@@ -772,6 +778,16 @@ mod tests {
             report: None,
             artifact: None,
         }
+    }
+
+    /// Catches a round labelled by its model's id when the host knows its
+    /// name, or by nothing when it does not.
+    #[test]
+    fn a_round_reads_its_models_name() {
+        let mut named = round("r1", 1, &[], RoundState::Done, None);
+        assert_eq!(model_name(&named), "Model");
+        named.model_name = "GPT Image 2.5".into();
+        assert_eq!(model_name(&named), "GPT Image 2.5");
     }
 
     /// Catches a strip that loses a round's runs or its places: a done

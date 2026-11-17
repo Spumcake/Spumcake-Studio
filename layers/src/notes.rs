@@ -1,36 +1,66 @@
 //! Notes marked on an image: numbered pins, each with its words, and
 //! freehand marks, kept apart from the image's own layers. The marked image,
 //! the take with its notes on it, is what a next round sends, with the
-//! pins' words in its prompt.
+//! pins' words in its prompt. On a video, a note also belongs to a moment,
+//! its `at`, and shows only near it.
 
 use crate::Rgba;
+use serde::{Deserialize, Serialize};
 
 /// The notes' red.
 pub const RED: [u8; 4] = [226, 36, 36, 255];
 
-/// A numbered pin at a point of the image, in its pixels.
-#[derive(Debug, Clone, PartialEq)]
+/// A numbered pin at a point of the image, in its pixels, and, on a video,
+/// at a time in seconds. Kept in a file as the Image Generator's `.ipx`
+/// keeps a pin, with `at` only when it has one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pin {
     pub number: u32,
     pub x: f32,
     pub y: f32,
+    #[serde(default)]
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
 }
 
 /// A freehand mark: the points it was drawn through, its width in image
-/// pixels, and its colour.
-#[derive(Debug, Clone, PartialEq)]
+/// pixels, its colour, and, on a video, the time in seconds it was drawn
+/// at.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mark {
     pub points: Vec<[f32; 2]>,
     pub width: f32,
     pub colour: [u8; 4],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
 }
 
 /// One image's notes.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Notes {
+    #[serde(default)]
     pub pins: Vec<Pin>,
+    #[serde(default)]
     pub marks: Vec<Mark>,
+}
+
+/// How near a note's time the time shown must be for it to show over a
+/// video's frame, in seconds: a note belongs to a moment as well as a
+/// place.
+pub const NEAR: f64 = 0.5;
+
+/// A pin's radius on an image of this size, in its pixels: larger on a
+/// larger image, so a pin reads at any size, and the same wherever it is
+/// drawn.
+pub fn pin_radius(width: u32, height: u32) -> f32 {
+    (width.max(height) as f32 / 120.0).clamp(8.0, 48.0)
+}
+
+/// Whether a note at `at` shows at `time`: always when it has no time,
+/// as on an image.
+pub fn shows_at(at: Option<f64>, time: f64) -> bool {
+    at.is_none_or(|at| (at - time).abs() <= NEAR)
 }
 
 impl Notes {
@@ -50,6 +80,35 @@ impl Notes {
         let mut pins: Vec<&Pin> = self.pins.iter().filter(|pin| !pin.text.trim().is_empty()).collect();
         pins.sort_by_key(|pin| pin.number);
         pins.iter().map(|pin| format!("{}. {}", pin.number, pin.text.trim())).collect()
+    }
+
+    /// The pins' words as a video's next round carries them: as
+    /// `as_words`, each pin with a time ending "(3.4 s)".
+    pub fn as_timed_words(&self) -> Vec<String> {
+        let mut pins: Vec<&Pin> = self.pins.iter().filter(|pin| !pin.text.trim().is_empty()).collect();
+        pins.sort_by_key(|pin| pin.number);
+        pins.iter()
+            .map(|pin| match pin.at {
+                Some(at) => format!("{}. {} ({at:.1} s)", pin.number, pin.text.trim()),
+                None => format!("{}. {}", pin.number, pin.text.trim()),
+            })
+            .collect()
+    }
+
+    /// The notes that show at `time`, as `shows_at` has it.
+    pub fn at_time(&self, time: f64) -> Notes {
+        Notes {
+            pins: self.pins.iter().filter(|pin| shows_at(pin.at, time)).cloned().collect(),
+            marks: self.marks.iter().filter(|mark| shows_at(mark.at, time)).cloned().collect(),
+        }
+    }
+
+    /// The time of the first note, by number, with a time; or the first
+    /// mark's.
+    pub fn first_time(&self) -> Option<f64> {
+        let mut pins: Vec<&Pin> = self.pins.iter().filter(|pin| pin.at.is_some()).collect();
+        pins.sort_by_key(|pin| pin.number);
+        pins.first().and_then(|pin| pin.at).or_else(|| self.marks.iter().find_map(|mark| mark.at))
     }
 
     /// The pin under a point, within `radius`, the topmost first.
@@ -89,6 +148,14 @@ pub fn draw_marks(image: &mut Rgba, marks: &[Mark]) {
             }
         }
     }
+}
+
+/// A pin's number, white and bold, in the middle of its disc, drawn by
+/// `crate::label` as the views' labels are.
+pub fn draw_number(image: &mut Rgba, pin: &Pin, radius: f32) {
+    let size = radius * 1.15;
+    let look = crate::label::Look { size, colour: [255, 255, 255, 255], bold: true };
+    crate::label::draw(image, &pin.number.to_string(), [pin.x, pin.y - crate::label::height(size) / 2.0], look, crate::label::Anchor::Centre);
 }
 
 /// Draws each pin as a filled disc of `radius` with a white ring, leaving
@@ -137,7 +204,7 @@ mod tests {
     fn pins_keep_their_numbers_and_order() {
         let mut notes = Notes::default();
         for (number, text) in [(3, "keep the lamp as it is"), (1, "the dial glows brighter"), (2, "  ")] {
-            notes.pins.push(Pin { number, x: 0.0, y: 0.0, text: text.into() });
+            notes.pins.push(Pin { number, x: 0.0, y: 0.0, text: text.into(), at: None });
         }
         assert_eq!(notes.next_number(), 4);
         assert_eq!(notes.as_words(), vec!["1. the dial glows brighter", "3. keep the lamp as it is"]);
@@ -148,9 +215,42 @@ mod tests {
     #[test]
     fn a_mark_is_drawn_where_it_was_made() {
         let mut image = Rgba::new(20, 10, [255, 255, 255, 255]);
-        draw_marks(&mut image, &[Mark { points: vec![[2.0, 5.0], [18.0, 5.0]], width: 3.0, colour: RED }]);
+        draw_marks(&mut image, &[Mark { points: vec![[2.0, 5.0], [18.0, 5.0]], width: 3.0, colour: RED, at: None }]);
         assert_eq!(image.pixel(10, 5), RED);
         assert_eq!(image.pixel(0, 0), [255, 255, 255, 255]);
         assert_eq!(image.pixel(19, 9), [255, 255, 255, 255]);
+    }
+
+    /// Catches the Image Generator's `.ipx` notes changed by a note's time:
+    /// a pin and a mark with none are written exactly as its file writes
+    /// them, and its file's notes read back with none.
+    #[test]
+    fn notes_without_a_time_keep_the_image_generators_shape() {
+        let pin = Pin { number: 2, x: 4.5, y: 3.0, text: "less rain".into(), at: None };
+        assert_eq!(serde_json::to_string(&pin).unwrap(), r#"{"number":2,"x":4.5,"y":3.0,"text":"less rain"}"#);
+        let mark = Mark { points: vec![[1.0, 1.0], [9.0, 2.0]], width: 4.0, colour: RED, at: None };
+        assert_eq!(serde_json::to_string(&mark).unwrap(), r#"{"points":[[1.0,1.0],[9.0,2.0]],"width":4.0,"colour":[226,36,36,255]}"#);
+        let stored = r#"{"pins":[{"number":2,"x":4.5,"y":3.0,"text":"less rain"}],"marks":[{"points":[[1.0,1.0],[9.0,2.0]],"width":4.0,"colour":[226,36,36,255]}],"hidden":false}"#;
+        let read: Notes = serde_json::from_str(stored).unwrap();
+        assert_eq!(read, Notes { pins: vec![pin], marks: vec![mark] });
+    }
+
+    /// Catches a video's note that shows away from its moment, or whose
+    /// words lose their time: a note at 3.4 s shows within half a second
+    /// of it, and its words end "(3.4 s)".
+    #[test]
+    fn a_note_at_a_time_shows_near_it() {
+        let notes = Notes {
+            pins: vec![
+                Pin { number: 1, x: 0.0, y: 0.0, text: "the door".into(), at: Some(3.4) },
+                Pin { number: 2, x: 0.0, y: 0.0, text: "the lamp".into(), at: None },
+            ],
+            marks: vec![Mark { points: vec![[0.0, 0.0]], width: 4.0, colour: RED, at: Some(1.0) }],
+        };
+        assert!(shows_at(Some(3.4), 3.0) && !shows_at(Some(3.4), 2.8) && shows_at(None, 9.0));
+        let near = notes.at_time(3.6);
+        assert_eq!((near.pins.len(), near.marks.len()), (2, 0));
+        assert_eq!(notes.as_timed_words(), ["1. the door (3.4 s)", "2. the lamp"]);
+        assert_eq!(notes.first_time(), Some(3.4));
     }
 }

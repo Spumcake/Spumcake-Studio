@@ -8,9 +8,12 @@ mod declare;
 mod decode;
 mod files;
 mod gallery;
+mod notes;
 mod preview;
+mod rounds;
 mod session;
 mod view;
+mod waveform;
 
 use session::{Session, respond};
 use std::io::{BufRead, Write};
@@ -30,12 +33,8 @@ fn main() {
             let Ok(line) = line else {
                 break;
             };
-            // Which revision the host drew is for playback, which comes with
-            // the host's transport row. Read as a message, it would come
-            // after every image sent and keep the loop from ever being idle.
-            if line.contains("\"type\":\"shown\"") {
-                continue;
-            }
+            // Which revision the host drew, `shown`, is read too: while
+            // playing, it keeps the Player's lead and paces the frames.
             if lines.send(line).is_err() {
                 break;
             }

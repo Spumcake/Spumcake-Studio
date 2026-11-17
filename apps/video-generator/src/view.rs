@@ -1,6 +1,7 @@
 //! What the working area shows, drawn into the one raster image the host
-//! draws: the shown take alone, two takes side by side at the same frame,
-//! or every take as a row of eight frames. The image is the working area's
+//! draws: the shown take alone, two takes side by side at the same time,
+//! or every take as a row of eight frames, with the notes at the time
+//! shown over the shown take's frame. The image is the working area's
 //! own size, and each frame is decoded at the size it is drawn, never
 //! larger than the file's own, so a 4K take is never decoded whole to be
 //! shown small. At 100% and more, the takes are drawn at that zoom about a
@@ -57,6 +58,9 @@ pub struct Scene {
     pub focus: Option<[f64; 2]>,
     /// Words over the frames: each strip's times, or the takes' names.
     pub captions: Vec<Caption>,
+    /// The notes over the take shown that show at the time shown, drawn
+    /// over its frame; the session sets them.
+    pub notes: Option<crate::notes::NotesOver>,
 }
 
 /// Words drawn over the view in gray: their line's top at `at[1]`, and
@@ -93,11 +97,11 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
         w: width.saturating_sub(2 * MARGIN).max(2),
         h: height.saturating_sub(2 * MARGIN).max(2),
     };
-    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None, captions: Vec::new() };
+    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None, captions: Vec::new(), notes: None };
     match gallery.view() {
         Mode::Single => {
             if let Some(take) = gallery.take() {
-                let (place, focus) = shown(take, area, look, None);
+                let (place, focus) = shown(take, area, look, None, look.frame);
                 scene.places.push(place);
                 scene.focus = focus;
             }
@@ -110,9 +114,14 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
             // larger one's scale, so they show the same region.
             let half = area.w.saturating_sub(SIDE_GAP) / 2;
             let widest = [left, right].iter().filter_map(|take| take.info.map(|info| info.width)).max();
+            // One time for both: the first take's frame, and the second's
+            // frame at the same time in seconds, a shorter take holding its
+            // last.
+            let first = look.frame.min(left.last_frame());
+            let frames = [first, frame_at(right, seconds_at(left, first))];
             for (index, take) in [left, right].into_iter().enumerate() {
                 let cell = Rect { x: area.x + (index as u32 * (half + SIDE_GAP)) as i32, y: area.y, w: half.max(2), h: area.h };
-                let (place, focus) = shown(take, cell, look, widest);
+                let (place, focus) = shown(take, cell, look, widest, frames[index]);
                 // Its name, small, over it.
                 let top = place.rect.y.max(place.clip.y) as f32 - CAPTION - 8.0;
                 scene.captions.push(Caption { words: take.name.clone(), at: [place.rect.x.max(place.clip.x) as f32, top.max(2.0)], centre: false });
@@ -200,15 +209,15 @@ fn fitted(take: &Take, cell: Rect, index: u32) -> Place {
 
 /// The shown take in `cell`: fitted, or at the look's zoom about its focus,
 /// scaled as if it were `widest` pixels wide so two takes show one region.
-fn shown(take: &Take, cell: Rect, look: Look, widest: Option<u32>) -> (Place, Option<[f64; 2]>) {
+fn shown(take: &Take, cell: Rect, look: Look, widest: Option<u32>, frame: u32) -> (Place, Option<[f64; 2]>) {
     let (Some(zoom), Some(info)) = (look.zoom, take.info) else {
-        return (fitted(take, cell, look.frame), None);
+        return (fitted(take, cell, frame), None);
     };
     let scale = zoom * f64::from(widest.unwrap_or(info.width).max(1)) / f64::from(info.width.max(1));
     let drawn = ((f64::from(info.width) * scale).round().max(2.0) as u32, (f64::from(info.height) * scale).round().max(2.0) as u32);
     // Decoded at the size drawn, and no larger than the file holds.
     let decoded = even((drawn.0.min(info.width), drawn.1.min(info.height)));
-    let index = look.frame.min(take.last_frame());
+    let index = frame.min(take.last_frame());
     let along = |start: i32, room: u32, size: u32, focus: f64| -> (i32, f64) {
         if size <= room {
             return (start + ((room - size) / 2) as i32, 0.5);
@@ -222,6 +231,17 @@ fn shown(take: &Take, cell: Rect, look: Look, widest: Option<u32>) -> (Place, Op
     let (y, focus_y) = along(cell.y, cell.h, drawn.1, look.focus[1]);
     let rect = Rect { x, y, w: drawn.0, h: drawn.1 };
     (Place { key: Some(Key::new(take.file.clone(), index, decoded)), rect, clip: cell }, Some([focus_x, focus_y]))
+}
+
+/// The time of a take's frame, in seconds.
+pub fn seconds_at(take: &Take, frame: u32) -> f64 {
+    take.info.map_or(0.0, |info| f64::from(frame) / info.fps().max(f64::EPSILON))
+}
+
+/// A take's frame at a time in seconds, its last when the time is past it.
+pub fn frame_at(take: &Take, seconds: f64) -> u32 {
+    let fps = take.info.map_or(24.0, |info| info.fps());
+    ((seconds.max(0.0) * fps).round() as u32).min(take.last_frame())
 }
 
 fn centred(cell: Rect, w: u32, h: u32) -> Rect {
@@ -245,6 +265,9 @@ pub fn compose(scene: &Scene, frames: &std::collections::HashMap<Key, Rgba>) -> 
         let look = layers::label::Look { size: CAPTION, colour: CAPTION_COLOUR, bold: false };
         let anchor = if caption.centre { layers::label::Anchor::Centre } else { layers::label::Anchor::Left };
         layers::label::draw(&mut image, &caption.words, caption.at, look, anchor);
+    }
+    if let Some(notes) = &scene.notes {
+        crate::notes::draw(&mut image, notes);
     }
     image
 }
@@ -359,6 +382,23 @@ mod tests {
         assert!(strips.captions.iter().all(|caption| caption.centre));
     }
 
+    /// Catches two takes side by side at different times, as when they have
+    /// different frame rates: at the first's frame 12, half a second at 24
+    /// frames a second, the second, at 30, shows its frame 15; past the
+    /// shorter take's end, it holds its last.
+    #[test]
+    fn side_by_side_shares_a_time() {
+        let mut gallery = gallery(&[("a", info(128, 72, 48)), ("b", media::Info { width: 128, height: 72, rate: (30, 1), frames: 30, sound: false })]);
+        let other = gallery.uid_at(1).unwrap();
+        gallery.set_view(Mode::Side { other }, 0).unwrap();
+        let indices = |frame: u32| -> Vec<u32> {
+            let look = Look { frame, zoom: None, focus: [0.5, 0.5] };
+            scene(&gallery, (1200, 800), look).places.iter().map(|place| place.key.as_ref().unwrap().index).collect()
+        };
+        assert_eq!(indices(12), [12, 15]);
+        assert_eq!(indices(47), [47, 29], "the shorter take did not hold its last frame");
+    }
+
     /// Catches side by side drawing different regions at 100%: a 720p and
     /// a 4K take show the same part, the 4K one at its own pixels.
     #[test]
@@ -395,6 +435,7 @@ mod tests {
             live: true,
             focus: None,
             captions: Vec::new(),
+            notes: None,
         };
         let image = compose(&scene, &frames);
         assert_eq!(image.pixel(5, 5), GROUND);
