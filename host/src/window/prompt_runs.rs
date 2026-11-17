@@ -57,11 +57,6 @@ impl HostWindow {
     /// sent to its workspace when they changed.
     pub(super) fn prompt_card_view(&mut self, app: usize, tab: &str, cell: &Cell) -> Option<CardView> {
         let (folder, env) = self.skills_project()?;
-        // A model's name arrived: rounds go again, named.
-        let data = self.data.clone();
-        if self.prompt_page.names.arrived(data.as_deref()) {
-            self.prompt_page.resend_rounds();
-        }
         let scripts = env.scripts.clone()?;
         let at = self.cell_item(app, tab, &cell.id);
         let view = self.prompt_page.card(&folder, &scripts, &env.vars, &self.settings, cell, &at);
@@ -268,23 +263,16 @@ impl HostWindow {
             .collect()
     }
 
-    /// A model's name as the card shows it, or, for a model no endpoint's
-    /// list names, such as a video model on fal, fal's own name for it once
-    /// it has arrived.
+    /// A model's name as the card shows it, from an endpoint's own model
+    /// list, or else a skill's `models.json`; empty when neither names it,
+    /// so the workspace shows the model's id as it is.
     fn model_name(&mut self, model: &str) -> String {
         let shown = crate::cells::model_name(&self.ctx, model);
-        let tail = model.rsplit('/').next().unwrap_or(model);
-        if shown != tail || !model.contains('/') {
+        if shown != model.rsplit('/').next().unwrap_or(model) {
             return shown;
         }
-        let data = self.data.clone();
-        // What this computer holds first, so a project opens offline named;
-        // the network only when nothing here names it.
         let skills = crate::skills_setup::listed_skills(&self.settings.skill_folders);
-        if let Some(name) = crate::prices::local_name(&skills, data.as_deref(), model) {
-            return name;
-        }
-        self.prompt_page.names.name(data.as_deref(), model).unwrap_or(shown)
+        crate::prices::local_name(&skills, model).unwrap_or_default()
     }
 
     /// When the agent records a step with the request a draft cell made,

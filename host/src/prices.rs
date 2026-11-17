@@ -151,108 +151,16 @@ fn ensure_at(data: &Path, plan: &Value, vars: &[(String, String)], openrouter: &
     price.is_some()
 }
 
-/// A fal model's name as people read it, such as "MiniMax H3 Max", from
-/// fal's model search, which needs no key.
-fn fal_display_name_at(root: &str, model: &str) -> Result<Option<String>, String> {
-    let reply = assistant::web::get_json(&format!("{root}/models?endpoint_id={model}"), &[])?;
-    Ok(reply
-        .get("models")
-        .and_then(Value::as_array)
-        .and_then(|models| models.iter().find(|entry| entry.get("endpoint_id").and_then(Value::as_str) == Some(model)))
-        .and_then(|entry| entry.pointer("/metadata/display_name"))
-        .and_then(Value::as_str)
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty()))
-}
-
-/// A model's name from what is on this computer, with no network: a
-/// `models.json` beside a skill's `SKILL.md`, a list of `{service, model,
-/// name}`, then a `name` in the setup's prices for the model.
-pub(crate) fn local_name(skills: &[crate::skills_setup::Skill], data: Option<&Path>, model: &str) -> Option<String> {
+/// A model's name from a `models.json` beside a skill's `SKILL.md`, a list
+/// of `{service, model, name}`, as the Studio-as-a-setup contract's
+/// Formats table settled it on 2026-11-17. Read from this computer, never
+/// the network; None when no skill names it.
+pub(crate) fn local_name(skills: &[crate::skills_setup::Skill], model: &str) -> Option<String> {
     let named = |entry: &Value| (entry.get("model").and_then(Value::as_str) == Some(model)).then(|| entry.get("name").and_then(Value::as_str)).flatten().map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
-    for skill in skills {
-        let listed: Option<Value> = std::fs::read_to_string(skill.folder.join("models.json")).ok().and_then(|text| serde_json::from_str(&text).ok());
-        if let Some(name) = listed.as_ref().and_then(Value::as_array).into_iter().flatten().find_map(named) {
-            return Some(name);
-        }
-    }
-    let prices = data.map(known).unwrap_or(Value::Null);
-    prices.as_object().into_iter().flatten().find_map(|(_, models)| models.get(model)?.get("name")?.as_str().map(String::from))
-}
-
-/// The names of models no endpoint's model list gives, such as fal's,
-/// read once from fal's model search off the window's thread and kept in
-/// the data folder's `model-names.json`, when nothing on this computer
-/// names them.
-#[derive(Default)]
-pub(crate) struct ModelNames {
-    loaded: bool,
-    known: std::collections::HashMap<String, Option<String>>,
-    waiting: Vec<(String, std::sync::mpsc::Receiver<Result<Option<String>, String>>)>,
-}
-
-const NAMES: &str = "model-names.json";
-
-impl ModelNames {
-    fn load(&mut self, data: Option<&Path>) {
-        if self.loaded {
-            return;
-        }
-        self.loaded = true;
-        if let Some(saved) = data.and_then(|data| std::fs::read_to_string(data.join(NAMES)).ok()).and_then(|text| serde_json::from_str::<Value>(&text).ok()) {
-            for (model, name) in saved.as_object().into_iter().flatten() {
-                self.known.insert(model.clone(), name.as_str().map(String::from));
-            }
-        }
-    }
-
-    /// A model's name when it is known; otherwise it is asked for once, in
-    /// the background, and None for now.
-    pub(crate) fn name(&mut self, data: Option<&Path>, model: &str) -> Option<String> {
-        self.load(data);
-        if let Some(known) = self.known.get(model) {
-            return known.clone();
-        }
-        // Checks never call fal: only a stand-in's address is asked.
-        if cfg!(test) && std::env::var("INPAINTER_FAL_API_URL").is_err() {
-            return None;
-        }
-        if !self.waiting.iter().any(|(asked, _)| asked == model) {
-            let (send, receive) = std::sync::mpsc::channel();
-            let (root, asked) = (fal_root(), model.to_string());
-            std::thread::spawn(move || {
-                let _ = send.send(fal_display_name_at(&root, &asked));
-            });
-            self.waiting.push((model.to_string(), receive));
-        }
-        None
-    }
-
-    /// Takes the names that arrived, keeping each found one; returns
-    /// whether any did. A failed search is tried again next time Studio
-    /// starts, never kept.
-    pub(crate) fn arrived(&mut self, data: Option<&Path>) -> bool {
-        let mut any = false;
-        let mut keep = false;
-        for (model, receive) in std::mem::take(&mut self.waiting) {
-            match receive.try_recv() {
-                Ok(found) => {
-                    any = true;
-                    keep |= found.is_ok();
-                    self.known.insert(model, found.unwrap_or(None));
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => self.waiting.push((model, receive)),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.known.insert(model, None);
-                }
-            }
-        }
-        if keep && let Some(data) = data {
-            let saved: serde_json::Map<String, Value> = self.known.iter().map(|(model, name)| (model.clone(), name.clone().map_or(Value::Null, Value::String))).collect();
-            let _ = std::fs::write(data.join(NAMES), serde_json::to_string_pretty(&Value::Object(saved)).unwrap_or_default());
-        }
-        any
-    }
+    skills.iter().find_map(|skill| {
+        let listed: Value = std::fs::read_to_string(skill.folder.join("models.json")).ok().and_then(|text| serde_json::from_str(&text).ok())?;
+        listed.as_array()?.iter().find_map(named)
+    })
 }
 
 /// Every `pricing` list in a reply, wherever it is.
@@ -531,8 +439,8 @@ mod tests {
         (root, serve)
     }
 
-    /// Catches a model named by the network when a skill on this computer
-    /// names it already.
+    /// Catches a video model shown by the tail of its id when a skill
+    /// names it.
     #[test]
     fn a_skill_names_its_models_first() {
         let folder = std::env::temp_dir().join(format!("prices-names-{}", std::process::id()));
@@ -540,19 +448,9 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("models.json"), json!([{ "service": "fal", "model": "minimax/h3-max/reference-to-video", "name": "MiniMax H3 Max" }]).to_string()).unwrap();
         let skill = crate::skills_setup::Skill { name: String::from("generate-shot"), description: String::new(), implements: Vec::new(), helps: Vec::new(), folder: folder.clone(), root: folder.clone() };
-        assert_eq!(local_name(std::slice::from_ref(&skill), None, "minimax/h3-max/reference-to-video").as_deref(), Some("MiniMax H3 Max"));
-        assert_eq!(local_name(&[skill], None, "other/model"), None);
+        assert_eq!(local_name(std::slice::from_ref(&skill), "minimax/h3-max/reference-to-video").as_deref(), Some("MiniMax H3 Max"));
+        assert_eq!(local_name(&[skill], "other/model"), None);
         let _ = std::fs::remove_dir_all(&folder);
-    }
-
-    /// Catches a video model shown by the tail of its id: fal's model
-    /// search gives its name, read from a stand-in.
-    #[test]
-    fn a_fal_models_name_is_its_display_name() {
-        let reply = json!({ "models": [{ "endpoint_id": "minimax/h3-max/reference-to-video", "metadata": { "display_name": "MiniMax H3 Max", "category": "image-to-video" } }], "has_more": false });
-        let (root, serve) = stand_in(vec![("/models?", reply.to_string())], 1);
-        assert_eq!(fal_display_name_at(&root, "minimax/h3-max/reference-to-video").unwrap().as_deref(), Some("MiniMax H3 Max"));
-        assert!(serve.join().unwrap()[0].starts_with("get /models?endpoint_id=minimax/h3-max/reference-to-video"));
     }
 
     /// Catches a price guessed from per-token prices, a fal price read

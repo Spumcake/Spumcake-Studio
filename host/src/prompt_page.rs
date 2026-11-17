@@ -608,8 +608,6 @@ pub(crate) struct PromptPage {
     /// For each cell, `requests/`'s time and canon's when its rounds were
     /// last sent: a publish re-marks which takes are canon.
     sent: HashMap<String, (SystemTime, Option<SystemTime>)>,
-    /// Model names no endpoint's list gives, such as fal's.
-    pub names: crate::prices::ModelNames,
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -645,11 +643,6 @@ impl PromptPage {
         let read = living_pipeline(folder).and_then(|pipeline| read_step(scripts, folder, setup, &pipeline, step).ok());
         self.steps.insert(key, read.clone());
         read
-    }
-
-    /// Sends every cell's rounds again, as when a model's name arrives.
-    pub(crate) fn resend_rounds(&mut self) {
-        self.sent.clear();
     }
 
     /// Reads canon and the step again now, before a spec is made from them.
