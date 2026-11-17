@@ -371,7 +371,7 @@ impl Session {
                     from.push(link);
                 }
             }
-            out.push(AppMessage::FileResource { tab, path, from });
+            out.push(AppMessage::FileResource { tab, path, from, id: None });
         }
         // As ig-layer-export shows it, at the working area's bottom left.
         out.push(AppMessage::Notices {

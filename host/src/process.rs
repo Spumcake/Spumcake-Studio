@@ -129,8 +129,21 @@ pub struct Declared {
     /// Requests whose reports it asked to see, oldest first.
     pub reports: VecDeque<String>,
     /// Plain files it asked the runner to file: the tab, the file, and what
-    /// it came from, the workspace file first, then the linked files beneath. Chat Assistant Work's runner takes them.
-    pub resources: VecDeque<(String, String, Vec<String>)>,
+    /// it came from, the workspace file first, then the linked files beneath,
+    /// and the id to answer `filed` under, when it gave one. Chat Assistant
+    /// Work's runner takes them.
+    pub resources: VecDeque<(String, String, Vec<String>, Option<String>)>,
+    /// Canon queries it asked the host to read: the id and the query.
+    pub canon_reads: VecDeque<(String, String)>,
+    /// Step edits it asked for: the id, the tab, the step, its script, and
+    /// its references.
+    pub step_edits: VecDeque<(String, String, protocol::StepRef, Option<String>, Option<String>)>,
+    /// Steps it asked to run again: the id, the tab, and the step. Chat
+    /// Assistant Work's runner takes them.
+    pub step_runs: VecDeque<(String, String, protocol::StepRef)>,
+    /// Skill scripts it asked to run: the id, the skill, the script, and
+    /// its arguments.
+    pub skill_scripts: VecDeque<(String, String, String, Vec<String>)>,
     /// Plain files it asked the runner to file and publish as canon, each on
     /// the publish card's one yes: the tab, the artifact, the file, what it
     /// came from as `resources` has it, and the artifacts published with it.
@@ -638,10 +651,14 @@ impl Running {
                 declared.views3d.insert(tab, View3dShown { scene, look, camera, reference, time, names, tool });
             }
             AppMessage::OpenReport { request } => declared.reports.push_back(request),
-            AppMessage::FileResource { tab, path, from } => declared.resources.push_back((tab, path, from)),
+            AppMessage::FileResource { tab, path, from, id } => declared.resources.push_back((tab, path, from, id)),
             AppMessage::Publish { tab, artifact, source, from, with } => declared.publishes.push_back((tab, artifact, source, from, with)),
             AppMessage::CanonHistory { tab, artifact } => declared.canon_histories.push_back((tab, artifact)),
             AppMessage::Revert { tab, artifact, file } => declared.reverts.push_back((tab, artifact, file)),
+            AppMessage::ReadCanon { id, query } => declared.canon_reads.push_back((id, query)),
+            AppMessage::EditStep { id, tab, step, script, refs } => declared.step_edits.push_back((id, tab, step, script, refs)),
+            AppMessage::RunStep { id, tab, step } => declared.step_runs.push_back((id, tab, step)),
+            AppMessage::RunSkillScript { id, skill, script, args } => declared.skill_scripts.push_back((id, skill, script, args)),
             AppMessage::AskAssistant { text, items } => declared.ask_assistant.push_back((text, items)),
             // The Prompt page's previews are drawn by the work that builds
             // them; until then they are read and let go.

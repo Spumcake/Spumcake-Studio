@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod flows;
+mod canon_steps;
 mod prompt_runs;
 mod publishing;
 mod settings;
@@ -734,6 +735,7 @@ impl eframe::App for HostWindow {
         self.take_items();
         self.take_reports();
         self.take_publishing();
+        self.take_canon_steps();
         // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
         let editable = if self.locked() { Vec::new() } else { self.edited_types() };

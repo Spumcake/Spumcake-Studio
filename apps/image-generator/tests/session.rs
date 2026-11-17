@@ -1377,7 +1377,7 @@ fn a_draft_becomes_its_step_and_a_skills_project_files_what_leaves() {
     assert!(rows[0].menu.iter().any(|row| row.label == "Write out as PNG…"));
     let filed = |program: &Program| {
         program.wait(|message| match message {
-            AppMessage::FileResource { tab, path, from } if tab == "1" => Some((path.clone(), from.clone())),
+            AppMessage::FileResource { tab, path, from, .. } if tab == "1" => Some((path.clone(), from.clone())),
             _ => None,
         })
     };

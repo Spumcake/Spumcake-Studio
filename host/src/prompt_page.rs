@@ -50,7 +50,7 @@ pub(crate) fn living_pipeline(folder: &Path) -> Option<String> {
 
 /// Runs one of Skills' scripts that reads, in the project, and returns
 /// what it printed.
-fn script(scripts: &Path, folder: &Path, setup: &[(String, String)], name: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn script(scripts: &Path, folder: &Path, setup: &[(String, String)], name: &str, args: &[&str]) -> Result<String, String> {
     let out = Command::new("python3")
         .arg(scripts.join(name))
         .args(args)
