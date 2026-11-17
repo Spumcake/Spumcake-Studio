@@ -150,6 +150,26 @@ pub fn draw_sized(peaks: &[f32], width: u32, height: u32) -> Rgba {
     image
 }
 
+/// A waveform row `width` × `height` with the sound drawn only from `from`
+/// to `to`, fractions of the width, as a sound layer starting on the take
+/// sits under the scrubber: clear elsewhere, and cut at the row's ends.
+pub fn draw_span(peaks: &[f32], width: u32, height: u32, from: f64, to: f64) -> Rgba {
+    let mut image = Rgba::new(width.max(1), height.max(2), [0, 0, 0, 0]);
+    let (left, right) = ((from * f64::from(width)).round(), (to * f64::from(width)).round());
+    let span = (right - left).max(1.0).min(f64::from(u32::MAX / 8)) as u32;
+    let drawn = draw_sized(peaks, span, image.height);
+    for x in 0..span {
+        let at = left as i64 + i64::from(x);
+        if at < 0 || at >= i64::from(image.width) {
+            continue;
+        }
+        for y in 0..image.height {
+            image.set(at as u32, y, drawn.pixel(x, y));
+        }
+    }
+    image
+}
+
 /// A WAV's cue points, from its RIFF `cue ` chunk: each point's time in
 /// seconds, its sample offset over the `fmt ` chunk's rate, and its label,
 /// the `LIST` `adtl` chunk's `labl` with the same id, or none; in time
@@ -264,6 +284,17 @@ mod tests {
         out.extend_from_slice(&(body.len() as u32).to_le_bytes());
         out.extend(body);
         out
+    }
+
+    /// Catches a sound layer's row drawn from the take's start rather than
+    /// its own: a loud sound from a quarter to three quarters of the row is
+    /// drawn there and nowhere else.
+    #[test]
+    fn a_span_is_drawn_where_it_starts() {
+        let image = draw_span(&[1.0; 16], 40, HEIGHT, 0.25, 0.75);
+        assert_eq!(image.pixel(5, 2), [0, 0, 0, 0], "drawn before its start");
+        assert_eq!(image.pixel(20, 2), INK, "not drawn within its span");
+        assert_eq!(image.pixel(35, HEIGHT / 2), [0, 0, 0, 0], "drawn after its end");
     }
 
     /// Catches cue points read at the wrong time or with the wrong words:

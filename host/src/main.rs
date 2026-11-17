@@ -3,6 +3,7 @@ mod ask;
 mod canvas;
 mod cells;
 mod chat;
+mod deliver_card;
 mod dialogs;
 mod env_file;
 mod doc;

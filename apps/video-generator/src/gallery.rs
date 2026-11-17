@@ -69,7 +69,43 @@ enum Change {
     Cells { before: (Vec<Cell>, Option<String>), after: (Vec<Cell>, Option<String>) },
     /// One take's notes, by its file, before and after.
     Notes { path: String, sha256: String, before: Notes, after: Notes },
+    /// The take's own sound and the tab's sound layers, before and after.
+    Sounds { before: (TakeSound, Vec<SoundLayer>), after: (TakeSound, Vec<SoundLayer>) },
 }
+
+/// The take's own sound as a layer of the mix, applying to whichever take
+/// is shown: its gain in decibels, and whether it is muted.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TakeSound {
+    pub gain_db: f64,
+    pub muted: bool,
+}
+
+impl TakeSound {
+    pub fn is_default(&self) -> bool {
+        *self == TakeSound::default()
+    }
+}
+
+/// A sound layer of the tab, as vg-layers shows one: a link to a sound
+/// file it never writes, its name, its gain in decibels, when it starts on
+/// the take in seconds, and whether it is muted. It belongs to the tab, not
+/// to a take, and plays with whichever take is shown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundLayer {
+    /// Unique among the tab's sound layers for this run, from 1.
+    pub id: u64,
+    pub name: String,
+    pub link: Link,
+    /// The file itself, as an absolute path.
+    pub file: PathBuf,
+    pub gain_db: f64,
+    pub start: f64,
+    pub muted: bool,
+}
+
+/// A sound layer's gain, from -24 to +12 decibels.
+pub const GAIN_DB: (f64, f64) = (-24.0, 12.0);
 
 /// The notes marked on a take, kept by its file: its path, as the `.vgx`
 /// names a take's file, and the sha256 of the bytes they were marked on,
@@ -107,6 +143,10 @@ pub struct Gallery {
     /// The notes marked on takes, the gallery's and the rounds' alike,
     /// kept in its file as editing state.
     pub notes: Vec<TakeNotes>,
+    /// The take's own sound, and the tab's sound layers, top first, kept
+    /// in its file.
+    pub take_sound: TakeSound,
+    pub sounds: Vec<SoundLayer>,
 }
 
 impl Gallery {
@@ -165,11 +205,11 @@ impl Gallery {
         !self.redo.is_empty()
     }
 
-    /// Whether the step an undo, or a redo, would take is a take's notes,
-    /// which leaves the take shown as it is.
+    /// Whether the step an undo, or a redo, would take is a take's notes
+    /// or the tab's sound layers, which leave the take shown as it is.
     pub fn steps_notes(&self, redo: bool) -> bool {
         let next = if redo { self.redo.last() } else { self.undo.last() };
-        next.is_some_and(|step| matches!(step.change, Change::Notes { .. }))
+        next.is_some_and(|step| matches!(step.change, Change::Notes { .. } | Change::Sounds { .. }))
     }
 
     fn check(&self, index: usize) -> Result<(), String> {
@@ -184,6 +224,30 @@ impl Gallery {
         self.undo.push(Step { change, shown_before });
         self.redo.clear();
         self.edits += 1;
+    }
+
+    /// Replaces the take's own sound and the tab's sound layers. One step;
+    /// the same are none. Returns whether they changed.
+    pub fn set_mix(&mut self, take_sound: TakeSound, sounds: Vec<SoundLayer>) -> bool {
+        if take_sound == self.take_sound && sounds == self.sounds {
+            return false;
+        }
+        let before = (self.take_sound, std::mem::replace(&mut self.sounds, sounds.clone()));
+        self.take_sound = take_sound;
+        let shown = self.shown;
+        self.commit(Change::Sounds { before, after: (take_sound, sounds) }, shown);
+        true
+    }
+
+    /// Replaces the tab's sound layers, keeping the take's own sound. One
+    /// step, as `set_mix`.
+    pub fn set_sounds(&mut self, sounds: Vec<SoundLayer>) -> bool {
+        self.set_mix(self.take_sound, sounds)
+    }
+
+    /// The id a new sound layer takes: one past the highest.
+    pub fn next_sound(&self) -> u64 {
+        self.sounds.iter().map(|sound| sound.id).max().unwrap_or(0) + 1
     }
 
     /// The notes marked on the take whose file is `path` with `sha256`.
@@ -425,6 +489,7 @@ impl Gallery {
                 let (path, sha256, notes) = (path.clone(), sha256.clone(), before.clone());
                 self.put_notes(&path, &sha256, notes);
             }
+            Change::Sounds { before, .. } => (self.take_sound, self.sounds) = before.clone(),
         }
         self.redo.push(step);
         self.edits += 1;
@@ -464,6 +529,7 @@ impl Gallery {
                 let (path, sha256, notes) = (path.clone(), sha256.clone(), after.clone());
                 self.put_notes(&path, &sha256, notes);
             }
+            Change::Sounds { after, .. } => (self.take_sound, self.sounds) = after.clone(),
         }
         self.undo.push(step);
         self.edits += 1;

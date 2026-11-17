@@ -5,10 +5,10 @@
 
 use crate::gallery::Mode;
 use crate::rounds::{self, With};
-use crate::session::{Session, Tab, Tool};
+use crate::session::{Page, Session, Tab, Tool};
 use protocol::{
-    Action, Binding, CellSetting, Chord, Film, FilmGroup, FilmItem, Keys, MenuEntry, PanelCell, PanelPage, Properties, ReferenceRole,
-    RowKind, TabEntry, Tabs, Thumbnail, ToolItem, Toolbar,
+    Action, Binding, CellSetting, Chord, Film, FilmGroup, FilmItem, FlagIcons, HeadingAction, Keys, Layers, MenuEntry, PanelCell, PanelPage,
+    Properties, ReferenceRole, RowKind, TabEntry, Tabs, Thumbnail, ToolItem, Toolbar,
 };
 use protocol::{Transport, TransportClock, TransportRow};
 use serde_json::json;
@@ -176,7 +176,7 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
             FilmItem {
                 name: format!("Take {}", tile.take + 1),
                 thumbnail: read.and_then(|read| session.films.get(&read.file).cloned()).unwrap_or_else(placeholder),
-                menu: tile.path().map(take_menu).unwrap_or_default(),
+                menu: tile.path().map(|path| take_menu(session, tab, tile, path)).unwrap_or_default(),
                 // The take's length, as vg-filmstrip-rounds' badge shows it.
                 badge: read.and_then(|read| read.info).map(|info| crate::preview::length(&info)).unwrap_or_default(),
                 mark: tile.file.as_ref().filter(|file| file.canon).map(|_| String::from("badge-check")),
@@ -186,7 +186,18 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
             }
         })
         .collect();
-    let mut groups: Vec<FilmGroup> = rounds.groups().into_iter().map(|(label, count)| FilmGroup { label, count, menu: Vec::new() }).collect();
+    // A finishing round's run is labelled as its take is, "Take 1 · 60 fps
+    // · 4K, from Take 7".
+    let mut first = 0;
+    let mut groups: Vec<FilmGroup> = rounds
+        .groups()
+        .into_iter()
+        .map(|(label, count)| {
+            let label = rounds.tiles.get(first).and_then(|tile| tab.finishing_label(tile)).unwrap_or(label);
+            first += count;
+            FilmGroup { label, count, menu: Vec::new() }
+        })
+        .collect();
     if !groups.is_empty() && !tab.gallery.takes.is_empty() {
         // The gallery's own takes are a run of their own, with no label.
         groups.push(FilmGroup { label: String::new(), count: tab.gallery.takes.len(), menu: Vec::new() });
@@ -222,7 +233,7 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
         shown: rounds.shown.unwrap_or(tiles + tab.gallery.shown),
         select: Action::new("film_select"),
         reorder: Action::new("film_reorder"),
-        add: vec![row("Open video…", Action::new("film_open"))],
+        add: vec![row("Open video…", Action::new("film_open")), row(crate::session::OPEN_SOUND, Action::new("open_sound"))],
         focus: Action::new("film_focus"),
         groups,
     }
@@ -245,7 +256,9 @@ pub fn transport(session: &Session, tab: &Tab) -> Option<Transport> {
     let info = take.info?;
     let fps = info.fps();
     let time = session.play_time().unwrap_or(f64::from(tab.frame_shown()) / fps.max(f64::EPSILON));
-    let rows = session.wave(session.wave_width()).map(|image| TransportRow { label: "Sound".into(), image }).into_iter().collect();
+    // The take's own "Sound", then each heard sound layer's row.
+    let mut rows: Vec<TransportRow> = session.wave(session.wave_width()).map(|image| TransportRow { label: "Sound".into(), image }).into_iter().collect();
+    rows.extend(session.layer_rows_under(session.wave_width(), take.seconds().unwrap_or(0.0)));
     Some(Transport {
         length: take.seconds().unwrap_or(0.0),
         fps,
@@ -259,41 +272,77 @@ pub fn transport(session: &Session, tab: &Tab) -> Option<Transport> {
     })
 }
 
-/// A take's menu, as the Image Generator's: Retime… and Upscale… come with
-/// milestone 5.
-fn take_menu(path: &str) -> Vec<MenuEntry> {
+/// A take's menu, as the Image Generator's and vg-take-chosen show it:
+/// after Edit, Retime… and Upscale…, each a finishing request; Deliver…,
+/// on only in a Skills project for a take whose round names its artifact;
+/// and, for a finished take, Compare with the source.
+fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str) -> Vec<MenuEntry> {
     let target = json!({ "take": path });
     let mut edit = row("Edit", Action::with_arg("take_edit", target.clone()));
     edit.divider = true;
-    vec![
+    let mut deliver = row(crate::session::DELIVER, Action::with_arg("take_deliver", target.clone()));
+    deliver.enabled = session.can_deliver(tab, path);
+    let mut rows = vec![
         row("Next round from this", Action::with_arg("take_next_round", target.clone())),
         row("Ask the assistant to use this take", Action::with_arg("take_ask", target.clone())),
         edit,
-        row("Open report", Action::with_arg("take_report", target)),
-    ]
+        row(crate::finishing::RETIME, Action::with_arg("take_retime", target.clone())),
+        row(crate::finishing::UPSCALE, Action::with_arg("take_upscale", target.clone())),
+        deliver,
+    ];
+    if tab.finishing_label(tile).is_some() {
+        rows.push(row(crate::finishing::COMPARE, Action::with_arg("take_compare", target.clone())));
+    }
+    rows.push(row("Open report", Action::with_arg("take_report", target)));
+    rows
 }
 
-/// The panel: its fourth page, Prompt, as the Image Generator's, with the
-/// tab's cell; Layers, Properties, and Adjustments come with the mix and
-/// stay off until then.
+/// The panel, as the Image Generator's: Layers, as vg-layers shows it, the
+/// take shown as its linked layer and the tab's sound layers; Properties,
+/// the chosen row's Gain, and a sound layer's Starts at; and Prompt, with
+/// the tab's cell. Adjustments waits.
 pub fn properties(session: &Session) -> Option<Properties> {
     let tab = session.active_tab()?;
-    let page = |label: &str, index: usize, on: bool| PanelPage {
+    let shown = session.page;
+    let page = |label: &str, index: usize, which: Option<Page>| PanelPage {
         label: label.into(),
-        active: on,
-        enabled: on,
+        active: which == Some(shown),
+        enabled: which.is_some(),
         action: Some(Action::with_arg("panel_page", json!({ "page": index }))),
     };
+    let layers = (shown == Page::Layers).then(|| Layers {
+        rows: session.layer_rows(),
+        reorder: Action::new("sound_reorder"),
+        sort_color: Action::new("sound_lock"),
+        flags: FlagIcons { eye_open: "eye".into(), eye_closed: "eye-closed".into(), lock_closed: "lock".into(), lock_open: "lock-slash".into() },
+        nest: false,
+        plain: false,
+        actions: vec![
+            HeadingAction { icon: "plus".into(), tip: crate::session::OPEN_SOUND.into(), enabled: true, action: Action::new("open_sound") },
+            HeadingAction {
+                icon: "trash".into(),
+                tip: "Delete layer".into(),
+                enabled: tab.sound.is_some_and(|own| own != 0),
+                action: Action::new("sound_delete"),
+            },
+        ],
+    });
+    let sections = if shown == Page::Properties { session.mix_section().into_iter().collect() } else { Vec::new() };
     Some(Properties {
         open: session.panel_open,
         toggle: Action::new("toggle_panel"),
         tip: "Prompt (F4)".into(),
         finish: Action::new("finish_edit"),
         back: None,
-        layers: None,
-        sections: Vec::new(),
-        pages: vec![page("Layers", 0, false), page("Properties", 1, false), page("Adjustments", 2, false), page("Prompt", 3, true)],
-        cell: tab.gallery.current_cell().map(|cell| prompt_cell(&cell.id, session.has_animatic())),
+        layers,
+        sections,
+        pages: vec![
+            page("Layers", 0, Some(Page::Layers)),
+            page("Properties", 1, Some(Page::Properties)),
+            page("Adjustments", 2, None),
+            page("Prompt", 3, Some(Page::Prompt)),
+        ],
+        cell: (shown == Page::Prompt).then(|| tab.gallery.current_cell().map(|cell| prompt_cell(&cell.id, session.has_animatic()))).flatten(),
     })
 }
 

@@ -33,8 +33,8 @@ pub(super) struct Playback {
     delays: VecDeque<f64>,
     pub sounds: Sounds,
     /// Each sound's waveform written for the host, by its key and width.
-    waves: HashMap<(String, u32), Thumbnail>,
-    next_wave: u64,
+    pub(super) waves: HashMap<(String, u32), Thumbnail>,
+    pub(super) next_wave: u64,
 }
 
 impl Default for Playback {
@@ -131,19 +131,28 @@ impl Session {
         Some(Playing { file: take.file.clone(), key, info: take.info? })
     }
 
-    /// Asks for the sound of the take that plays, once for each file.
+    /// Asks for the sound of the take that plays, and of the tab's sound
+    /// layers, once for each file.
     pub(super) fn want_sound(&mut self) {
         if let Some(take) = self.playing_take() {
             self.playback.sounds.want(&take.key, &take.file);
         }
+        self.want_layer_sounds();
     }
 
-    /// The take's sound as the Player plays it, when it has one.
-    fn tracks(&self, take: &Playing) -> Vec<Track> {
-        match self.playback.sounds.pcm(&take.key) {
-            Some(pcm) => vec![Track { pcm, at: 0, from: 0, length: take.info.frames, volume: 1.0 }],
-            None => Vec::new(),
+    /// What the Player plays: the take's own sound, at its gain unless it
+    /// is muted, and every heard sound layer from its start at its gain.
+    /// Mute, gain, and start are heard from the next play or scrub.
+    pub(super) fn tracks(&self, take: &Playing) -> Vec<Track> {
+        let own = self.active_tab().map(|tab| tab.gallery.take_sound).unwrap_or_default();
+        let mut tracks = Vec::new();
+        if !own.muted
+            && let Some(pcm) = self.playback.sounds.pcm(&take.key)
+        {
+            tracks.push(Track { pcm, at: 0, from: 0, length: take.info.frames, volume: super::mix::volume(own.gain_db) });
         }
+        tracks.extend(self.layer_tracks(take.info.fps()));
+        tracks
     }
 
     /// The transport's play button: plays from the frame shown, or from
@@ -279,8 +288,11 @@ impl Session {
     /// host.
     pub(super) fn prepare_wave(&mut self, width: u32) {
         let Some(take) = self.playing_take() else {
+            self.prepare_layer_waves(width, None);
             return;
         };
+        let length = f64::from(take.info.frames) / take.info.fps().max(f64::EPSILON);
+        self.prepare_layer_waves(width, Some(length));
         let playback = &mut self.playback;
         if playback.waves.contains_key(&(take.key.clone(), width)) {
             return;

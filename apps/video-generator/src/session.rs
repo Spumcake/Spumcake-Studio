@@ -23,6 +23,8 @@ use protocol::{
     AppMessage, Ask, AskButton, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, PanelSide, RasterCamera,
     RasterGesture, RasterTool, RasterView, Thumbnail,
 };
+pub use deliver::DELIVER;
+pub use mix::{OPEN_SOUND, Page};
 pub use notes::{Tool, Tools};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +32,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod animatic;
+mod deliver;
+mod mix;
 mod notes;
 mod play;
 mod requests;
@@ -109,6 +113,12 @@ pub struct Tab {
     /// The pre-vis check: a round's take shown over its animatic. For the
     /// tab while the program runs, never kept.
     pub over_animatic: bool,
+    /// The Layers page's row chosen, the take's, 0, or a sound layer's id,
+    /// while the program runs.
+    pub sound: Option<u64>,
+    /// The take's sound and the sound layers as a held slider found them,
+    /// until it is let go and the drag becomes one step.
+    mix_before: Option<(crate::gallery::TakeSound, Vec<crate::gallery::SoundLayer>)>,
 }
 
 /// An image written for the host: what it shows, how many of its frames
@@ -161,16 +171,43 @@ impl Tab {
         Some(gallery)
     }
 
-    /// A round's take as the round view holds it: "Take N · <model name>",
-    /// its link, known by its sha256 as a gallery take's is, so its sound
-    /// and notes are found, its file, and what it is.
+    /// A round's take as the round view holds it: its caption, its link,
+    /// known by its sha256 as a gallery take's is, so its sound and notes
+    /// are found, its file, and what it is.
     fn round_take(&self, tile: &crate::rounds::Tile) -> Option<(String, Link, PathBuf, Option<media::Info>)> {
         let file = tile.file.as_ref()?;
         let read = self.rounds.read(&file.path)?;
         let link = Link { path: file.path.clone(), sha256: read.sha256.clone() };
+        Some((self.take_caption(tile), link, read.file.clone(), read.info))
+    }
+
+    /// A round's take's caption: a finishing round's label, "Take 1 · 60
+    /// fps · 4K, from Take 7", or else "Take N · <model name>".
+    pub fn take_caption(&self, tile: &crate::rounds::Tile) -> String {
+        if let Some(label) = self.finishing_label(tile) {
+            return label;
+        }
         let model = self.rounds.round_of(tile).map_or("", crate::rounds::model_name);
-        let name = if model.is_empty() { format!("Take {}", tile.take + 1) } else { format!("Take {} · {model}", tile.take + 1) };
-        Some((name, link, read.file.clone(), read.info))
+        if model.is_empty() { format!("Take {}", tile.take + 1) } else { format!("Take {} · {model}", tile.take + 1) }
+    }
+
+    /// A finishing round's take's label, when its round is a finishing
+    /// endpoint's and its one reference a take of this tab's rounds: from
+    /// its cell's settings while the cell still has them, or else the
+    /// request's, and from its source, whose own finishing part it keeps.
+    pub fn finishing_label(&self, tile: &crate::rounds::Tile) -> Option<String> {
+        let rounds = &self.rounds;
+        let round = rounds.round_of(tile)?;
+        let source = crate::finishing::source(round)?;
+        let source_tile = &rounds.tiles[rounds.tile_of(source)?];
+        let settings_of = |cell: &str| self.gallery.cells.iter().find(|own| own.id == cell).and_then(|own| own.settings.as_ref());
+        let inherited = rounds
+            .round_of(source_tile)
+            .filter(|before| crate::finishing::source(before).is_some())
+            .map(|before| crate::finishing::own_part(before, None, settings_of(&source_tile.cell)))
+            .unwrap_or_default();
+        let width = rounds.read(source).and_then(|read| read.info).map(|info| info.width);
+        Some(crate::finishing::label(round, tile.take, source_tile.take, &inherited, width, settings_of(&tile.cell)))
     }
 
     /// The words over a round shown whole as frame strips: its line,
@@ -197,6 +234,8 @@ enum Purpose {
     Open,
     /// The filmstrip's open row: takes added to this tab.
     AddTake { tab: String },
+    /// Open sound as layer…: a sound layer added to this tab.
+    AddSound { tab: String },
     Save { tab: String, then_quit: bool },
 }
 
@@ -238,6 +277,11 @@ pub struct Session {
     marking: Option<notes::Marking>,
     /// What each animatic's file is, read once.
     animatics: HashMap<PathBuf, Option<media::Info>>,
+    /// The panel's page shown.
+    pub page: Page,
+    /// A Deliver under way: its sound layers being filed, its mix being
+    /// made, or the host's card asked.
+    delivery: Option<deliver::Delivery>,
     /// Tab ids still to ask about while quitting, after the one asked.
     quit_rest: Vec<String>,
     quitting: bool,
@@ -286,6 +330,8 @@ impl Session {
             tools: Tools::default(),
             typing: None,
             animatics: HashMap::new(),
+            page: Page::default(),
+            delivery: None,
             marking: None,
             quit_rest: Vec::new(),
             quitting: false,
@@ -526,6 +572,18 @@ impl Session {
                 let root = self.project.clone().unwrap_or_default();
                 out.push(crate::preview::preview(id, &path, &media_type, &root, &self.cache, &mut self.next_revision));
             }
+            // The Properties page's Gain and Starts at.
+            HostMessage::Property { prop, value, preview } => {
+                self.mix_property(&prop, &value, preview);
+                if !preview {
+                    out.extend(self.emit());
+                }
+            }
+            // Deliver: the sound layers filed, the mix made, and the host's
+            // card answered.
+            HostMessage::Filed { id, file, error } => self.filed(&id, &file, error, &mut out),
+            HostMessage::SkillScriptRan { id, output, error } => self.mix_ran(&id, &output, error, &mut out),
+            HostMessage::Delivered { tab, file, error } => self.delivered(&tab, &file, error, &mut out),
             _ => {}
         }
         out
@@ -562,7 +620,12 @@ impl Session {
                 }
             }
         }
-        self.raster()
+        let mut out = self.raster();
+        // A sound layer's waveform, once decoded, is its row's thumbnail.
+        if heard {
+            out.extend(self.declared());
+        }
+        out
     }
 
     /// Whether frames asked for are still to come, so the loop wakes soon.
@@ -698,6 +761,8 @@ impl Session {
             marked: Vec::new(),
             frames_taken: Vec::new(),
             over_animatic: false,
+            sound: None,
+            mix_before: None,
         });
         self.active = self.tabs.len() - 1;
         self.active
@@ -998,8 +1063,48 @@ impl Session {
                 }
             }
             "toggle_panel" => self.panel_open = !self.panel_open,
-            // The Prompt page is the panel's one page as yet.
-            "panel_page" => {}
+            // Layers, Properties, and Prompt; Adjustments waits.
+            "panel_page" => {
+                self.page = match number("value").or_else(|| number("page")).map(|page| page as i64) {
+                    Some(0) => Page::Layers,
+                    Some(1) => Page::Properties,
+                    Some(3) => Page::Prompt,
+                    _ => self.page,
+                };
+            }
+            // A held slider let go.
+            "finish_edit" => self.finish_mix(),
+            // Open sound as layer…, from the Layers page's + or the + tile.
+            "open_sound" => {
+                self.open_sound(out);
+                return;
+            }
+            "sound_click" | "sound_mute" | "sound_rename" | "sound_delete" | "sound_reorder" | "sound_lock" => {
+                self.mix_command(id, &arg);
+            }
+            // A finishing request, or a finished take beside its source.
+            "take_retime" | "take_upscale" | "take_compare" | "take_deliver" => {
+                let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
+                    return;
+                };
+                match id {
+                    "take_retime" => self.finish_take(&path, crate::finishing::Finish::Retime, out),
+                    "take_upscale" => self.finish_take(&path, crate::finishing::Finish::Upscale, out),
+                    "take_compare" => {
+                        self.compare_take(&path);
+                        out.extend(self.emit());
+                    }
+                    _ => self.deliver(&path, out),
+                }
+                return;
+            }
+            // A notice's close.
+            "notice_close" => {
+                if let Some(tab) = self.active_tab() {
+                    out.push(deliver::notices(&tab.id, None));
+                }
+                return;
+            }
             // A take's menu.
             "take_next_round" | "take_ask" | "take_edit" | "take_report" => {
                 let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
@@ -1161,6 +1266,15 @@ impl Session {
                     Err(reason) => out.push(notice("This video could not be opened", &reason)),
                 }
             }
+            Purpose::AddSound { tab } => {
+                if let Some(index) = self.tab_index(&tab) {
+                    self.active = index;
+                }
+                match self.add_sound(&tab, &path) {
+                    Ok(()) => out.extend(self.emit()),
+                    Err(reason) => out.push(notice("This sound could not be opened", &reason)),
+                }
+            }
             Purpose::Save { tab, then_quit } => {
                 if let Some(index) = self.tab_index(&tab) {
                     self.write_at(index, &path, then_quit, out);
@@ -1217,6 +1331,21 @@ impl Session {
                     gallery.cells = read.cells;
                     gallery.cell = read.cell;
                     gallery.notes = read.take_notes;
+                    gallery.take_sound = read.take_sound;
+                    gallery.sounds = read
+                        .sounds
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, sound)| crate::gallery::SoundLayer {
+                            id: index as u64 + 1,
+                            name: sound.name,
+                            file: files::resolve(&sound.link.path, self.project.as_deref(), beside.as_deref()),
+                            link: sound.link,
+                            gain_db: sound.gain_db,
+                            start: sound.start,
+                            muted: sound.muted,
+                        })
+                        .collect();
                     let index = self.push_tab(gallery, Some(path), None);
                     self.tabs[index].frame = read.frame;
                     self.declare_new(out);

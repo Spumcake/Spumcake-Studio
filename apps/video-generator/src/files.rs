@@ -1,11 +1,11 @@
 //! The `.vgx` file: a tab's gallery as the person arranged it, the links to
-//! its takes, the view, the frame shown, and the tab's cells, each a step
-//! pointer or a draft. It holds no video, no round or take a request made,
+//! its takes, the view, the frame shown, the tab's cells, each a step
+//! pointer or a draft, and its sound layers. It holds no video, no round or take a request made,
 //! and no prompt sent, report, or record of what made a take; those are
 //! read from the project's own records. The format is described in this
 //! application's AGENTS.md.
 
-use crate::gallery::{Gallery, Mode, TakeNotes};
+use crate::gallery::{Gallery, Mode, TakeNotes, TakeSound};
 use layers::notes::Notes;
 use layers::link::Link;
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 
 /// The first line of every `.vgx` file.
 const MAGIC: &[u8] = b"VGX1\n";
-/// Version 2 keeps the tab's cells; version 1, milestone 1's, had none.
-const VERSION: u32 = 2;
+/// Version 3 keeps the tab's sound layers and its take's own sound;
+/// version 2 the tab's cells; version 1, milestone 1's, had neither.
+const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -38,6 +39,36 @@ struct Header {
     /// its take's file; never the take or its record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     take_notes: Vec<TakeNotesFile>,
+    /// From version 3: the take's own sound, applying to whichever take is
+    /// shown, when it is not at 0 dB and heard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    take_sound: Option<TakeSoundFile>,
+    /// From version 3: the tab's sound layers, top first, each a link to
+    /// its file with its gain, start, and mute, as plain values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sounds: Vec<SoundFile>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TakeSoundFile {
+    #[serde(default)]
+    gain_db: f64,
+    #[serde(default)]
+    muted: bool,
+}
+
+/// A sound layer: its name, its file as a take's link names one, its gain
+/// in decibels, its start on the take in seconds, and whether it is muted.
+#[derive(Serialize, Deserialize)]
+struct SoundFile {
+    name: String,
+    link: LinkFile,
+    #[serde(default)]
+    gain_db: f64,
+    #[serde(default)]
+    start: f64,
+    #[serde(default)]
+    muted: bool,
 }
 
 /// Notes on a take, by its file: its path, as a take's link names it, and
@@ -82,6 +113,19 @@ pub struct Read {
     pub cells: Vec<protocol::Cell>,
     pub cell: Option<String>,
     pub take_notes: Vec<TakeNotes>,
+    pub take_sound: TakeSound,
+    /// Each sound layer: its name, its link, its gain in decibels, its
+    /// start in seconds, and whether it is muted.
+    pub sounds: Vec<SoundRead>,
+}
+
+/// A sound layer as its file keeps it.
+pub struct SoundRead {
+    pub name: String,
+    pub link: Link,
+    pub gain_db: f64,
+    pub start: f64,
+    pub muted: bool,
 }
 
 /// Whether the file starts as a `.vgx` file does.
@@ -140,6 +184,19 @@ pub fn write_vgx(path: &Path, gallery: &Gallery, frame: u32, project: Option<&Pa
             .filter(|kept| !kept.notes.is_empty())
             .map(|kept| TakeNotesFile { path: kept.path.clone(), sha256: kept.sha256.clone(), notes: kept.notes.clone() })
             .collect(),
+        take_sound: (!gallery.take_sound.is_default())
+            .then_some(TakeSoundFile { gain_db: gallery.take_sound.gain_db, muted: gallery.take_sound.muted }),
+        sounds: gallery
+            .sounds
+            .iter()
+            .map(|sound| SoundFile {
+                name: sound.name.clone(),
+                link: LinkFile { path: link_path(&sound.file, project), sha256: sound.link.sha256.clone() },
+                gain_db: sound.gain_db,
+                start: sound.start,
+                muted: sound.muted,
+            })
+            .collect(),
     };
     let mut bytes = MAGIC.to_vec();
     bytes.extend(serde_json::to_vec(&header).map_err(|error| error.to_string())?);
@@ -173,7 +230,19 @@ pub fn read_vgx(path: &Path) -> Result<Read, String> {
         .filter(|kept| !kept.notes.is_empty())
         .map(|kept| TakeNotes { path: kept.path, sha256: kept.sha256, notes: kept.notes })
         .collect();
-    Ok(Read { takes, shown: header.shown.min(count.saturating_sub(1)), view, frame: header.frame, cells, cell, take_notes })
+    let take_sound = header.take_sound.map_or_else(TakeSound::default, |kept| TakeSound { gain_db: kept.gain_db, muted: kept.muted });
+    let sounds = header
+        .sounds
+        .into_iter()
+        .map(|sound| SoundRead {
+            name: sound.name,
+            link: Link { path: sound.link.path, sha256: sound.link.sha256 },
+            gain_db: sound.gain_db,
+            start: sound.start,
+            muted: sound.muted,
+        })
+        .collect();
+    Ok(Read { takes, shown: header.shown.min(count.saturating_sub(1)), view, frame: header.frame, cells, cell, take_notes, take_sound, sounds })
 }
 
 /// RGBA pixels as a PNG, as the marked frame a next round sends is kept.
@@ -234,7 +303,7 @@ mod tests {
         write_vgx(&path, &gallery, 17, Some(&dir)).unwrap();
         assert!(is_vgx(&path));
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("VGX1\n{\"version\":2,"), "{text}");
+        assert!(text.starts_with("VGX1\n{\"version\":3,"), "{text}");
         assert!(text.contains("\"path\":\"takes/shot 12.mp4\""), "{text}");
         let read = read_vgx(&path).unwrap();
         assert_eq!(read.takes.len(), 2);
@@ -273,6 +342,50 @@ mod tests {
         std::fs::write(&old, "VGX1\n{\"version\":1,\"shown\":0,\"takes\":[],\"view\":{\"mode\":\"single\"},\"frame\":0}\n").unwrap();
         let read = read_vgx(&old).unwrap();
         assert!(read.cells.is_empty() && read.cell.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches a sound layer or the take's own sound lost, or kept as
+    /// anything but plain values: the take's gain and mute, and each layer's
+    /// name, link, gain, start, and mute come back; a take's own sound at
+    /// 0 dB and heard is left out; and a version 2 file still opens, with
+    /// none.
+    #[test]
+    fn a_vgx_keeps_its_sound_layers() {
+        use crate::gallery::SoundLayer;
+        let dir = scratch("sounds");
+        let mut gallery = Gallery::new(Vec::new(), 0);
+        let rain = dir.join("sounds").join("rain.wav");
+        gallery.take_sound = TakeSound { gain_db: -3.0, muted: true };
+        gallery.sounds = vec![SoundLayer {
+            id: 1,
+            name: "Rain".into(),
+            link: Link { path: "sounds/rain.wav".into(), sha256: "cd".repeat(32) },
+            file: rain.clone(),
+            gain_db: -6.0,
+            start: 1.5,
+            muted: false,
+        }];
+        let path = dir.join("Sounds.vgx");
+        write_vgx(&path, &gallery, 0, Some(&dir)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"take_sound\":{\"gain_db\":-3.0,\"muted\":true}"), "{text}");
+        assert!(text.contains("\"gain_db\":-6.0,\"start\":1.5,\"muted\":false"), "{text}");
+        let read = read_vgx(&path).unwrap();
+        assert_eq!(read.take_sound, TakeSound { gain_db: -3.0, muted: true });
+        assert_eq!(read.sounds.len(), 1);
+        let sound = &read.sounds[0];
+        assert_eq!((sound.name.as_str(), sound.link.path.as_str(), sound.gain_db, sound.start, sound.muted), ("Rain", "sounds/rain.wav", -6.0, 1.5, false));
+        assert_eq!(resolve(&sound.link.path, Some(&dir), None), rain);
+        gallery.take_sound = TakeSound::default();
+        gallery.sounds.clear();
+        write_vgx(&path, &gallery, 0, Some(&dir)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("take_sound") && !text.contains("sounds"), "{text}");
+        let old = dir.join("Two.vgx");
+        std::fs::write(&old, "VGX1\n{\"version\":2,\"shown\":0,\"takes\":[],\"view\":{\"mode\":\"single\"},\"frame\":0}\n").unwrap();
+        let read = read_vgx(&old).unwrap();
+        assert!(read.sounds.is_empty() && read.take_sound.is_default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

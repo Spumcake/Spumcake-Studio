@@ -6,6 +6,7 @@
 mod assist;
 mod declare;
 mod decode;
+mod finishing;
 mod files;
 mod gallery;
 mod notes;

@@ -170,6 +170,53 @@ impl Session {
         Ok(item)
     }
 
+    /// Retime… or Upscale… on a round's take: always a new draft cell of
+    /// kind video for the finishing request, the take its one reference,
+    /// shown on the Prompt page, one step of the gallery's history; then
+    /// `run_cell`, as the Prompt page's Generate would send it, so the
+    /// runner's plan card asks the person's yes with its cost. Nothing else
+    /// is sent, and nothing is paid without that yes.
+    pub(super) fn finish_take(&mut self, path: &str, finish: crate::finishing::Finish, out: &mut Vec<AppMessage>) {
+        let index = self.active;
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        let Some(file) = tab.rounds.tile_of(path).and_then(|tile| tab.rounds.tiles[tile].file.clone()) else {
+            return;
+        };
+        let size = tab.rounds.read(path).and_then(|read| read.info).map(|info| (info.width, info.height)).or_else(|| tab.rounds.shape()).unwrap_or(crate::gallery::SIZE);
+        let draft = crate::finishing::draft(finish, path, &file.media_type, size.0, size);
+        let mut cells = tab.gallery.cells.clone();
+        cells.push(draft.clone());
+        if tab.gallery.set_cells(cells, Some(draft.id.clone())) {
+            tab.dirty = true;
+        }
+        let id = tab.id.clone();
+        self.page = super::Page::Prompt;
+        out.extend(self.emit());
+        out.push(AppMessage::RunCell { tab: id, cell: draft.id, content: None, at: None });
+    }
+
+    /// Compare with the source: a finished take beside the take it was made
+    /// from, as a Ctrl-click shows two, the source on the left, both from
+    /// one time; at 100% the before/after crop. A view only.
+    pub(super) fn compare_take(&mut self, path: &str) {
+        self.stop_playing();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let source = tab
+            .rounds
+            .tile_of(path)
+            .and_then(|tile| tab.rounds.round_of(&tab.rounds.tiles[tile]))
+            .and_then(crate::finishing::source)
+            .and_then(|source| tab.rounds.tile_of(source));
+        if let Some(source) = source {
+            tab.rounds.shown = Some(source);
+            tab.rounds.with = crate::rounds::With::Tile(path.to_string());
+        }
+    }
+
     /// Ask the assistant to use this take: a prepared request naming the
     /// take, put in the conversation's composer for the person to send, as
     /// a take enters the chain only through the assistant.
