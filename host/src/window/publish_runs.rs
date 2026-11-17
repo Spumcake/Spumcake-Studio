@@ -731,7 +731,7 @@ mod tests {
         skills("pipeline.py", &["element", "001", "the line", "--kind", "story"]);
         skills("pipeline.py", &["chain", "001", "the line", "--order", "01"]);
         skills("pipeline.py", &["step", "001", "the line", "take", "--order", "1", "--skill", "generate-shot", "--artifact", "the line: take"]);
-        skills("pipeline.py", &["step", "001", "the line", "final", "--order", "2", "--skill", "mix", "--refs", r#"[{"artifact": "the line: take", "role": "the picture"}]"#, "--artifact", "the line: final shot"]);
+        skills("pipeline.py", &["step", "001", "the line", "final", "--order", "2", "--skill", "mix", "--refs", r#"[{"artifact": "the line: take", "role": "the shot"}]"#, "--artifact", "the line: final shot"]);
         std::fs::write(folder.join("agent/take.wav"), b"RIFF take").unwrap();
         let take = last(skills("request.py", &["resource", "agent/take.wav", "--name", "take"]));
         skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take, "--chain", "the line"]);
