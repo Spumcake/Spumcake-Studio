@@ -1,4 +1,4 @@
-//! The Prompt page's runner duties, in a Skills project: what the card
+//! The Prompt page's runner duties: what the card
 //! shows of a cell, and what running it does, through Spumcake-Skills' own
 //! scripts, as the Request page's draft in the lifecycle contract gives
 //! them to this module.
@@ -175,7 +175,7 @@ pub(crate) fn endpoint_for(settings: &Settings, skills: &[crate::skills_setup::S
 /// service names.
 pub(crate) fn cell_endpoint(settings: &Settings, cell: &Cell) -> Option<String> {
     cell.endpoint.clone().or_else(|| {
-        let skills = crate::skills_setup::listed_skills(&settings.skill_folders);
+        let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders));
         endpoint_for(settings, &skills, cell.model.as_deref()?)
     })
 }
@@ -194,7 +194,7 @@ fn request_kind(settings: &Settings, cell: &Cell) -> Result<&'static str, String
             if has_references { "openai-image-edit" } else { "openai-image" }
         }
         EndpointKind::Openai if endpoint.address.contains("openai.com") && !video => "openai-text",
-        _ => return Err(format!("“{}” is not an endpoint Spumcake-Skills' request.py runs, so this cell cannot run in a Skills project.", endpoint.name)),
+        _ => return Err(format!("This cell cannot run on “{}”: Spumcake-Skills sends requests only to OpenRouter, OpenAI, and fal.", endpoint.name)),
     })
 }
 

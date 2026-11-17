@@ -1,18 +1,18 @@
-//! Studio as a setup for Spumcake-Skills: a Skills project, the skills the
-//! setup lists for it, and the assistant's project tools.
+//! Studio as a setup for Spumcake-Skills: the skills it finds, and the
+//! assistant's project tools.
 //!
-//! A Skills project is a folder that holds both `library/` and `requests/`,
-//! as Spumcake-Skills' `request.py` recognises one. In it, `request.py` is
-//! the one renderer, as the Studio-as-a-setup contract says: every skill is
-//! listed with a note saying so, and the tools here only read, look, and
-//! write where the agent may write by hand. Every other folder is written
-//! only by Skills' own scripts.
+//! Every project is organized the way the Last order benchmark is, as the
+//! owner approved on 2026-11-17, and in every one `request.py` is the one
+//! renderer, as the Studio-as-a-setup contract says: every skill is listed
+//! with a note saying so, and the tools here only read, look, and write
+//! where the agent may write by hand. Every other folder is written only by
+//! Skills' own scripts.
 
 use protocol::{Tool, ToolGroup, ToolResult};
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
-/// The host's tool group in a Skills project.
+/// The host's tool group for the project.
 pub(crate) const PROJECT_TOOLS: &str = "project";
 const LIST_FILES: &str = "list_files";
 const READ_FILE: &str = "read_file";
@@ -20,7 +20,7 @@ const LOOK: &str = "look_at_file";
 const WRITE_FILE: &str = "write_file";
 const READ_SKILL: &str = "read_skill";
 
-/// What every skill carries in a Skills project.
+/// What every skill carries in the project.
 pub(crate) const RENDERS_HERE: &str = "renders through request.py here";
 
 /// Studio's own folder in a project, which no step needs, and its name
@@ -36,11 +36,6 @@ const MOST_IMAGE: u64 = 8 * 1024 * 1024;
 /// How deep a skill folder is searched for `SKILL.md`, enough for a
 /// repository's `.project/skills/<category>/<name>/`.
 const SKILL_DEPTH: usize = 5;
-
-/// Whether `folder` is a Skills project.
-pub(crate) fn is_skills_project(folder: &Path) -> bool {
-    folder.join("library").is_dir() && folder.join("requests").is_dir()
-}
 
 /// One skill a setup lists: what its front matter says, and where it is.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,12 +163,12 @@ fn front_matter(text: &str) -> Option<Skill> {
     (!skill.name.is_empty()).then_some(skill)
 }
 
-/// The host's tool group for a Skills project at `folder`, with the skills
+/// The host's tool group for the project at `folder`, with the skills
 /// listed in its instructions, each with the note that it renders through
 /// `request.py` here.
 pub(crate) fn tool_group(folder: &Path, skills: &[Skill]) -> ToolGroup {
     let mut instructions = format!(
-        "This project, {}, is a Spumcake-Skills project: its folders and file names say what it holds, as the skills' docs/projects.md describes. \
+        "This project, {}, is organized as Spumcake-Skills' docs/projects.md describes: its folders and file names say what it holds. \
 In this project, request.py is the one renderer: a model is called only through it and the plan card, never through an execution skill or a command. \
 Read a skill with read_skill before following it, and read what it links to with read_file, relative to the skill's folder or its repository. \
 Read the project with list_files and read_file, and look at every image you judge with look_at_file. \
@@ -754,13 +749,5 @@ mod tests {
         let keyframe = skills.iter().find(|skill| skill.name == "generate-keyframe").unwrap();
         let roles = keyframe.folder.join("../../docs/prompt-roles.md");
         assert!(read_file(&folder, &skills, &roles.display().to_string(), 1).is_ok(), "a skill's relative link cannot be read");
-    }
-
-    #[test]
-    fn a_skills_project_holds_library_and_requests() {
-        let folder = project("is");
-        assert!(is_skills_project(&folder));
-        std::fs::remove_dir_all(folder.join("requests")).unwrap();
-        assert!(!is_skills_project(&folder));
     }
 }
