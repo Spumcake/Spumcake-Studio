@@ -151,6 +151,14 @@ fn ensure_at(data: &Path, plan: &Value, vars: &[(String, String)], openrouter: &
     price.is_some()
 }
 
+/// The service a skill's `models.json` names for a model, such as "fal".
+pub(crate) fn local_service(skills: &[crate::skills_setup::Skill], model: &str) -> Option<String> {
+    skills.iter().find_map(|skill| {
+        let listed: Value = std::fs::read_to_string(skill.folder.join("models.json")).ok().and_then(|text| serde_json::from_str(&text).ok())?;
+        listed.as_array()?.iter().find(|entry| entry.get("model").and_then(Value::as_str) == Some(model))?.get("service")?.as_str().map(String::from)
+    })
+}
+
 /// A model's name from a `models.json` beside a skill's `SKILL.md`, a list
 /// of `{service, model, name}`, as the Studio-as-a-setup contract's
 /// Formats table settled it on 2026-11-17. Read from this computer, never
