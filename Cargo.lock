@@ -3718,6 +3718,7 @@ dependencies = [
 [[package]]
 name = "scene"
 version = "0.1.0"
+source = "git+https://github.com/Spumcake/Spumcake-Render?rev=7ed9095c6785ea9ba1c97766347aa06529f6dc06#7ed9095c6785ea9ba1c97766347aa06529f6dc06"
 dependencies = [
  "gltf",
  "serde_json",
@@ -4026,6 +4027,7 @@ dependencies = [
 [[package]]
 name = "spumcake-render"
 version = "0.1.0"
+source = "git+https://github.com/Spumcake/Spumcake-Render?rev=7ed9095c6785ea9ba1c97766347aa06529f6dc06#7ed9095c6785ea9ba1c97766347aa06529f6dc06"
 dependencies = [
  "bytemuck",
  "png 0.18.1",

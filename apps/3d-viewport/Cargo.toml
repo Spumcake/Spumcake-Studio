@@ -15,11 +15,9 @@ path = "src/main.rs"
 [dependencies]
 protocol = { path = "../../protocol" }
 serde_json = "=1.0.152"
-# The reader of scene files, from Spumcake-Render. On work/3d-viewport only,
-# read from Spumcake-Render's dev worktree until its dev is pushed and
-# Studio depends on it by its git URL, as the Studio session manager set on
-# 2026-11-16.
-scene = { path = "../../../../../spumcake-render/worktrees/dev/scene" }
+# The reader of scene files, from Spumcake-Render, at the same commit as the
+# host's engine.
+scene = { git = "https://github.com/Spumcake/Spumcake-Render", rev = "7ed9095c6785ea9ba1c97766347aa06529f6dc06" }
 # A published pre-vis render is a PNG; the door swing's is a video, decoded a
 # frame at a time. Both already in the lockfile through the Video Generator.
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
