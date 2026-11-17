@@ -748,6 +748,7 @@ mod tests {
             request: request.into(),
             number,
             model: "Model".into(),
+            model_name: String::new(),
             prompt: String::new(),
             references: Vec::new(),
             left_out: Vec::new(),

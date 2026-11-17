@@ -974,6 +974,7 @@ fn round(request: &str, number: u32, takes: Vec<protocol::TakeFile>) -> protocol
         request: request.into(),
         number,
         model: "Model A".into(),
+        model_name: String::new(),
         prompt: "The keeper turns from the window toward the radio as it crackles.".into(),
         references: Vec::new(),
         left_out: Vec::new(),

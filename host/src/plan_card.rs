@@ -4,6 +4,8 @@
 //! settings, the prompt as sent, and every reference in the order sent with
 //! its full path, then Cancel and Send request. Before any other command it
 //! asks "Run this command?" with the command in full, then Cancel and Run.
+//! Before research it shows the searches with their cost, then Search, or
+//! a file to download with its page and licence, then Download.
 
 use crate::runner::Asking;
 use crate::typescale as ts;
@@ -54,12 +56,20 @@ fn lines(asking: &Asking) -> (Vec<Line>, String) {
                 (false, 1) => "request",
                 (false, _) => "requests",
             };
+            // Research is filed, not sent: it spends nothing here.
+            let research = plans.iter().all(|plan| plan.pointer("/endpoint/kind").and_then(Value::as_str) == Some("research"));
             let cost = if *stand_in {
                 String::from("nothing; a stand-in answers")
+            } else if research {
+                String::from("nothing; research is filed, not sent")
             } else {
                 plans.iter().filter_map(|plan| plan.get("estimate").and_then(Value::as_str)).collect::<Vec<_>>().join(", ")
             };
             let mut lines = vec![Line::Title(format!("{count} {noun} · {cost}"))];
+            // What a listed price leaves out, such as charges per token.
+            for note in plans.iter().filter_map(|plan| plan.get("price_note").and_then(Value::as_str)) {
+                lines.push(Line::Muted(format!("The price {note}.")));
+            }
             for plan in plans {
                 let endpoint = plan.get("endpoint").cloned().unwrap_or(Value::Null);
                 if !endpoint.is_null() {
@@ -87,6 +97,16 @@ fn lines(asking: &Asking) -> (Vec<Line>, String) {
                     lines.push(Line::Label(String::from("Prompt, as sent")));
                     lines.push(Line::Boxed(prompt.to_string(), false));
                 }
+                let filed = plan.get("filed").and_then(Value::as_array).cloned().unwrap_or_default();
+                if !filed.is_empty() {
+                    lines.push(Line::Label(String::from("Files, into sources/")));
+                    for (index, file) in filed.iter().enumerate() {
+                        let text = |key: &str| file.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+                        let found = [text("page"), text("address")].into_iter().find(|at| !at.is_empty()).unwrap_or_default();
+                        let label = if text("use").is_empty() { found } else { format!("{} · {found}", text("use")) };
+                        lines.push(Line::Reference { number: index + 1, path: text("file"), label });
+                    }
+                }
                 let references = plan.get("references").and_then(Value::as_array).cloned().unwrap_or_default();
                 if !references.is_empty() {
                     lines.push(Line::Label(String::from("References, in the order sent")));
@@ -98,11 +118,37 @@ fn lines(asking: &Asking) -> (Vec<Line>, String) {
                 }
             }
             let send = match (script_only, count) {
+                _ if research => String::from("File"),
                 (true, _) => String::from("Run"),
                 (false, 1) => String::from("Send request"),
                 (false, _) => format!("Send {count} requests"),
             };
             (lines, send)
+        }
+        Asking::Searches { searches, why, .. } => {
+            let noun = if searches.len() == 1 { "search" } else { "searches" };
+            let mut lines = vec![Line::Title(format!("{} {noun} · {} · Brave Search", searches.len(), crate::runner::searches_cost(searches.len())))];
+            if !why.trim().is_empty() {
+                lines.push(Line::Muted(why.clone()));
+            }
+            lines.push(Line::Label(String::from("Searches, in the order sent")));
+            let shown: Vec<String> = searches.iter().enumerate().map(|(index, (query, images))| format!("{}. {query}{}", index + 1, if *images { "  (images)" } else { "" })).collect();
+            lines.push(Line::Boxed(shown.join("\n"), false));
+            (lines, String::from("Search"))
+        }
+        Asking::Download { url, page, licence, to, .. } => {
+            let mut lines = vec![Line::Title(String::from("Download this file?"))];
+            lines.push(Line::Label(String::from("File")));
+            lines.push(Line::Boxed(url.clone(), true));
+            if !page.is_empty() {
+                lines.push(Line::Label(String::from("On the page")));
+                lines.push(Line::Boxed(page.clone(), true));
+            }
+            lines.push(Line::Label(String::from("Licence")));
+            lines.push(Line::Muted(licence.clone()));
+            lines.push(Line::Label(String::from("Waits in")));
+            lines.push(Line::Muted(to.clone()));
+            (lines, String::from("Download"))
         }
     }
 }

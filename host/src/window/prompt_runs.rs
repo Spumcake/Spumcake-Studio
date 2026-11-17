@@ -61,6 +61,7 @@ impl HostWindow {
         let at = self.cell_item(app, tab, &cell.id);
         let view = self.prompt_page.card(&folder, &scripts, &env.vars, &self.settings, cell, &at);
         if let Some(rounds) = self.prompt_page.rounds_due(&folder, &scripts, &env.vars, cell, false) {
+            let rounds = self.named(rounds);
             self.send(app, HostMessage::Takes { cell: at, rounds });
         }
         Some(view)
@@ -156,7 +157,7 @@ impl HostWindow {
     }
 
     /// A workspace's file, filed into `prompts/resources/` by Skills'
-    /// `request.py resource`: the person's own action, so it runs at once.
+    /// `request.py resource`: the user's own action, so it runs at once.
     pub(super) fn file_resources(&mut self) {
         let mut asked = Vec::new();
         for started in &mut self.apps {
@@ -185,7 +186,10 @@ impl HostWindow {
         for answer in answers {
             if let Some(id) = answer.call.strip_prefix("cell:") {
                 let id = id.to_string();
-                if !answer.ok {
+                // A plan card the user cancelled is not a failed round: the
+                // cell simply stays as it was.
+                let declined = answer.output.get("declined").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                if !answer.ok && !declined {
                     let reason = answer.output.get("error").and_then(serde_json::Value::as_str).map(String::from).unwrap_or_else(|| String::from("The request failed. Open its report."));
                     self.board.failed.insert(id.clone(), reason);
                 }
@@ -211,8 +215,22 @@ impl HostWindow {
         let Some(cell) = self.panel_cell(app, &tab, id) else { return };
         if let Some(rounds) = self.prompt_page.rounds_due(&folder, &scripts, &env.vars, &cell, true) {
             let at = self.cell_item(app, &tab, id);
+            let rounds = self.named(rounds);
             self.send(app, HostMessage::Takes { cell: at, rounds });
         }
+    }
+
+    /// Each round with its model's name, the one the card shows.
+    fn named(&self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
+        rounds
+            .into_iter()
+            .map(|mut round| {
+                if !round.model.is_empty() {
+                    round.model_name = crate::cells::model_name(&self.ctx, &round.model);
+                }
+                round
+            })
+            .collect()
     }
 
     /// When the agent records a step with the request a draft cell made,
