@@ -46,6 +46,7 @@ fn action_with(id: &str, arg: Value) -> Action {
 
 fn entry(label: &str, action: Action, enabled: bool) -> MenuEntry {
     MenuEntry {
+        tip: None,
         label: label.to_string(),
         icon: None,
         enabled,
@@ -74,6 +75,7 @@ fn ruled(rows: Vec<MenuEntry>) -> Vec<MenuEntry> {
 
 fn divider() -> MenuEntry {
     MenuEntry {
+        tip: None,
         label: String::new(),
         icon: None,
         enabled: true,

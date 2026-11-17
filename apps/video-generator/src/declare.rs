@@ -28,7 +28,7 @@ fn button(icon: &str, tip: &str, action: Action, enabled: bool, selected: bool) 
 }
 
 fn row(label: &str, action: Action) -> MenuEntry {
-    MenuEntry { label: label.into(), icon: None, enabled: true, divider: false, action: Some(action), submenu: Vec::new(), rename: false }
+    MenuEntry { tip: None, label: label.into(), icon: None, enabled: true, divider: false, action: Some(action), submenu: Vec::new(), rename: false }
 }
 
 /// Each tool's icon, name, and key, as the Image Generator's.

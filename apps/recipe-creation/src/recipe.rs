@@ -1259,6 +1259,7 @@ fn menu(in_project: bool) -> Vec<MenuEntry> {
 
 fn row(label: &str, id: &str) -> MenuEntry {
     MenuEntry {
+        tip: None,
         label: label.into(),
         icon: None,
         enabled: true,

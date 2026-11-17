@@ -614,6 +614,8 @@ pub(crate) struct MenuItem<'a> {
     pub submenu: bool,
     /// A hairline separates this row from the rows above it.
     pub divider: bool,
+    /// Shown when the pointer rests on the row, such as why it is off.
+    pub tip: Option<&'a str>,
 }
 
 /// What a menu chose: one of its own rows, or what one of its submenus chose.
@@ -696,7 +698,10 @@ pub(crate) fn menu_rows_with<T>(
         } else {
             Sense::hover()
         };
-        let (row, response) = ui.allocate_exact_size(vec2(width, 28.0), sense);
+        let (row, mut response) = ui.allocate_exact_size(vec2(width, 28.0), sense);
+        if let Some(tip) = item.tip {
+            response = response.on_hover_text(tip);
+        }
         // Filled in once it is known whether this row's submenu is open.
         let highlight = ui.painter().add(egui::Shape::Noop);
         let mut open = false;
@@ -780,6 +785,7 @@ pub(crate) fn entry_rows<'a>(
             enabled: row.enabled,
             submenu: !row.submenu.is_empty(),
             divider: row.divider,
+            tip: row.tip.as_deref(),
         })
         .collect();
     match menu_rows_with(ui, &items, |index, ui| entry_rows(ui, &rows[index].submenu)) {

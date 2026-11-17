@@ -266,6 +266,7 @@ fn logo_button(ui: &mut egui::Ui, center: Pos2, chat: &mut Chat, events: &mut Ve
 
 fn item(label: &str, enabled: bool, submenu: bool, divider: bool) -> widgets::MenuItem<'_> {
     widgets::MenuItem {
+        tip: None,
         label,
         icon: None,
         enabled,

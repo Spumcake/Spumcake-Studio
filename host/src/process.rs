@@ -141,6 +141,9 @@ pub struct Declared {
     /// Steps it asked to run again: the id, the tab, and the step. Chat
     /// Assistant Work's runner takes them.
     pub step_runs: VecDeque<(String, String, protocol::StepRef)>,
+    /// Files it asked to open in the workspace that edits their media type:
+    /// the path and the media type.
+    pub open_ins: VecDeque<(String, String)>,
     /// Skill scripts it asked to run: the id, the skill, the script, and
     /// its arguments.
     pub skill_scripts: VecDeque<(String, String, String, Vec<String>)>,
@@ -658,6 +661,7 @@ impl Running {
             AppMessage::ReadCanon { id, query } => declared.canon_reads.push_back((id, query)),
             AppMessage::EditStep { id, tab, step, script, refs } => declared.step_edits.push_back((id, tab, step, script, refs)),
             AppMessage::RunStep { id, tab, step } => declared.step_runs.push_back((id, tab, step)),
+            AppMessage::OpenIn { path, media_type } => declared.open_ins.push_back((path, media_type)),
             AppMessage::RunSkillScript { id, skill, script, args } => declared.skill_scripts.push_back((id, skill, script, args)),
             AppMessage::AskAssistant { text, items } => declared.ask_assistant.push_back((text, items)),
             // The Prompt page's previews are drawn by the work that builds
