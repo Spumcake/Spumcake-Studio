@@ -74,7 +74,11 @@ pub(crate) fn scripts(settings: &[String]) -> Option<PathBuf> {
 /// continues in an agentic harness. It runs with no key, and a refusal is
 /// said as Skills says it.
 pub(crate) fn lay_out(folder: &Path, settings: &[String]) -> Result<(), String> {
-    let scripts = scripts(settings).ok_or(MISSING)?;
+    // A test that names no checkout makes its project bare, so the window's
+    // checks never need Spumcake-Skills.
+    let Some(scripts) = scripts(settings) else {
+        return if cfg!(test) { Ok(()) } else { Err(MISSING.to_string()) };
+    };
     let parent = folder.parent().filter(|parent| parent.is_dir()).map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
     let mut command = std::process::Command::new("python3");
     command.arg(scripts.join("request.py")).arg("init").arg(folder).arg("--json").current_dir(parent);

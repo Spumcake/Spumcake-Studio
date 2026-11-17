@@ -60,7 +60,17 @@ impl HostWindow {
     /// and runs only as approved. With no project open it is not the
     /// runner's, and false; with no Spumcake-Skills found, the cell says so.
     pub(super) fn run_prompt_cell(&mut self, id: &str) -> bool {
+        // Only a Prompt page's cell is the runner's. The conversation's and
+        // a recipe's cells run straight on their endpoint, as the owner set
+        // on 2026-11-17: they are the user's own, not the project's record.
         if self.project.is_none() {
+            return false;
+        }
+        let Some((app, tab)) = self.cell_home(id) else { return false };
+        let Some(cell) = self.panel_cell(app, &tab, id) else { return false };
+        let on_the_prompt_page = cell.step.is_some()
+            || self.apps.get(app).and_then(|started| started.running.declared.properties.as_ref()).and_then(|properties| properties.cell.as_ref()).is_some_and(|declared| declared.cell == id);
+        if !on_the_prompt_page {
             return false;
         }
         let Some((folder, env)) = self.project_scripts() else {
@@ -68,8 +78,6 @@ impl HostWindow {
             return true;
         };
         let Some(scripts) = env.scripts.clone() else { return false };
-        let Some((app, tab)) = self.cell_home(id) else { return false };
-        let Some(cell) = self.panel_cell(app, &tab, id) else { return false };
         // The card's unsaved prompt is the one sent.
         let mut cell = cell;
         if cell.step.is_none()

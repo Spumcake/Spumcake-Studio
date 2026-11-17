@@ -156,13 +156,13 @@ fn a_cells_image_opens_as_new_work() {
     assert_eq!((after.current, after.versions.len()), (Some(0), 2), "the cell changed");
 
     let folder = window.app.project.as_ref().unwrap().folder.clone();
-    let written = folder.join(format!("{name}.ipx"));
+    // Every project keeps its workspaces' files in work/, as Last order does.
+    let written = folder.join("work").join(format!("{name}.ipx"));
     until_file(&mut window, &written);
-    let source = &header(&written)["source"];
-    let (_, _, session) = window.here();
-    assert_eq!(source["cell"], id.as_str());
-    assert_eq!(source["image"], first.as_str(), "another version was opened");
-    assert_eq!(source["session"], session.as_str());
+    // In a project the image keeps no record of the cell it came from,
+    // which the project's own records do not hold.
+    assert!(header(&written).get("source").is_none(), "a project's image kept its cell as a source");
+    let _ = &first;
 
     // The assistant, with no cell named: the latest Image cell.
     let edit_tool = protocol::tool_key(crate::route::HOST_ID, "prompt", crate::route::EDIT_IMAGE);
@@ -239,12 +239,9 @@ fn a_recipe_cells_image_opens_as_new_work() {
     window.app.note_cell_actions(vec![CardAction::EditImage(cell.id.clone())]);
     window.until(|app| editor_tabs(app).iter().any(|label| label == "A lighthouse in a storm"));
     let folder = window.app.project.as_ref().unwrap().folder.clone();
-    let written = folder.join("A lighthouse in a storm.ipx");
+    let written = folder.join("work").join("A lighthouse in a storm.ipx");
     until_file(&mut window, &written);
-    let source = &header(&written)["source"];
-    assert_eq!(source["cell"], cell.id.as_str());
-    assert!(source["recipe"].as_str().is_some_and(|recipe| !recipe.starts_with('/')), "the source does not name the recipe: {source}");
-    assert!(source.get("session").is_none(), "a recipe's cell was taken for the conversation's");
+    assert!(header(&written).get("source").is_none(), "a project's image kept its recipe's cell as a source");
     let _ = std::fs::remove_dir_all(dir);
 }
 

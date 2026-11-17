@@ -213,14 +213,15 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
 /// directly, its prompt tools and the person's skills, and offers the
 /// project tools and Spumcake-Skills' skills instead.
 fn host_target(settings: &Settings, project: Option<&Path>) -> Target {
-    let tool_groups = match project {
-        Some(folder) => vec![skills_setup::tool_group(folder, &skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders)))],
-        None => {
-            let mut tool_groups = vec![host_tools()];
-            tool_groups.extend(your_skills(settings));
-            tool_groups
-        }
-    };
+    // The conversation's own prompt tools and the user's skills are offered
+    // in every project, as the owner set on 2026-11-17, beside the project's
+    // tools.
+    let mut tool_groups = Vec::new();
+    if let Some(folder) = project {
+        tool_groups.push(skills_setup::tool_group(folder, &skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders))));
+    }
+    tool_groups.push(host_tools());
+    tool_groups.extend(your_skills(settings));
     Target {
         app: HOST_ID.into(),
         name: "Spumcake Studio".into(),

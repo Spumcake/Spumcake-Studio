@@ -66,9 +66,9 @@ fn the_assistant_reads_the_project_and_its_skills() {
     let requests = stand_in.requests();
 
     let tools = offered(&requests[0]);
-    for generating in ["run_text_prompt", "edit_image", "list_out_of_date"] {
-        assert!(!tools.iter().any(|tool| tool.ends_with(generating)), "{generating} is offered in a project: {tools:?}");
-    }
+    // The conversation's own prompt tools stay offered beside the
+    // project's, as the owner set on 2026-11-17.
+    assert!(tools.iter().any(|tool| tool.ends_with("run_text_prompt")), "the conversation's prompt tools are gone from a project: {tools:?}");
     for name in ["list_files", "read_file", "look_at_file", "write_file", "read_skill"] {
         assert!(tools.contains(&host_tool(name)), "{name} is not offered: {tools:?}");
     }

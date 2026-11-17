@@ -1246,6 +1246,8 @@ pub(crate) fn unusable_project_folder(folder: &Path) -> Option<String> {
 
 /// Makes a project in `folder`, which must not exist or must be empty, with
 /// its first session. The project is added to `projects.json` as current.
+/// Tests make bare projects with it; Studio lays every project out.
+#[cfg(test)]
 pub(crate) fn create_project_at(data: &Path, folder: &Path, name: &str) -> Result<(ProjectRecord, SessionFile), String> {
     create_laid_out_project(data, folder, name, |_| Ok(()))
 }

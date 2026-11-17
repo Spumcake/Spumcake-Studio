@@ -1444,17 +1444,9 @@ impl HostWindow {
         prompt: String,
         image: bool,
     ) {
-        // In a project nothing is sent to a model directly: every
-        // generation is a request.py request, through the plan card.
-        if self.project.is_some() && self.run_prompt_cell(&id) {
-            return;
-        }
-        if self.project.is_some() {
-            let reason = String::from("Every generation in a project runs through Spumcake-Skills' request.py, so nothing is sent to a model directly.");
-            self.board.failed.insert(id, reason.clone());
-            if let Some(call) = call {
-                self.assistant.send(Command::Result(protocol::ToolResult { call, ok: false, output: serde_json::json!({ "error": reason }), images: Vec::new() }));
-            }
+        // A Prompt page's cell runs through the runner; the conversation's
+        // and a recipe's run here, straight on their endpoint.
+        if self.run_prompt_cell(&id) {
             return;
         }
         self.board.runs.retain(|run| run.id != id);
