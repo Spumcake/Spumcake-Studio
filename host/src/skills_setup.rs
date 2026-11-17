@@ -30,8 +30,9 @@ const OWN_FOLDERS: [&str; 2] = [".spumcake", ".inpainter"];
 /// The most a read returns at once, so one file never floods the
 /// conversation.
 const MOST_TEXT: usize = 60_000;
-/// The largest image `look` sends, before base64.
-const MOST_IMAGE: u64 = 12 * 1024 * 1024;
+/// The largest image looked at whole, below the byte limit one request's
+/// images keep to.
+const MOST_IMAGE: u64 = 8 * 1024 * 1024;
 /// How deep a skill folder is searched for `SKILL.md`, enough for a
 /// repository's `.project/skills/<category>/<name>/`.
 const SKILL_DEPTH: usize = 5;
