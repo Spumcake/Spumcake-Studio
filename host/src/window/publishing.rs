@@ -3,24 +3,61 @@
 //! `Publishing::asked` for the runner, which fills the publish card or the
 //! history card. The window draws them, keeps what the person chose in
 //! `Publishing::confirmed` for the runner to carry out, and sends the
-//! runner's answer back to the workspace. Outside a Skills project a
-//! publish is refused, since there is no canon to publish into.
+//! runner's answer back to whoever asked: a workspace, or the assistant's
+//! `publish_take`, through the same card. Outside a Skills project a
+//! workspace's publish is refused, since there is no canon to publish into.
 
 use super::HostWindow;
 use crate::history_card::History;
 use crate::publish_card::{PublishCardEvent, PublishCardView, RefusedEvent};
 use eframe::egui;
-use protocol::HostMessage;
+use protocol::{HostMessage, ToolResult};
+use serde_json::json;
 use std::collections::VecDeque;
 
-/// What a workspace asked for, with the workspace's index.
+/// Who asked to publish, and so hears the answer.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asker {
+    /// A workspace's tab, by the workspace's index.
+    Workspace { app: usize, tab: String },
+    /// The assistant's `publish_take`, by its call.
+    Assistant { call: String },
+}
+
+/// The answer one asker hears.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Reply {
+    Workspace(usize, HostMessage),
+    Assistant(ToolResult),
+}
+
+/// The answer to a publish or revert: the file published and its version,
+/// or why not. `declined` is the user's Cancel, which is no failure.
+pub(crate) fn published_reply(asker: Asker, artifact: String, file: String, version: Option<u32>, error: Option<String>, declined: bool) -> Reply {
+    match asker {
+        Asker::Workspace { app, tab } => Reply::Workspace(app, HostMessage::Published { tab, artifact, file, version, error }),
+        Asker::Assistant { call } => {
+            let output = match (&error, declined) {
+                (_, true) => json!({ "error": "The user did not approve it, so nothing was published.", "declined": true }),
+                (Some(error), false) => json!({ "error": error, "artifact": artifact }),
+                (None, false) => json!({ "artifact": artifact, "file": file, "version": version }),
+            };
+            Reply::Assistant(ToolResult { call, ok: error.is_none() && !declined, output, images: Vec::new() })
+        }
+    }
+}
+
+/// What was asked for, with who asked.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Asked {
-    /// Publish a workspace file as a canon artifact: what it came from, as
-    /// `resources` has it, and the artifacts published with it.
-    Publish { app: usize, tab: String, artifact: String, source: String, from: Vec<String>, with: Vec<String> },
+    /// Publish a file as a canon artifact: a workspace's file with what it
+    /// came from, as `resources` has it, or a take; and the artifacts
+    /// published with it.
+    /// `sources` are the canon artifacts it was made from, with their roles,
+    /// as the asker names them, beside what its step and its record say.
+    Publish { asker: Asker, artifact: String, source: String, from: Vec<String>, with: Vec<String>, sources: Vec<(String, String)> },
     /// Publish an earlier version of an artifact again.
-    Revert { app: usize, tab: String, artifact: String, file: String },
+    Revert { asker: Asker, artifact: String, file: String },
     /// Every version of an artifact, for the history card.
     History { app: usize, tab: String, artifact: String },
 }
@@ -74,10 +111,10 @@ impl HostWindow {
         for (app, started) in self.apps.iter_mut().enumerate() {
             let declared = &mut started.running.declared;
             for (tab, artifact, source, from, with) in declared.publishes.drain(..) {
-                asked.push(Asked::Publish { app, tab, artifact, source, from, with });
+                asked.push(Asked::Publish { asker: Asker::Workspace { app, tab }, artifact, source, from, with, sources: Vec::new() });
             }
             for (tab, artifact, file) in declared.reverts.drain(..) {
-                asked.push(Asked::Revert { app, tab, artifact, file });
+                asked.push(Asked::Revert { asker: Asker::Workspace { app, tab }, artifact, file });
             }
             for (tab, artifact) in declared.canon_histories.drain(..) {
                 asked.push(Asked::History { app, tab, artifact });
@@ -92,30 +129,36 @@ impl HostWindow {
         }
         for asked in asked {
             match asked {
-                Asked::Publish { app, tab, artifact, source: file, .. } | Asked::Revert { app, tab, artifact, file } => {
+                Asked::Publish { asker, artifact, source: file, .. } | Asked::Revert { asker, artifact, file } => {
                     let error = Some(String::from("Only a Skills project has canon to publish into."));
-                    self.answer_published(app, tab, artifact, file, None, error);
+                    self.answer_published(asker, artifact, file, None, error);
                 }
                 Asked::History { app, tab, artifact } => self.send(app, HostMessage::History { tab, artifact, versions: Vec::new() }),
             }
         }
     }
 
+    /// Sends an answer to whoever asked.
+    pub(crate) fn reply(&mut self, reply: Reply) {
+        match reply {
+            Reply::Workspace(app, message) => self.send(app, message),
+            Reply::Assistant(answer) => self.assistant.send(assistant::Command::Result(answer)),
+        }
+    }
+
     /// The runner's answer to a confirmed card: the workspace hears it and
     /// says the publish with its version, and a refusal shows with "Ask the
     /// assistant".
-    pub(crate) fn answer_published(&mut self, app: usize, tab: String, artifact: String, file: String, version: Option<u32>, error: Option<String>) {
-        if let Some(sentence) = &error {
-            self.publishing.refused = Some(Refusal { app, tab: tab.clone(), artifact: artifact.clone(), file: file.clone(), sentence: sentence.clone() });
+    /// The assistant hears it on its call instead, and needs no refusal card.
+    pub(crate) fn answer_published(&mut self, asker: Asker, artifact: String, file: String, version: Option<u32>, error: Option<String>) {
+        if let (Some(sentence), Asker::Workspace { app, tab }) = (&error, &asker) {
+            self.publishing.refused = Some(Refusal { app: *app, tab: tab.clone(), artifact: artifact.clone(), file: file.clone(), sentence: sentence.clone() });
         }
-        self.send(app, HostMessage::Published { tab, artifact, file, version, error });
+        self.reply(published_reply(asker, artifact, file, version, error, false));
     }
 
     /// The runner's history for a workspace's `canon_history`: the
     /// workspace hears it, and the card opens under what was pressed.
-    // Called by the runner's publish, which comes with Chat Assistant Work's
-    // publishing slice.
-    #[allow(dead_code)]
     pub(crate) fn answer_history(&mut self, app: usize, tab: String, artifact: String, versions: Vec<protocol::CanonVersion>) {
         let history = History {
             artifact: artifact.clone(),
@@ -146,8 +189,8 @@ impl HostWindow {
                 PublishCardEvent::Confirm { commit } => self.publishing.confirmed.push_back((card, commit)),
                 // Cancel publishes nothing, and the workspace stops waiting.
                 PublishCardEvent::Cancel => {
-                    if let Asked::Publish { app, tab, artifact, .. } | Asked::Revert { app, tab, artifact, .. } = card.asked {
-                        self.send(app, HostMessage::Published { tab, artifact, file: String::new(), version: None, error: None });
+                    if let Asked::Publish { asker, artifact, .. } | Asked::Revert { asker, artifact, .. } = card.asked {
+                        self.reply(published_reply(asker, artifact, String::new(), None, None, true));
                     }
                 }
             }
@@ -182,5 +225,31 @@ impl HostWindow {
                 self.send(shown.app, HostMessage::Command { id: action.id, tab: Some(shown.tab.clone()), arg: action.arg, node: None, viewport });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches a Cancel heard as a publish, or heard by the wrong asker: a
+    /// workspace hears `published` with no file and no error, and the
+    /// assistant hears on its own call that nothing was published.
+    #[test]
+    fn cancel_answers_whoever_asked() {
+        let workspace = published_reply(Asker::Workspace { app: 2, tab: String::from("1") }, String::from("the diner: layout"), String::new(), None, None, true);
+        assert_eq!(
+            workspace,
+            Reply::Workspace(2, HostMessage::Published { tab: String::from("1"), artifact: String::from("the diner: layout"), file: String::new(), version: None, error: None })
+        );
+        let Reply::Assistant(answer) = published_reply(Asker::Assistant { call: String::from("c7") }, String::from("the diner: layout"), String::new(), None, None, true) else {
+            panic!("the assistant's Cancel went to a workspace");
+        };
+        assert_eq!(answer.call, "c7");
+        assert!(!answer.ok && answer.output["declined"] == true);
+        let Reply::Assistant(published) = published_reply(Asker::Assistant { call: String::from("c8") }, String::from("the diner: layout"), String::from("library/x.png"), Some(3), None, false) else {
+            panic!("the assistant's publish went to a workspace");
+        };
+        assert!(published.ok && published.output["version"] == 3);
     }
 }

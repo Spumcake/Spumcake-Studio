@@ -23,7 +23,9 @@ use std::time::Instant;
 
 mod flows;
 mod canon_steps;
+mod previews;
 mod prompt_runs;
+mod publish_runs;
 mod publishing;
 mod settings;
 #[cfg(test)]
@@ -165,6 +167,9 @@ struct HostWindow {
     prompt_page: crate::prompt_page::PromptPage,
     /// What workspaces asked to publish, and the cards for it.
     publishing: publishing::Publishing,
+    /// The Prompt page's reference previews, asked of the workspaces.
+    previews: previews::Previews,
+    publish_runs: publish_runs::Runs,
     /// Canon reads and skill scripts answered off the window's thread.
     canon_answers: canon_steps::Answers,
     /// Connection tests and model lists, by endpoint.
@@ -301,6 +306,8 @@ impl HostWindow {
             runner: crate::runner::Runner::default(),
             prompt_page: crate::prompt_page::PromptPage::default(),
             publishing: publishing::Publishing::default(),
+            previews: previews::Previews::default(),
+            publish_runs: publish_runs::Runs::default(),
             canon_answers: canon_steps::Answers::default(),
             probes: crate::endpoints::Probes::default(),
             configured: None,
@@ -747,8 +754,10 @@ impl eframe::App for HostWindow {
         self.take_reports();
         self.take_open_ins();
         self.take_publishing();
+        self.run_publishing();
         self.take_canon_steps();
         self.send_canon_answers();
+        self.take_previews();
         // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
         let editable = if self.locked() { Vec::new() } else { self.edited_types() };
@@ -2589,6 +2598,7 @@ impl HostWindow {
                     let shown = view.cell.as_ref().unwrap_or(cell);
                     let model = shown.model.as_deref().map(|model| crate::cells::model_name(ui.ctx(), model));
                     let root = self.project.as_ref().map(|project| project.folder.clone());
+                    self.ask_previews(shown);
                     let card = panel::CardState {
                         cell: Some(shown),
                         running: self.board.running(&cell.id).is_some() || self.prompt_cell_running(&cell.id),
@@ -2597,6 +2607,7 @@ impl HostWindow {
                         cost: view.cost.as_deref(),
                         not_canon: &view.not_canon,
                         root: root.as_deref(),
+                        previews: Some(&self.previews.shown),
                         ..Default::default()
                     };
                     panel::show_with(&mut column, properties.as_ref(), &card, panel_rect)
@@ -2663,6 +2674,16 @@ impl HostWindow {
                     group,
                 } => {
                     if app == route::HOST_ID {
+                        // A take put into the chain goes through the publish
+                        // card, as a workspace's publish does.
+                        if crate::skills_setup::is_project_tool(&tool)
+                            && protocol::split_tool_key(&tool).is_some_and(|(_, _, name)| name == crate::skills_setup::PUBLISH_TAKE)
+                        {
+                            if let Some(answer) = self.publish_take(call, &input) {
+                                self.assistant.send(Command::Result(answer));
+                            }
+                            continue;
+                        }
                         let folder = self.project.as_ref().map(|project| project.folder.clone());
                         let (settings, keys, data) = (&self.settings, &mut self.keys, self.data.clone());
                         let env = |skills: &[crate::skills_setup::Skill]| {

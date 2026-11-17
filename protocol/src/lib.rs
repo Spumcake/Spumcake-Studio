@@ -51,6 +51,10 @@ pub enum AppMessage {
     /// This application edits files of these media types, such as
     /// `image/png`: the host may offer to edit one there, with `open_as_new`.
     Edits { media_types: Vec<String> },
+    /// This application answers `preview` for files of these media types,
+    /// such as a video's first frame or a sound's waveform, without editing
+    /// them. The host asks it before one whose `edits` covers the type.
+    Previews { media_types: Vec<String> },
     /// That tab uses the host's properties panel, on this side.
     Panel { tab: String, side: PanelSide },
     /// The whole drawing after a change. `camera` is present when a drawing
@@ -869,6 +873,7 @@ impl Declaration {
             | AppMessage::RunSkillScript { .. }
             | AppMessage::OpenIn { .. }
             | AppMessage::Edits { .. }
+            | AppMessage::Previews { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
         }
@@ -1488,6 +1493,7 @@ mod tests {
             cell: "c1".into(),
         });
         round_trip_app(AppMessage::Edits { media_types: vec!["image/png".into(), "image/jpeg".into()] });
+        round_trip_app(AppMessage::Previews { media_types: vec!["video/mp4".into(), "audio/wav".into()] });
         round_trip_host(HostMessage::RasterText { tab: "1".into(), input: TextInput::Insert { text: "Hi".into() } });
         round_trip_host(HostMessage::RasterText { tab: "1".into(), input: TextInput::Key { key: TextKey::Left, shift: true, word: false } });
         round_trip_host(HostMessage::RasterText { tab: "1".into(), input: TextInput::Place { at: [1.0, 2.0], extend: true } });

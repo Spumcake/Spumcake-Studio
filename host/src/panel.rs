@@ -1428,10 +1428,12 @@ pub(crate) struct CardState<'a> {
 /// A reference's small image, with words for its corner, such as a
 /// motion reference's "8.0 s".
 #[derive(Clone, Debug, Default)]
-#[allow(dead_code)]
 pub(crate) struct ReferencePreview {
     pub thumbnail: Option<protocol::Thumbnail>,
     pub badge: String,
+    /// A sound's own cue marks, when its file holds them.
+    #[allow(dead_code)]
+    pub cues: Vec<protocol::Cue>,
 }
 
 /// What a cell's card asks of the window and the runner. Each names the

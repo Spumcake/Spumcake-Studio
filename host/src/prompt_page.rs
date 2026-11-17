@@ -36,6 +36,8 @@ pub(crate) struct Canon {
     pub files: HashMap<String, String>,
     /// The files of published artifacts.
     pub published: HashSet<String>,
+    /// The artifact each step makes, by its chain and its name.
+    pub step_artifacts: HashMap<(String, String), String>,
 }
 
 /// The living pipeline: the highest-numbered folder in `pipeline/`, as the
@@ -51,7 +53,8 @@ pub(crate) fn living_pipeline(folder: &Path) -> Option<String> {
 /// Runs one of Skills' scripts that reads, in the project, and returns
 /// what it printed.
 pub(crate) fn script(scripts: &Path, folder: &Path, setup: &[(String, String)], name: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("python3")
+    // Never a key: Studio's own process may hold one from its `.env`.
+    let out = crate::runner::strip_keys(&mut Command::new("python3"))
         .arg(scripts.join(name))
         .args(args)
         .current_dir(folder)
@@ -76,6 +79,15 @@ pub(crate) fn read_canon(scripts: &Path, folder: &Path, setup: &[(String, String
         canon.files.insert(cells[0].to_string(), cells[1].to_string());
         if !cells[2].trim().is_empty() {
             canon.published.insert(cells[1].to_string());
+        }
+    }
+    // Each step's artifact as one JSON row, since a name can hold " | ".
+    let steps = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(chain, name, artifact) FROM step WHERE artifact IS NOT NULL AND artifact != ''", "--read-only"]).unwrap_or_default();
+    for row in steps.lines() {
+        if let Ok(Value::Array(cells)) = serde_json::from_str::<Value>(row)
+            && let [Value::String(chain), Value::String(step), Value::String(artifact)] = cells.as_slice()
+        {
+            canon.step_artifacts.insert((chain.clone(), step.clone()), artifact.clone());
         }
     }
     Ok(canon)
@@ -272,7 +284,7 @@ pub(crate) fn cost_line(plan: &Value, service: &str) -> String {
 }
 
 /// Seconds since the Unix epoch, from a record's `2026-11-14T13:30:00Z`.
-fn epoch(time: &str) -> Option<u64> {
+pub(crate) fn epoch(time: &str) -> Option<u64> {
     let digits: Vec<u64> = time.split(|c: char| !c.is_ascii_digit()).filter(|part| !part.is_empty()).filter_map(|part| part.parse().ok()).collect();
     let [year, month, day, hour, minute, second] = digits.get(..6)?.try_into().ok()?;
     // Days from 1970-01-01 to the date, by the civil-calendar formula.
@@ -357,6 +369,9 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, canon: &
         .enumerate()
         .map(|(index, (_, mut round))| {
             round.number = index as u32 + 1;
+            // The canon artifact the cell's step makes, so its takes can be
+            // published as it.
+            round.artifact = step.and_then(|step| canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned());
             for take in &mut round.takes {
                 take.canon = canon.published.contains(&take.path);
             }

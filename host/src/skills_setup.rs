@@ -30,8 +30,9 @@ const OWN_FOLDERS: [&str; 2] = [".spumcake", ".inpainter"];
 /// The most a read returns at once, so one file never floods the
 /// conversation.
 const MOST_TEXT: usize = 60_000;
-/// The largest image `look` sends, before base64.
-const MOST_IMAGE: u64 = 12 * 1024 * 1024;
+/// The largest image looked at whole, below the byte limit one request's
+/// images keep to.
+const MOST_IMAGE: u64 = 8 * 1024 * 1024;
 /// How deep a skill folder is searched for `SKILL.md`, enough for a
 /// repository's `.project/skills/<category>/<name>/`.
 const SKILL_DEPTH: usize = 5;
@@ -177,6 +178,7 @@ In this project, request.py is the one renderer: a model is called only through 
 Read a skill with read_skill before following it, and read what it links to with read_file, relative to the skill's folder or its repository. \
 Read the project with list_files and read_file, and look at every image you judge with look_at_file. \
 Write by hand only a page of brief/, or a new file in the agent's folder with its line in its index; every other folder is written by the skills' own scripts. \
+Put a take into the chain only with publish_take, after reading what pipeline.py touches says it reaches and telling the user: it shows the publish card, and a commit happens only when the user leaves Commit on. Give it, in from, every canon artifact the take was made from that the skill says to pass with --from. \
 Run a script or any other command with run_command, which the user approves first. Send a request to a model only with send_request, from a spec the skill built and you wrote into the agent's folder, or a pipeline's step with rerun_step: the user approves its plan and cost first. Tell the user, word for word, what request.py tell prints for each request. \
 A prompt for a language model is sent the same way, as a request of its own with send_request, never answered by you, so its answer has a report. \
 A request still at its endpoint has a pending record in requests/; finish it with run_command and request.py collect <id>, or cancel it with request.py cancel <id>, neither of which spends. \
@@ -281,9 +283,38 @@ Research, such as a skill's references, is done here: ask for all the searches o
         ]
         .into_iter()
         .chain(crate::runner::tools())
+        .chain([Tool {
+            name: PUBLISH_TAKE.into(),
+            description: "Put a take into the chain: publish it as a canon artifact through the publish card, which shows the user the version it writes and what a commit takes along, and runs only on their yes. Read pipeline.py touches --artifact \"<artifact>\" --json first and tell the user what it reaches. A take made from inputs that are no longer canon is refused.".into(),
+            input: json!({
+                "type": "object",
+                "properties": {
+                    "take": { "type": "string", "description": "The take's file, relative to the project, such as library/<file>." },
+                    "artifact": { "type": "string", "description": "The canon artifact it is published as, \"<element>: <role>\"." },
+                    "with": { "type": "array", "items": { "type": "string" }, "description": "Takes of its inputs published together with it, each \"<element>: <role>=<request id>\"." },
+                    "from": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "artifact": { "type": "string" }, "role": { "type": "string" } },
+                            "required": ["artifact", "role"],
+                            "additionalProperties": false
+                        },
+                        "description": "Every canon artifact it was made from, \"<element>: <role>\", with the role it played, as the skill says to pass with --from. Those its step and its record name are added."
+                    }
+                },
+                "required": ["take", "artifact"],
+                "additionalProperties": false
+            }),
+            implements: Vec::new(),
+        }])
         .collect(),
     }
 }
+
+/// The assistant's publish of a take, which the window carries out through
+/// the publish card.
+pub(crate) const PUBLISH_TAKE: &str = "publish_take";
 
 /// Whether `tool`, a full tool key, is one of the project tools.
 pub(crate) fn is_project_tool(tool: &str) -> bool {
