@@ -796,6 +796,7 @@ fn notes_row(doc: &Doc) -> LayerRow {
         mark: None,
         detail: None,
         toggle_icon: None,
+        toggle_tip: None,
         value: None,
     }
 }
@@ -873,6 +874,7 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
             mark: Some("link".into()),
             detail: None,
             toggle_icon: None,
+            toggle_tip: None,
             value: None,
         });
     }
@@ -918,6 +920,7 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
         // that it is missing.
         detail: row_detail(node),
         toggle_icon: None,
+        toggle_tip: None,
         value: None,
     });
     if let Some(children) = &node.children {

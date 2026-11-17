@@ -825,26 +825,35 @@ fn flag_button(
         (Flag::Lock, true) => &flags.lock_closed,
         (Flag::Lock, false) => &flags.lock_open,
     };
-    flag_spot(ui, flag, icon, action, x, row, sent);
+    flag_spot(ui, flag, icon, action, None, x, row, sent);
 }
 
 /// A layer row's eye, or, while the layer is shown, the icon it declares
 /// in the eye's place, such as a sound layer's speaker.
 fn eye_button(ui: &mut egui::Ui, node: &LayerRow, flags: &FlagIcons, x: f32, row: Rect, sent: &mut Vec<Sent>) {
+    let tip = node.toggle_tip.as_deref();
     match &node.toggle_icon {
-        Some(icon) if node.visible => flag_spot(ui, Flag::Eye, icon, &node.toggle_visible, x, row, sent),
-        _ => flag_button(ui, Flag::Eye, flags, node.visible, &node.toggle_visible, x, row, sent),
+        Some(icon) if node.visible => flag_spot(ui, Flag::Eye, icon, &node.toggle_visible, tip, x, row, sent),
+        _ => {
+            let icon = if node.visible { &flags.eye_open } else { &flags.eye_closed };
+            flag_spot(ui, Flag::Eye, icon, &node.toggle_visible, tip, x, row, sent);
+        }
     }
 }
 
-/// A row's eye or lock, drawn with `icon`, sending `action` when clicked.
-fn flag_spot(ui: &mut egui::Ui, flag: Flag, icon: &str, action: &Action, x: f32, row: Rect, sent: &mut Vec<Sent>) {
+/// A row's eye or lock, drawn with `icon`, sending `action` when clicked,
+/// with `tip` shown when the pointer rests on it.
+#[allow(clippy::too_many_arguments)]
+fn flag_spot(ui: &mut egui::Ui, flag: Flag, icon: &str, action: &Action, tip: Option<&str>, x: f32, row: Rect, sent: &mut Vec<Sent>) {
     let spot = Rect::from_min_size(pos2(x, row.top()), vec2(S.of(22.0), row.height()));
-    let response = ui.interact(
+    let mut response = ui.interact(
         spot,
         ui.id().with((flag as u8, x.to_bits(), row.top().to_bits())),
         Sense::click_and_drag(),
     );
+    if let Some(tip) = tip {
+        response = response.on_hover_text(tip);
+    }
     toolbar::paint_icon(
         ui.painter(),
         spot.center(),

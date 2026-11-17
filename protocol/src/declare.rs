@@ -461,6 +461,10 @@ pub struct LayerRow {
     /// speaker for a sound layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toggle_icon: Option<String>,
+    /// Shown when the pointer rests on the eye, or the icon in its place,
+    /// such as "Mute" for a sound layer heard and "Unmute" for one muted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toggle_tip: Option<String>,
     /// Words at the row's right, such as "−6 dB".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
