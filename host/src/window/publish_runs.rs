@@ -181,9 +181,10 @@ fn prepare(place: &Place, asked: &Asked) -> Result<PublishCardView, String> {
         Asked::History { .. } => return Err(String::from("Nothing to publish.")),
     };
     let listed = versions(place, artifact)?;
-    // A revert brings back a version already listed, under its own number;
-    // a new file is the next.
-    let version = if revert { version_of(&listed, file).unwrap_or(listed.len() as u32 + 1) } else { listed.len() as u32 + 1 };
+    // Skills' history lists each file once, at its latest publish: a file
+    // already listed, as a revert's is, becomes the newest of the same
+    // count, and a new file the next.
+    let version = if listed.iter().any(|version| &version.file == file) { listed.len() as u32 } else { listed.len() as u32 + 1 };
     let commit = in_git(&place.folder);
     Ok(PublishCardView {
         file: file.clone(),
@@ -212,13 +213,17 @@ fn request_of(place: &Place, file: &str) -> Option<String> {
 /// each canon reference its request's report names. `pipeline.py publish`
 /// checks the take against these and records them, so `touches` and
 /// `rerun` reach it from them in any harness.
-fn sources_of(place: &Place, artifact: &str, request: Option<&str>) -> Result<Vec<(String, String)>, String> {
+fn sources_of(place: &Place, artifact: &str, request: Option<&str>, file: &str, named: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
     let mut sources: Vec<(String, String)> = Vec::new();
     let mut add = |name: &str, role: &str| {
         if !name.is_empty() && !sources.iter().any(|(known, _)| known == name) {
             sources.push((name.to_string(), if role.trim().is_empty() { String::from("input") } else { role.to_string() }));
         }
     };
+    // What the asker names comes first, with its own role.
+    for (name, role) in named {
+        add(name, role);
+    }
     let query = format!("SELECT json_object('refs', refs) FROM step WHERE artifact={}", quoted(artifact));
     let printed = place.script("pipeline.py", &["sql", &place.pipeline, &query, "--read-only"])?;
     for line in printed.lines() {
@@ -237,6 +242,23 @@ fn sources_of(place: &Place, artifact: &str, request: Option<&str>) -> Result<Ve
         for reference in record.get("references").and_then(Value::as_array).into_iter().flatten() {
             let text = |key: &str| reference.get(key).and_then(Value::as_str).unwrap_or("").to_string();
             add(&text("canon"), &text("role"));
+        }
+    }
+    // A file made without a model: the canon artifacts whose files its
+    // record names as inputs.
+    if request.is_none()
+        && let Some(record) = place.script("request.py", &["show", file]).ok().and_then(|shown| serde_json::from_str::<Value>(&shown).ok())
+    {
+        let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+        let lines = match record {
+            Value::Array(lines) => lines,
+            line => vec![line],
+        };
+        for input in lines.iter().flat_map(|line| line.get("inputs").and_then(Value::as_array).cloned().unwrap_or_default()) {
+            let Some(path) = input.get("file").and_then(Value::as_str) else { continue };
+            if let Some((name, _)) = canon.files.iter().find(|(_, published)| published.as_str() == path) {
+                add(name, "input");
+            }
         }
     }
     Ok(sources)
@@ -269,7 +291,7 @@ fn version_of(versions: &[CanonVersion], file: &str) -> Option<u32> {
 fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32>), String> {
     let mut paths: Vec<String> = vec![format!("pipeline/{}", place.pipeline)];
     let (artifact, file, request, made_from, with) = match &card.asked {
-        Asked::Publish { artifact, source, from, with, .. } => {
+        Asked::Publish { artifact, source, from, with, sources, .. } => {
             if source.starts_with("work/") {
                 let stem = Path::new(source).file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_else(|| String::from("published"));
                 // request.py names a resource by the minute and its name, so
@@ -297,6 +319,10 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
                     .filter(|input| !input.starts_with("work/"))
                     .filter_map(|input| canon.files.iter().find(|(_, published)| *published == input).map(|(name, _)| (name.clone(), String::from("input"))))
                     .collect();
+                for (name, role) in sources.iter().rev() {
+                    made_from.retain(|(known, _)| known != name);
+                    made_from.insert(0, (name.clone(), role.clone()));
+                }
                 made_from.dedup();
                 (artifact.clone(), filed, None, made_from, with.clone())
             } else {
@@ -308,13 +334,13 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
                     None => paths.push(String::from("prompts/resources/records.jsonl")),
                 }
                 paths.push(source.clone());
-                let made_from = sources_of(place, artifact, request.as_deref())?;
+                let made_from = sources_of(place, artifact, request.as_deref(), source, sources)?;
                 (artifact.clone(), source.clone(), request, made_from, with.clone())
             }
         }
         Asked::Revert { artifact, file, .. } => {
             let request = versions(place, artifact)?.into_iter().find(|version| &version.file == file).and_then(|version| version.request);
-            let made_from = sources_of(place, artifact, request.as_deref())?;
+            let made_from = sources_of(place, artifact, request.as_deref(), file, &[])?;
             (artifact.clone(), file.clone(), request, made_from, Vec::new())
         }
         Asked::History { .. } => return Err(String::from("Nothing to publish.")),
@@ -378,7 +404,20 @@ impl HostWindow {
             return Some(protocol::ToolResult { call, ok: false, output: serde_json::json!({ "error": "Name the take's file and the canon artifact, \"<element>: <role>\", it is published as." }), images: Vec::new() });
         }
         let with = input.get("with").and_then(Value::as_array).map(|with| with.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default();
-        self.publishing.asked.push_back(Asked::Publish { asker: Asker::Assistant { call }, artifact, source: take, from: Vec::new(), with });
+        let sources = input
+            .get("from")
+            .and_then(Value::as_array)
+            .map(|from| {
+                from.iter()
+                    .filter_map(|source| {
+                        let artifact = source.get("artifact").and_then(Value::as_str)?.trim().to_string();
+                        let role = source.get("role").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                        (!artifact.is_empty()).then_some((artifact, role))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.publishing.asked.push_back(Asked::Publish { asker: Asker::Assistant { call }, artifact, source: take, from: Vec::new(), with, sources });
         None
     }
 
@@ -571,7 +610,7 @@ mod tests {
         std::fs::write(folder.join("work/layout.png"), b"\x89PNG\r\n\x1a\n").unwrap();
         std::fs::write(folder.join("work/Layout.ipx"), b"IPX1\n{}\n").unwrap();
         let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
-        let asked = |from: Vec<String>| Asked::Publish { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: String::from("the diner: layout"), source: String::from("work/layout.png"), from, with: Vec::new() };
+        let asked = |from: Vec<String>| Asked::Publish { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: String::from("the diner: layout"), source: String::from("work/layout.png"), from, with: Vec::new(), sources: Vec::new() };
         assert_eq!(prepare(&place, &asked(vec![String::from("library/never-published.png")])), Err(String::from(NOT_CANON)));
         let view = prepare(&place, &asked(vec![String::from("work/Layout.ipx")])).unwrap();
         assert_eq!((view.version, view.commit, view.revert), (1, true, false));
@@ -593,13 +632,31 @@ mod tests {
         skills("request.py", &["run", "agent/keyframe.json", "--stand-in"]);
         let take = std::fs::read_dir(folder.join("library")).unwrap().flatten().map(|entry| format!("library/{}", entry.file_name().to_string_lossy())).next().unwrap();
         let by_assistant = |artifact: &str, source: &str| {
-            let asked = Asked::Publish { asker: Asker::Assistant { call: String::from("c1") }, artifact: artifact.into(), source: source.into(), from: Vec::new(), with: Vec::new() };
+            let asked = Asked::Publish { asker: Asker::Assistant { call: String::from("c1") }, artifact: artifact.into(), source: source.into(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
             let view = prepare(&place, &asked).unwrap();
             carry(&place, &Card { asked, view }, false)
         };
         by_assistant("the diner: keyframe", &take).unwrap();
         let recorded = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: keyframe' AND source='the diner: layout'", "--read-only"]);
         assert_eq!(recorded.trim(), "image 1", "the take's made_from was lost");
+
+        // A take whose step lists nothing records what the assistant names,
+        // as the skill has the agent pass it by hand.
+        skills("pipeline.py", &["step", "001", "the diner", "sound bed", "--order", "4", "--skill", "generate-sound", "--artifact", "the diner: sound bed"]);
+        std::fs::write(folder.join("agent/bed.wav"), b"RIFF").unwrap();
+        let bed = skills("request.py", &["resource", "agent/bed.wav", "--name", "bed", "--from", &take]).lines().last().unwrap().trim().to_string();
+        let asked = Asked::Publish {
+            asker: Asker::Assistant { call: String::from("c2") },
+            artifact: String::from("the diner: sound bed"),
+            source: bed,
+            from: Vec::new(),
+            with: Vec::new(),
+            sources: vec![(String::from("the diner: keyframe"), String::from("the beat it scores"))],
+        };
+        let view = prepare(&place, &asked).unwrap();
+        carry(&place, &Card { asked, view }, false).unwrap();
+        let named = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
+        assert_eq!(named.trim(), "the beat it scores", "a source the assistant named was lost");
 
         // A built take whose input has been published again since is
         // refused, as the method refuses it.

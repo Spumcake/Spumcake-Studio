@@ -53,7 +53,9 @@ pub(crate) enum Asked {
     /// Publish a file as a canon artifact: a workspace's file with what it
     /// came from, as `resources` has it, or a take; and the artifacts
     /// published with it.
-    Publish { asker: Asker, artifact: String, source: String, from: Vec<String>, with: Vec<String> },
+    /// `sources` are the canon artifacts it was made from, with their roles,
+    /// as the asker names them, beside what its step and its record say.
+    Publish { asker: Asker, artifact: String, source: String, from: Vec<String>, with: Vec<String>, sources: Vec<(String, String)> },
     /// Publish an earlier version of an artifact again.
     Revert { asker: Asker, artifact: String, file: String },
     /// Every version of an artifact, for the history card.
@@ -109,7 +111,7 @@ impl HostWindow {
         for (app, started) in self.apps.iter_mut().enumerate() {
             let declared = &mut started.running.declared;
             for (tab, artifact, source, from, with) in declared.publishes.drain(..) {
-                asked.push(Asked::Publish { asker: Asker::Workspace { app, tab }, artifact, source, from, with });
+                asked.push(Asked::Publish { asker: Asker::Workspace { app, tab }, artifact, source, from, with, sources: Vec::new() });
             }
             for (tab, artifact, file) in declared.reverts.drain(..) {
                 asked.push(Asked::Revert { asker: Asker::Workspace { app, tab }, artifact, file });
