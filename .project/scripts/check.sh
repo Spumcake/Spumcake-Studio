@@ -47,7 +47,7 @@ echo "== tests (the whole workspace)"
 mkdir -p target/tmp
 out=$(TMPDIR="$PWD/target/tmp" cargo test --workspace 2>&1)
 status=$?
-echo "$out" | grep -E '^test result|FAILED|panicked' | grep -v '0 passed; 0 failed' || true
+echo "$out" | grep -E '^test result|FAILED|panicked' | grep -v 'ok\. 0 passed; 0 failed' || true
 [ "$status" -eq 0 ] || fail "cargo test (run it to see the failures)"
 passed=$(echo "$out" | awk '/^test result/ {n += $4} END {print n}')
 echo "$passed tests passed"

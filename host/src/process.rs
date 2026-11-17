@@ -106,6 +106,10 @@ pub struct Declared {
     pub tool_groups_version: u64,
     /// The media types it edits, as its `edits` declared.
     pub edits: Vec<String>,
+    /// The media types it previews, as its `previews` declared.
+    pub previews: Vec<String>,
+    /// Its answers to `preview`, by the id asked with.
+    pub previewed: VecDeque<(String, crate::panel::ReferencePreview)>,
     /// Answers to `invoke` not yet passed to the assistant.
     pub results: VecDeque<ToolResult>,
     /// Answers to `keep`: the tab, and its file or none when cancelled.
@@ -617,6 +621,7 @@ impl Running {
                 declared.tool_groups_version += 1;
             }
             AppMessage::Edits { media_types } => declared.edits = media_types,
+            AppMessage::Previews { media_types } => declared.previews = media_types,
             AppMessage::Clipboard { text } => declared.clipboard.push_back(text),
             AppMessage::ToolResult(result) => declared.results.push_back(result),
             AppMessage::Kept { tab, path, error } => declared.kept.push_back((tab, path, error)),
@@ -666,9 +671,11 @@ impl Running {
             AppMessage::OpenIn { path, media_type } => declared.open_ins.push_back((path, media_type)),
             AppMessage::RunSkillScript { id, skill, script, args } => declared.skill_scripts.push_back((id, skill, script, args)),
             AppMessage::AskAssistant { text, items } => declared.ask_assistant.push_back((text, items)),
-            // The Prompt page's previews are drawn by the work that builds
-            // them; until then they are read and let go.
-            AppMessage::Previewed { .. } => {}
+            // A failed preview keeps the row's own icon.
+            AppMessage::Previewed { id, thumbnail, badge, cues, error: None } => {
+                declared.previewed.push_back((id, crate::panel::ReferencePreview { thumbnail, badge, cues }));
+            }
+            AppMessage::Previewed { id, .. } => declared.previewed.push_back((id, crate::panel::ReferencePreview::default())),
         }
     }
 
