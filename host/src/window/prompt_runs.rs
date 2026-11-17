@@ -57,6 +57,11 @@ impl HostWindow {
     /// sent to its workspace when they changed.
     pub(super) fn prompt_card_view(&mut self, app: usize, tab: &str, cell: &Cell) -> Option<CardView> {
         let (folder, env) = self.skills_project()?;
+        // A model's name arrived: rounds go again, named.
+        let data = self.data.clone();
+        if self.prompt_page.names.arrived(data.as_deref()) {
+            self.prompt_page.resend_rounds();
+        }
         let scripts = env.scripts.clone()?;
         let at = self.cell_item(app, tab, &cell.id);
         let view = self.prompt_page.card(&folder, &scripts, &env.vars, &self.settings, cell, &at);
@@ -251,16 +256,35 @@ impl HostWindow {
     }
 
     /// Each round with its model's name, the one the card shows.
-    fn named(&self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
+    fn named(&mut self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
         rounds
             .into_iter()
             .map(|mut round| {
                 if !round.model.is_empty() {
-                    round.model_name = crate::cells::model_name(&self.ctx, &round.model);
+                    round.model_name = self.model_name(&round.model);
                 }
                 round
             })
             .collect()
+    }
+
+    /// A model's name as the card shows it, or, for a model no endpoint's
+    /// list names, such as a video model on fal, fal's own name for it once
+    /// it has arrived.
+    fn model_name(&mut self, model: &str) -> String {
+        let shown = crate::cells::model_name(&self.ctx, model);
+        let tail = model.rsplit('/').next().unwrap_or(model);
+        if shown != tail || !model.contains('/') {
+            return shown;
+        }
+        let data = self.data.clone();
+        // What this computer holds first, so a project opens offline named;
+        // the network only when nothing here names it.
+        let skills = crate::skills_setup::listed_skills(&self.settings.skill_folders);
+        if let Some(name) = crate::prices::local_name(&skills, data.as_deref(), model) {
+            return name;
+        }
+        self.prompt_page.names.name(data.as_deref(), model).unwrap_or(shown)
     }
 
     /// When the agent records a step with the request a draft cell made,
