@@ -224,6 +224,8 @@ impl HostWindow {
                 if let Ok(app) = app.parse::<usize>() {
                     self.send(app, HostMessage::Filed { id: id.to_string(), file, error });
                 }
+            } else if answer.call.starts_with("steprun:") {
+                self.answer_step_run(answer);
             } else if answer.call.starts_with("step:") {
                 self.answer_step_edit(answer);
             } else {
@@ -269,6 +271,10 @@ impl HostWindow {
         let Some(id) = crate::prompt_page::cell_of_request(&folder, &request).and_then(|item| item.item) else { return };
         let Some((app, tab)) = self.cell_home(&id) else { return };
         self.prompt_page.forget();
-        self.send(app, HostMessage::CellBecameStep { tab, cell: id, step, artifact: None });
+        let artifact = self.skills_project().and_then(|(folder, env)| {
+            let scripts = env.scripts.clone()?;
+            self.prompt_page.canon(&folder, &scripts, &env.vars).step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned()
+        });
+        self.send(app, HostMessage::CellBecameStep { tab, cell: id, step, artifact });
     }
 }

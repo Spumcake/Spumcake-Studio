@@ -24,6 +24,7 @@ use std::time::Instant;
 mod flows;
 mod canon_steps;
 mod prompt_runs;
+mod publish_runs;
 mod publishing;
 mod settings;
 #[cfg(test)]
@@ -163,6 +164,7 @@ struct HostWindow {
     prompt_page: crate::prompt_page::PromptPage,
     /// What workspaces asked to publish, and the cards for it.
     publishing: publishing::Publishing,
+    publish_runs: publish_runs::Runs,
     /// Connection tests and model lists, by endpoint.
     probes: crate::endpoints::Probes,
     /// The assistant's endpoint and prompt as last sent, so a change in
@@ -291,6 +293,7 @@ impl HostWindow {
             runner: crate::runner::Runner::default(),
             prompt_page: crate::prompt_page::PromptPage::default(),
             publishing: publishing::Publishing::default(),
+            publish_runs: publish_runs::Runs::default(),
             probes: crate::endpoints::Probes::default(),
             configured: None,
             level: None,
@@ -735,6 +738,7 @@ impl eframe::App for HostWindow {
         self.take_items();
         self.take_reports();
         self.take_publishing();
+        self.run_publishing();
         self.take_canon_steps();
         // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
@@ -2618,6 +2622,16 @@ impl HostWindow {
                     group,
                 } => {
                     if app == route::HOST_ID {
+                        // A take put into the chain goes through the publish
+                        // card, as a workspace's publish does.
+                        if crate::skills_setup::is_project_tool(&tool)
+                            && protocol::split_tool_key(&tool).is_some_and(|(_, _, name)| name == crate::skills_setup::PUBLISH_TAKE)
+                        {
+                            if let Some(answer) = self.publish_take(call, &input) {
+                                self.assistant.send(Command::Result(answer));
+                            }
+                            continue;
+                        }
                         let folder = self.project.as_ref().map(|project| project.folder.clone());
                         let (settings, keys, data) = (&self.settings, &mut self.keys, self.data.clone());
                         let env = |skills: &[crate::skills_setup::Skill]| {
