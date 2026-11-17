@@ -132,14 +132,41 @@ pub struct Read {
     /// The bed's sound and each voice's sound.
     pub bed: u64,
     pub voices: Vec<u64>,
-    /// Holds published as rough boards: each by its clip and its first
-    /// frame in the clip, with its file in the project.
-    pub boards: Vec<(u64, u32, String)>,
+    /// Holds published as rough boards.
+    pub boards: Vec<RoughBoard>,
     /// The project's animatic step it came from, by chain and name.
     pub step: Option<(String, String)>,
 }
 
+/// A hold published as a rough board: by its clip and its first frame in
+/// the clip, with its file in the project, and a stamp of what the hold
+/// showed, so drawing on it again is seen as not published.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoughBoard {
+    pub clip: u64,
+    pub frame: u32,
+    pub file: String,
+    pub stamp: String,
+}
+
 impl Read {
+    /// `other`'s file and timing, keeping this one's step and rough boards,
+    /// as undo and redo of a Follow do.
+    pub fn take_timing(&mut self, other: &Read) {
+        self.path = other.path.clone();
+        self.fingerprint = other.fingerprint.clone();
+        self.assembly = other.assembly.clone();
+        self.clips = other.clips.clone();
+        self.bed = other.bed;
+        self.voices = other.voices.clone();
+    }
+
+    /// The rough board a hold was published as, while it shows what it
+    /// showed then.
+    pub fn board(&self, clip: u64, frame: u32, stamp: &str) -> Option<&RoughBoard> {
+        self.boards.iter().find(|board| board.clip == clip && board.frame == frame && board.stamp == stamp)
+    }
+
     pub fn to_value(&self) -> Value {
         json!({
             "path": self.path,
@@ -148,7 +175,7 @@ impl Read {
             "clips": self.clips,
             "bed": self.bed,
             "voices": self.voices,
-            "boards": self.boards.iter().map(|(clip, frame, file)| json!({ "clip": clip, "frame": frame, "file": file })).collect::<Vec<_>>(),
+            "boards": self.boards.iter().map(|board| json!({ "clip": board.clip, "frame": board.frame, "file": board.file, "stamp": board.stamp })).collect::<Vec<_>>(),
             "step": self.step.as_ref().map(|(chain, name)| json!({ "chain": chain, "name": name })),
         })
     }
@@ -157,7 +184,14 @@ impl Read {
         let ids = |key: &str| -> Option<Vec<u64>> { value.get(key)?.as_array()?.iter().map(Value::as_u64).collect() };
         let mut boards = Vec::new();
         for board in value.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
-            boards.push((board.get("clip")?.as_u64()?, board.get("frame")?.as_u64()? as u32, board.get("file")?.as_str()?.to_string()));
+            boards.push(RoughBoard {
+                clip: board.get("clip")?.as_u64()?,
+                frame: board.get("frame")?.as_u64()? as u32,
+                file: board.get("file")?.as_str()?.to_string(),
+                // A board kept with no stamp matches no hold, so it is
+                // published again before it is used.
+                stamp: board.get("stamp").and_then(Value::as_str).unwrap_or_default().to_string(),
+            });
         }
         Some(Read {
             path: value.get("path")?.as_str()?.to_string(),
@@ -198,20 +232,24 @@ pub fn open(assembly: &Assembly, title: &str, path: &str, fingerprint: &str, mut
     let (bed_track, bed) = film.place_sound(None, 0, &assembly.bed.audio, &name(&assembly.bed.audio), bed_source).expect("a new track has room");
     film.set_sound_span(bed, Some(0), Some(0), Some(length.min(bed_source).max(1)));
     film.set_sound_volume(bed, volume_of(assembly.bed.gain_db).min(1.0));
-    // The voices, on a track of their own; two that overlap once rounded
-    // to frames go on two tracks, so neither time is changed.
+    // The voices, on tracks after the bed's, never on it, even where the
+    // bed ends early; two that overlap once rounded to frames go on two
+    // tracks, so neither time is changed.
     let mut voices = Vec::new();
-    if !assembly.clips.is_empty() {
-        let track = film.add_sound_track();
-        for voice in &assembly.clips {
-            let source = length_of(&voice.audio).unwrap_or_else(|| frame_of(voice.to)).max(1);
-            let span = frame_of(voice.to).saturating_sub(frame_of(voice.from)).max(1);
-            let Some((_, id)) = film.lay_sound(Some(track), frame_of(voice.at), frame_of(voice.from), span, source, &voice.audio, &name(&voice.audio)) else {
-                continue;
-            };
-            film.set_sound_volume(id, volume_of(voice.gain_db).min(1.0));
-            voices.push(id);
-        }
+    for voice in &assembly.clips {
+        let source = length_of(&voice.audio).unwrap_or_else(|| frame_of(voice.to)).max(1);
+        let from = frame_of(voice.from).min(source - 1);
+        let span = frame_of(voice.to).saturating_sub(frame_of(voice.from)).clamp(1, source - from);
+        let at = frame_of(voice.at);
+        let track = match film.sound_tracks.iter().skip(1).find(|track| track.fits(at, span)) {
+            Some(track) => track.id,
+            None => film.add_sound_track(),
+        };
+        let Some((_, id)) = film.lay_sound(Some(track), at, from, span, source, &voice.audio, &name(&voice.audio)) else {
+            continue;
+        };
+        film.set_sound_volume(id, volume_of(voice.gain_db).min(1.0));
+        voices.push(id);
     }
     let _ = bed_track;
     let read = Read {
@@ -225,6 +263,151 @@ pub fn open(assembly: &Assembly, title: &str, path: &str, fingerprint: &str, mut
         step: None,
     };
     (film, drawings, read)
+}
+
+/// Follows a retime made in another tool: `film`, which read `old`, takes
+/// the timing of `assembly`, which `fresh` and `fresh_read` were opened
+/// from. Each of the assembly's frames goes to the clip that held the same
+/// frame before, by its place when the count is the same and else by its
+/// image, so a clip saved as several holds keeps its drawing on each; a
+/// frame no clip held becomes a new clip. The sound is the assembly's, with
+/// ids of the film's own. Returns the drawings new clips need and what the
+/// storyboard now read.
+pub fn follow(film: &mut Film, old: &Read, assembly: &Assembly, fresh: &Film, fresh_read: &Read) -> (Vec<NewDrawing>, Read) {
+    // Which old frame each new frame was, if any.
+    let mut was: Vec<Option<usize>> = Vec::new();
+    if assembly.frames.len() == old.assembly.frames.len() {
+        was.extend((0..assembly.frames.len()).map(Some));
+    } else {
+        let mut used = vec![false; old.assembly.frames.len()];
+        for frame in &assembly.frames {
+            let found = old.assembly.frames.iter().enumerate().position(|(index, before)| !used[index] && before.image == frame.image);
+            if let Some(index) = found {
+                used[index] = true;
+            }
+            was.push(found);
+        }
+    }
+    // Runs of new frames that one clip of the film held.
+    let place = |index: usize| fresh_read.clips.get(index).and_then(|id| fresh.clip(*id)).map_or((0, 1), |clip| (clip.start, clip.length));
+    let mut runs: Vec<(Option<u64>, Vec<usize>)> = Vec::new();
+    for index in 0..assembly.frames.len() {
+        let owner = was[index].and_then(|before| old.clips.get(before).copied()).filter(|id| film.clip(*id).is_some());
+        match runs.last_mut() {
+            Some((last, frames)) if owner.is_some() && *last == owner => frames.push(index),
+            _ => {
+                // A clip met again after another is a new clip.
+                let owner = owner.filter(|id| !runs.iter().any(|(other, _)| *other == Some(*id)));
+                runs.push((owner, vec![index]));
+            }
+        }
+    }
+    let kept: Vec<u64> = runs.iter().filter_map(|(owner, _)| *owner).collect();
+    film.clips.retain(|clip| kept.contains(&clip.id));
+    let mut made = Vec::new();
+    let mut clips = vec![0; assembly.frames.len()];
+    let mut moved: Vec<(u64, std::collections::HashMap<u32, u32>)> = Vec::new();
+    for (owner, frames) in &runs {
+        let (start, _) = place(frames[0]);
+        let (last_start, last_length) = place(*frames.last().unwrap_or(&frames[0]));
+        let length = (last_start + last_length).saturating_sub(start).max(1);
+        let Some(id) = owner else {
+            continue;
+        };
+        let Some(clip) = film.clip_mut(*id) else {
+            continue;
+        };
+        // Its holds, in order, move to the new frames' places in it, as
+        // `holds_of` counts them: from 0, and the keys inside the clip.
+        let was_length = clip.length;
+        let mut holds: Vec<u32> = vec![0];
+        holds.extend(clip.layers.iter().filter(|layer| !layer.folder).flat_map(|layer| layer.keys.iter().map(|key| key.frame)).filter(|frame| *frame < was_length));
+        holds.sort_unstable();
+        holds.dedup();
+        clip.start = start;
+        clip.length = length;
+        let mut map = std::collections::HashMap::new();
+        if holds.len() == frames.len() {
+            for (hold, index) in holds.iter().zip(frames) {
+                map.insert(*hold, place(*index).0.saturating_sub(start));
+            }
+            // A key or a mark moves with the hold it is in, and stays inside
+            // the clip; keys past the clip's end stay where they were.
+            let moved = |frame: u32| {
+                let hold = holds.iter().rev().find(|hold| **hold <= frame).copied().unwrap_or(0);
+                (map[&hold] + (frame - hold)).min(length.saturating_sub(1))
+            };
+            for layer in &mut clip.layers {
+                for key in layer.keys.iter_mut().filter(|key| key.frame < was_length) {
+                    key.frame = moved(key.frame);
+                }
+                for mark in layer.marks.iter_mut().filter(|mark| mark.frame < was_length) {
+                    mark.frame = moved(mark.frame);
+                }
+            }
+        }
+        // A frame whose image changed shows the new image under its drawing.
+        for index in frames {
+            let image = &assembly.frames[*index].image;
+            let before = was[*index].and_then(|before| old.assembly.frames.get(before)).map(|frame| &frame.image);
+            if before != Some(image)
+                && let Some(layer) = clip.layers.iter_mut().rev().find(|layer| !layer.folder)
+                && let Some(key) = layer.key_at(place(*index).0.saturating_sub(start)).map(|key| key.id)
+            {
+                layer.images.insert(key, image.clone());
+            }
+            clips[*index] = *id;
+        }
+        moved.push((*id, map));
+    }
+    for (owner, frames) in &runs {
+        if owner.is_some() {
+            continue;
+        }
+        let (start, _) = place(frames[0]);
+        let (last_start, last_length) = place(*frames.last().unwrap_or(&frames[0]));
+        let (id, drawings) = film.add_clip(Some(start), (last_start + last_length).saturating_sub(start).max(1));
+        made.extend(drawings);
+        if let Some(layer) = film.clip_mut(id).and_then(|clip| clip.layers.first_mut())
+            && let Some(key) = layer.keys.first().map(|key| key.id)
+        {
+            layer.images.insert(key, assembly.frames[frames[0]].image.clone());
+        }
+        for index in frames {
+            clips[*index] = id;
+        }
+    }
+    film.clips.sort_by_key(|clip| clip.start);
+    // The sound as the assembly has it, with ids the film has not used.
+    let mut ids = std::collections::HashMap::new();
+    let mut tracks = fresh.sound_tracks.clone();
+    for track in &mut tracks {
+        track.id = film.id();
+        for sound in &mut track.clips {
+            let id = film.id();
+            ids.insert(sound.id, id);
+            sound.id = id;
+        }
+    }
+    film.sound_tracks = tracks;
+    let mut boards = old.boards.clone();
+    boards.retain(|board| kept.contains(&board.clip));
+    for board in &mut boards {
+        if let Some(to) = moved.iter().find(|(id, _)| *id == board.clip).and_then(|(_, map)| map.get(&board.frame)) {
+            board.frame = *to;
+        }
+    }
+    let read = Read {
+        path: fresh_read.path.clone(),
+        fingerprint: fresh_read.fingerprint.clone(),
+        assembly: assembly.clone(),
+        clips,
+        bed: ids.get(&fresh_read.bed).copied().unwrap_or(fresh_read.bed),
+        voices: fresh_read.voices.iter().map(|id| ids.get(id).copied().unwrap_or(*id)).collect(),
+        boards,
+        step: old.step.clone(),
+    };
+    (made, read)
 }
 
 /// Why a film cannot be saved as an assembly, as a sentence.
@@ -242,7 +425,7 @@ pub struct Notes {
 
 impl Notes {
     /// The storyboard's memory of an assembly it has just saved as `path`.
-    pub fn read(&self, assembly: Assembly, path: &str, fingerprint: &str, boards: Vec<(u64, u32, String)>) -> Read {
+    pub fn read(&self, assembly: Assembly, path: &str, fingerprint: &str, boards: Vec<RoughBoard>) -> Read {
         Read {
             path: path.to_string(),
             fingerprint: fingerprint.to_string(),
@@ -294,27 +477,26 @@ pub fn save(film: &Film, read: Option<&Read>, holds: impl Fn(u64) -> Vec<Hold>, 
         Some(seconds) if frame_of(seconds) == frame => seconds,
         _ => seconds_of(frame),
     };
-    let read_frame = |clip: u64| -> Option<&Frame> {
-        let read = read?;
-        let index = read.clips.iter().position(|id| *id == clip)?;
-        read.assembly.frames.get(index)
+    // The frames a clip was read as, in order.
+    let read_frames = |clip: u64| -> Vec<&Frame> {
+        read.map(|read| read.clips.iter().zip(&read.assembly.frames).filter(|(id, _)| **id == clip).map(|(_, frame)| frame).collect()).unwrap_or_default()
     };
     let mut frames = Vec::new();
     let mut frame_clips = Vec::new();
     for clip in &film.clips {
-        let was = read_frame(clip.id);
+        let was = read_frames(clip.id);
         let clip_holds = holds(clip.id);
-        let one = clip_holds.len() == 1;
-        for hold in clip_holds {
+        let same = was.len() == clip_holds.len();
+        for (index, hold) in clip_holds.into_iter().enumerate() {
             let Some(image) = hold.image else {
                 return Err(format!("{} has drawing that is not published yet. Publish it first.", clip.name));
             };
             let start = clip.start + hold.start;
             let end = start + hold.length;
-            // A clip held whole keeps its times as read; a clip split into
-            // holds is new timing.
-            let (start_seconds, end_seconds) = match was {
-                Some(was) if one => (time(Some(was.start), start), time(Some(was.end), end)),
+            // A clip read as as many frames as it has holds keeps their
+            // times as read; a clip split into holds since is new timing.
+            let (start_seconds, end_seconds) = match was.get(index) {
+                Some(was) if same => (time(Some(was.start), start), time(Some(was.end), end)),
                 _ => (seconds_of(start), seconds_of(end)),
             };
             frames.push(Frame { image, start: start_seconds, end: end_seconds });
@@ -500,6 +682,18 @@ mod tests {
         // tracks rather than either moving.
         assert_eq!(voices, [(101, 1, 15), (115, 49, 31)]);
         assert_eq!(film.sound_tracks.len(), 3);
+    }
+
+    #[test]
+    fn a_short_bed_keeps_its_track_to_itself() {
+        // A bed of 2 s under an 8 s film: the voices at 4.2 and 4.8 s fit
+        // after it, and still go on tracks of their own.
+        let short = |file: &str| Some(if file.contains("scene-3") { 48 } else { 98 });
+        let (film, _, read) = open(&last_order(), "Last order", "prompts/resources/a.json", "f", short);
+        assert_eq!(film.sound_tracks[0].clips.len(), 1);
+        assert_eq!(film.sound_tracks[0].clips[0].id, read.bed);
+        let saved = save(&film, Some(&read), plain_holds(&film), Some(8.0)).unwrap().0;
+        assert_eq!(saved.clips, last_order().clips);
     }
 
     #[test]

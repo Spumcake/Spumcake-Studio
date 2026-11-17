@@ -83,7 +83,7 @@ impl SoundTrack {
     }
 
     /// Whether `at .. at + length` is free.
-    fn fits(&self, at: u32, length: u32) -> bool {
+    pub(crate) fn fits(&self, at: u32, length: u32) -> bool {
         self.clips.iter().all(|clip| clip.end() <= at || clip.at >= at + length)
     }
 

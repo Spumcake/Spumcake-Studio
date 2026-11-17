@@ -360,7 +360,7 @@ pub struct Session {
     skills: bool,
     /// Holds asked to be published, by their artifact: the storyboard, the
     /// clip, and the hold's first frame in it.
-    publishing: HashMap<String, (DrawingId, u64, u32)>,
+    publishing: HashMap<String, (DrawingId, u64, u32, String)>,
     /// Publishes asked for and not yet sent to the host: the artifact, the
     /// file, and where it came from.
     to_publish: Vec<(String, String, Vec<String>)>,
@@ -375,9 +375,12 @@ pub struct Session {
     published_files: HashMap<String, String>,
     /// A Save timing to the project under way.
     saving: Option<project::Saving>,
-    /// The assembly the open animatic's step names now, when it was
-    /// retimed in another tool.
-    retimed: Option<String>,
+    /// A storyboard opened from the animatic, and the assembly the step
+    /// names now, when it was retimed in another tool.
+    retimed: Option<(DrawingId, String)>,
+    /// The last Save timing to the project that finished: the storyboard
+    /// and the assembly it filed.
+    last_saved: Option<(DrawingId, String)>,
     last_check: Option<std::time::Instant>,
 }
 
@@ -447,6 +450,7 @@ impl Session {
             published_files: HashMap::new(),
             saving: None,
             retimed: None,
+            last_saved: None,
             last_check: None,
         };
         session.push_blank();

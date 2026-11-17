@@ -6,12 +6,17 @@
 
 use super::Session;
 use crate::assembly::{Assembly, Notes};
+use draw::document::DrawingId;
 use protocol::{Action, AppMessage, Notice, NoticeAction, NoticeState};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
 /// How often an open animatic asks whether it was retimed elsewhere.
 pub const CHECK_EVERY: Duration = Duration::from_secs(5);
+
+/// How long a Save timing to the project waits for each answer, which
+/// includes the person's yes on the step's edit, before it gives up.
+pub const SAVE_WAIT: Duration = Duration::from_secs(600);
 
 /// The columns of one answer row, joined by the unit separator so a script
 /// or a reference never splits a row.
@@ -70,14 +75,17 @@ pub fn writer_args(assembly: &Assembly) -> Vec<String> {
 pub enum Asked {
     /// Open animatic, of the step named, or the first.
     Open(Option<String>),
-    /// Whether the open animatic was retimed elsewhere.
-    Check,
+    /// Whether the animatic a storyboard read was retimed elsewhere.
+    Check(DrawingId),
     Artifacts,
 }
 
-/// A Save timing to the project under way.
+/// A Save timing to the project under way, for the storyboard that asked.
 #[derive(Clone, Debug)]
 pub struct Saving {
+    pub storyboard: DrawingId,
+    /// When the last ask went out.
+    pub since: Instant,
     pub assembly: Assembly,
     pub notes: Notes,
     pub refs: Vec<Value>,
@@ -142,15 +150,23 @@ impl Session {
         Ok(())
     }
 
-    /// Asks, now and then, whether the open animatic's step names another
-    /// assembly than the one the storyboard read.
+    /// Asks, now and then, whether the shown animatic's step names another
+    /// assembly than the one the storyboard read: never while it plays, nor
+    /// while the last ask is unanswered. A save that waited too long for
+    /// the host gives up with a card.
     pub fn check_retimed(&mut self, now: Instant) {
+        if self.saving.as_ref().is_some_and(|saving| now.duration_since(saving.since) >= SAVE_WAIT) {
+            self.saving = None;
+            self.timing_refused("The project did not answer.");
+        }
         let has_step = self.active_storyboard().assembly().is_some_and(|read| read.step.is_some());
-        if !self.skills || !has_step || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
+        let asking = self.canon_asked.values().any(|asked| matches!(asked, Asked::Check(_)));
+        if !self.skills || !has_step || asking || self.is_playing() || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
             return;
         }
         self.last_check = Some(now);
-        self.ask_canon(STEPS, Asked::Check);
+        let storyboard = self.active_id();
+        self.ask_canon(STEPS, Asked::Check(storyboard));
     }
 
     /// The host's answer to a canon read.
@@ -192,8 +208,8 @@ impl Session {
                     self.keep_failed(id, "Animatic not opened", &reason);
                 }
             }
-            Asked::Check => {
-                let Some(read) = self.active_storyboard().assembly().cloned() else {
+            Asked::Check(storyboard) => {
+                let Some(read) = self.index_of(storyboard).and_then(|index| self.storyboards[index].assembly().cloned()) else {
                     return;
                 };
                 let Some((chain, name)) = read.step.clone() else {
@@ -206,8 +222,8 @@ impl Session {
                 let current = crate::assembly::named_in(&step.script);
                 // Retimed elsewhere: the step names another file than the
                 // one read, which Studio did not save.
-                let ours = self.saving.as_ref().and_then(|saving| saving.file.clone());
-                self.retimed = current.filter(|file| *file != read.path && Some(file) != ours.as_ref());
+                let ours = self.saving.as_ref().filter(|saving| saving.storyboard == storyboard).and_then(|saving| saving.file.clone());
+                self.retimed = current.filter(|file| *file != read.path && Some(file) != ours.as_ref()).map(|file| (storyboard, file));
             }
         }
     }
@@ -241,9 +257,9 @@ impl Session {
         // animatic had, which is canon too.
         let (assembly, notes) = self.timing(Some(read.assembly.length))?;
         let mut files = self.canon_files.clone();
-        for (_, _, file) in &read.boards {
-            if let Some(artifact) = self.published_files.get(file) {
-                files.insert(file.clone(), artifact.clone());
+        for board in &read.boards {
+            if let Some(artifact) = self.published_files.get(&board.file) {
+                files.insert(board.file.clone(), artifact.clone());
             }
         }
         let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned())?;
@@ -256,7 +272,8 @@ impl Session {
             script: "write-assembly.py".to_string(),
             args: writer_args(&assembly),
         });
-        self.saving = Some(Saving { assembly, notes, refs, step, file: None, waiting: id });
+        let storyboard = self.active_id();
+        self.saving = Some(Saving { storyboard, since: Instant::now(), assembly, notes, refs, step, file: None, waiting: id });
         Ok(())
     }
 
@@ -280,6 +297,17 @@ impl Session {
         self.keep_failed(id, "Timing not saved", reason);
     }
 
+    /// Open animatic, Follow, or Publish hold failed, by hand: a card says
+    /// why, under `text`, or alone when there is none.
+    pub fn failed_by_hand(&mut self, text: Option<&str>, reason: &str) {
+        let id = self.next_notice;
+        self.next_notice += 1;
+        match text {
+            Some(text) => self.keep_failed(id, text, reason),
+            None => self.keep_failed(id, reason, ""),
+        }
+    }
+
     /// The host filed a file: the saved timing, now pointed at by the step.
     pub fn filed(&mut self, id: &str, file: &str, error: Option<&str>) {
         let Some(saving) = self.saving.as_mut().filter(|saving| saving.waiting == id) else {
@@ -295,17 +323,20 @@ impl Session {
         }
         let Some(script) = crate::assembly::repoint(&saving.step.script, file) else {
             self.saving = None;
+            self.timing_refused("The animatic's step names no assembly.");
             return;
         };
         saving.file = Some(file.to_string());
         let refs = Value::Array(saving.refs.clone()).to_string();
         let step = saving.step.step_ref();
         let id = self.next_request();
+        let mut tab = self.tab();
         if let Some(saving) = self.saving.as_mut() {
             saving.waiting = id.clone();
+            saving.since = Instant::now();
             saving.step.script = script.clone();
+            tab = saving.storyboard.get().to_string();
         }
-        let tab = self.tab();
         self.outgoing.push(AppMessage::EditStep { id, tab, step, script: Some(script), refs: Some(refs) });
     }
 
@@ -323,14 +354,21 @@ impl Session {
         }
         let file = saving.file.clone().unwrap_or_default();
         let bytes = self.project.as_ref().and_then(|project| std::fs::read(project.join(&file)).ok()).unwrap_or_default();
-        self.timing_saved(saving.assembly, &saving.notes, &file, &protocol::fingerprint(&bytes));
         self.steps.insert(saving.step.key(), saving.step.clone());
-        let record = self.active_storyboard_mut();
-        if let Some(mut read) = record.assembly().cloned() {
-            read.step = Some((saving.step.chain.clone(), saving.step.name.clone()));
-            record.set_assembly(Some(read));
+        // The storyboard that saved reads it, wherever the person is now.
+        if self.timing_saved(saving.storyboard, saving.assembly, &saving.notes, &file, &protocol::fingerprint(&bytes))
+            && let Some(index) = self.index_of(saving.storyboard)
+        {
+            let record = &mut self.storyboards[index];
+            if let Some(mut read) = record.assembly().cloned() {
+                read.step = Some((saving.step.chain.clone(), saving.step.name.clone()));
+                record.set_assembly(Some(read));
+            }
         }
-        self.retimed = None;
+        if self.retimed.as_ref().is_some_and(|(storyboard, _)| *storyboard == saving.storyboard) {
+            self.retimed = None;
+        }
+        self.last_saved = Some((saving.storyboard, file.clone()));
         let id = self.next_notice;
         self.next_notice += 1;
         self.keep_notice(Notice {
@@ -344,9 +382,9 @@ impl Session {
         });
     }
 
-    /// The card while the open animatic was retimed in another tool.
+    /// The card while the shown animatic was retimed in another tool.
     pub(crate) fn retimed_notice(&self) -> Option<Notice> {
-        self.retimed.as_ref()?;
+        self.retimed()?;
         Some(Notice {
             id: "retimed".to_string(),
             text: "Retimed in another tool".to_string(),
@@ -358,15 +396,20 @@ impl Session {
         })
     }
 
+    /// The assembly the shown animatic's step now names, when it was
+    /// retimed in another tool.
     pub fn retimed(&self) -> Option<&str> {
-        self.retimed.as_deref()
+        self.retimed.as_ref().filter(|(storyboard, _)| *storyboard == self.active_id()).map(|(_, file)| file.as_str())
     }
 
-    /// Follow: the open animatic takes the timing the step now names, as one
-    /// undo step, keeping each clip's drawing by its place in the film.
+    /// Follow: the shown animatic takes the timing the step now names, as
+    /// one undo step, which also takes back what it read. Each clip keeps
+    /// its drawing on the frames it held.
     pub fn follow_retime(&mut self) -> Result<(), String> {
-        let file = self.retimed.clone().ok_or("The animatic was not retimed elsewhere.")?;
+        let file = self.retimed().map(str::to_string).ok_or("The animatic was not retimed elsewhere.")?;
         let project = self.project.clone().ok_or("No project folder.")?;
+        // A gesture still open is committed first, so Follow keeps it.
+        self.settle();
         let bytes = std::fs::read(project.join(&file)).map_err(|error| crate::store::reason(&error))?;
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| "It is not an animatic's assembly, or it is damaged.".to_string())?;
         let assembly = Assembly::from_value(&value)?;
@@ -374,51 +417,46 @@ impl Session {
         let title = self.film().title.clone();
         let sounds = &mut self.sounds;
         let project_dir = Some(project.clone());
-        let (fresh, _, mut read) = crate::assembly::open(&assembly, &title, &file, &protocol::fingerprint(&bytes), |audio| {
+        let (fresh, _, fresh_read) = crate::assembly::open(&assembly, &title, &file, &protocol::fingerprint(&bytes), |audio| {
             sounds.loaded(project_dir.as_deref(), audio).map(|loaded| loaded.frames)
         });
-        let mut ids = Vec::new();
-        let changed = self.change_film(|film| {
-            let mut made = Vec::new();
-            // Clips by their place: retimed and given the new image; any
-            // more are added, any fewer deleted.
-            for (index, frame) in fresh.clips.iter().enumerate() {
-                let image = frame.layers.first().and_then(|layer| layer.images.values().next().cloned());
-                let id = match film.clips.get(index).map(|clip| clip.id) {
-                    Some(id) => id,
-                    None => {
-                        let (id, drawings) = film.add_clip(Some(frame.start), frame.length);
-                        made.extend(drawings);
-                        id
-                    }
-                };
-                let clip = film.clip_mut(id)?;
-                clip.start = frame.start;
-                clip.length = frame.length;
-                if let (Some(image), Some(layer)) = (image, clip.layers.iter_mut().rev().find(|layer| !layer.folder))
-                    && let Some(key) = layer.keys.first().map(|key| key.id)
-                {
-                    layer.images.insert(key, image);
-                }
-                ids.push(id);
-            }
-            film.clips.retain(|clip| ids.contains(&clip.id));
-            film.clips.sort_by_key(|clip| clip.start);
-            // The sound as the new assembly has it.
-            let next = film.next_id.max(fresh.next_id);
-            film.sound_tracks = fresh.sound_tracks.clone();
-            film.next_id = next;
+        let mut film = self.film().clone();
+        let (made, read) = crate::assembly::follow(&mut film, &old, &assembly, &fresh, &fresh_read);
+        let changed = self.change_film_reading(|current| {
+            *current = film;
             Some(made)
-        });
+        }, read.clone());
         if !changed {
-            return Err("The animatic already has that timing.".to_string());
+            // The same timing, filed again: only what was read changes.
+            self.active_storyboard_mut().set_assembly(Some(read));
         }
-        read.clips = ids;
-        read.step = old.step;
-        read.boards = old.boards;
-        self.active_storyboard_mut().set_assembly(Some(read));
         self.retimed = None;
         Ok(())
+    }
+
+    /// The shown storyboard and the project's animatic, for `read_film`:
+    /// the assembly it read and its step, whether its timing differs from
+    /// that assembly or why it cannot be saved, a save under way or
+    /// finished, and a retime made in another tool. None for a storyboard
+    /// not opened from the animatic.
+    pub fn project_animatic(&self) -> Option<Value> {
+        let read = self.active_storyboard().assembly()?;
+        let storyboard = self.active_id();
+        let (differs, refusal) = match self.timing(Some(read.assembly.length)) {
+            Ok((assembly, _)) => (assembly != read.assembly, None),
+            Err(reason) => (true, Some(reason)),
+        };
+        let saving = self.saving.as_ref().filter(|saving| saving.storyboard == storyboard);
+        let saved = self.last_saved.as_ref().filter(|(id, _)| *id == storyboard).map(|(_, file)| file.clone());
+        Some(serde_json::json!({
+            "assembly": read.path,
+            "step": read.step.as_ref().map(|(chain, name)| format!("{chain}: {name}")),
+            "differs": differs,
+            "cannot_save": refusal,
+            "saving": saving.is_some(),
+            "saved": saved.as_ref().map(|file| serde_json::json!({ "assembly": file, "step_uses_it": *file == read.path && self.retimed().is_none() })),
+            "retimed_elsewhere": self.retimed(),
+        }))
     }
 
     /// A published file and the artifact it is published as, from the

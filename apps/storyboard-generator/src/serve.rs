@@ -902,10 +902,7 @@ impl Server {
         }
         // An image key names an image of the project, by its path there.
         if let Waiting::ImageKey = wait {
-            if let Some(relative) = self.project.as_ref().and_then(|project| path.strip_prefix(project).ok()) {
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                self.session.insert_image_key(&relative);
-            }
+            self.session.image_key_chosen(&path);
             return false;
         }
         if !self.allowed_project_path(&path) {

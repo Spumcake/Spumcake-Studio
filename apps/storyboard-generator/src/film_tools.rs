@@ -137,6 +137,7 @@ pub fn describe(session: &Session) -> Value {
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "selected_sounds": picked.sounds,
+        "project_animatic": session.project_animatic(),
         "listening_volume": session.listening(),
         "animatic": session.animatic_state(),
     })
@@ -194,7 +195,7 @@ fn layer_json(session: &Session, clip: &crate::film::Clip, layer: &crate::film::
         .filter(|key| key.frame < clip.length)
         .map(|key| {
             let blank = record.drawing_of(key.drawing).is_none_or(|drawing| drawing.model_is_blank());
-            json!({ "frame": key.frame + 1, "blank": blank })
+            json!({ "frame": key.frame + 1, "blank": blank, "image": layer.images.get(&key.id) })
         })
         .collect();
     let marks: Vec<Value> = layer
@@ -570,17 +571,21 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 if !session.project().is_some_and(|project| project.join(image).is_file()) {
                     return Err(format!("{image} is not an image of the project"));
                 }
-                changed(session.insert_image_key(image), "that frame already shows that image")?;
+                let image = session.image_in_project(std::path::Path::new(image))?;
+                changed(session.insert_image_key(&image), "that frame already shows that image")?;
             }
             "publish_hold" => {
                 in_clip(session)?;
                 if !session.is_skills() {
                     return Err("only a Skills project publishes holds".to_string());
                 }
-                made = json!({ "artifact": session.publish_hold().ok_or("that hold has nothing to publish")? });
+                made = json!({ "artifact": session.publish_hold()? });
             }
             "open_animatic" => session.open_animatic(text(input, "step"))?,
-            "save_timing" => session.save_timing()?,
+            "save_timing" => {
+                session.save_timing()?;
+                made = json!({ "saving": true, "note": "The user approves the step's edit. read_film's project_animatic says when it is saved: saved names the new assembly, and step_uses_it says whether the step now uses it." });
+            }
             "follow_retime" => session.follow_retime()?,
             "render_again" => {
                 if text(input, "item") != Some(crate::board::ANIMATIC) {

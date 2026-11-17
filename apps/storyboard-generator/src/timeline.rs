@@ -658,9 +658,21 @@ pub fn panel_sections(session: &Session) -> Option<Vec<Section>> {
                             kind: RowKind::Number { min: 0.0, max: 1.0, percent: true, places: 0, centered: false },
                             value: PropValue::Number(sound.volume),
                         },
+                    ]
+                    .into_iter()
+                    // A gain above 0 dB, which 0–100% cannot show, plays at
+                    // 100% and is written back as read until it is changed.
+                    .chain(session.kept_gain(sound.id).map(|gain_db| Row {
+                        prop: json!({ "film": "note" }),
+                        label: format!("+{} dB, kept as read", crate::assembly::said_gain(gain_db).trim_end_matches(" dB")),
+                        kind: RowKind::Note,
+                        value: PropValue::Idle,
+                    }))
+                    .chain([
                         text_row(prop("at"), "Starts at", &timecode(sound.at), 1),
                         text_row(prop("from"), "From", &timecode(sound.from), 1),
-                    ],
+                    ])
+                    .collect(),
                     icon: None,
                 }]);
             }
@@ -976,11 +988,15 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
         "timeline_page" => {}
         "import_sound" => session.ask_import_sound(),
         "insert_image_key" => session.ask_image_key(),
-        "publish_hold" => {
-            session.publish_hold();
+        "publish_hold" if session.open_clip().is_some() => {
+            if let Err(reason) = session.publish_hold() {
+                session.failed_by_hand(Some("Hold not published"), &reason);
+            }
         }
         "open_animatic" => {
-            let _ = session.open_animatic(None);
+            if let Err(reason) = session.open_animatic(None) {
+                session.failed_by_hand(Some("Animatic not opened"), &reason);
+            }
         }
         "save_timing" => {
             if let Err(reason) = session.save_timing() {
@@ -988,7 +1004,9 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
             }
         }
         "follow_retime" => {
-            let _ = session.follow_retime();
+            if let Err(reason) = session.follow_retime() {
+                session.failed_by_hand(None, &reason);
+            }
         }
         "export_animatic" => {
             let _ = session.start_export();
