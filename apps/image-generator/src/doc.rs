@@ -2169,7 +2169,7 @@ impl Doc {
             Some(number) => number,
             None => {
                 let number = self.notes.next_number();
-                self.notes.pins.push(Pin { number, x, y, text: String::new() });
+                self.notes.pins.push(Pin { number, x, y, text: String::new(), at: None });
                 number
             }
         };
@@ -2207,7 +2207,7 @@ impl Doc {
         if from == 0 {
             self.end_live();
             self.settle();
-            self.live_mark = Some(Mark { points: Vec::new(), width, colour });
+            self.live_mark = Some(Mark { points: Vec::new(), width, colour, at: None });
         }
         let Some(mark) = self.live_mark.as_mut() else {
             return;
@@ -2217,7 +2217,7 @@ impl Doc {
         }
         let start = from.saturating_sub(1);
         mark.points.extend(points.iter().filter(|point| point[0].is_finite() && point[1].is_finite()).map(|point| [point[0] as f32, point[1] as f32]));
-        let piece = Mark { points: mark.points[start..].to_vec(), width, colour };
+        let piece = Mark { points: mark.points[start..].to_vec(), width, colour, at: None };
         self.touch_shown(mark_rect(&piece));
     }
 
@@ -2226,7 +2226,7 @@ impl Doc {
     pub fn add_mark(&mut self, points: &[[f64; 3]], width: f32, colour: [u8; 4]) {
         let points: Vec<[f32; 2]> = points.iter().filter(|point| point[0].is_finite() && point[1].is_finite()).map(|point| [point[0] as f32, point[1] as f32]).collect();
         let drawn = self.live_mark.take().filter(|mark| mark.points == points);
-        let mark = drawn.unwrap_or(Mark { points, width, colour });
+        let mark = drawn.unwrap_or(Mark { points, width, colour, at: None });
         if mark.points.is_empty() {
             return;
         }
@@ -3499,7 +3499,7 @@ mod tests {
         doc.text_input(&TextInput::Insert { text: "less rain".into() });
         doc.note_click([200.0, 150.0]);
         assert_eq!(doc.note_open(), None, "a click outside did not end the typing");
-        assert_eq!(doc.notes.pins, [Pin { number: 1, x: 50.0, y: 40.0, text: "less rain".into() }]);
+        assert_eq!(doc.notes.pins, [Pin { number: 1, x: 50.0, y: 40.0, text: "less rain".into(), at: None }]);
         doc.mark_live(0, &[[10.0, 100.0, 1.0], [60.0, 100.0, 1.0]], 4.0, layers::notes::RED);
         assert!(doc.drawing());
         doc.add_mark(&[[10.0, 100.0, 1.0], [60.0, 100.0, 1.0]], 4.0, layers::notes::RED);

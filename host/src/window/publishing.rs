@@ -57,6 +57,10 @@ pub(crate) struct Delivery {
     pub artifact: String,
     pub file: String,
     pub uses: String,
+    /// The Deliver card's lines of the film, as the workspace read it.
+    pub size: String,
+    pub frame_rate: String,
+    pub format: String,
 }
 
 /// What was asked for, with who asked.
@@ -135,8 +139,8 @@ impl HostWindow {
             for (tab, artifact) in declared.canon_histories.drain(..) {
                 asked.push(Asked::History { app, tab, artifact });
             }
-            for (tab, artifact, file, uses) in declared.delivers.drain(..) {
-                deliveries.push(Delivery { app, tab, artifact, file, uses });
+            for (tab, artifact, file, uses, size, frame_rate, format) in declared.delivers.drain(..) {
+                deliveries.push(Delivery { app, tab, artifact, file, uses, size, frame_rate, format });
             }
         }
         // A delivery waits for the runner, which fills the Deliver card, in
@@ -160,7 +164,7 @@ impl HostWindow {
             match asked {
                 Asked::Publish { asker, artifact, source: file, .. } | Asked::Revert { asker, artifact, file } => {
                     let error = Some(String::from("Only a Skills project has canon to publish into."));
-                    self.reply(published_reply(asker, artifact, file, None, error, false));
+                    self.answer_published(asker, artifact, file, None, error);
                 }
                 Asked::History { app, tab, artifact } => self.send(app, HostMessage::History { tab, artifact, versions: Vec::new() }),
             }
