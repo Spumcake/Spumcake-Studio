@@ -151,6 +151,18 @@ fn ensure_at(data: &Path, plan: &Value, vars: &[(String, String)], openrouter: &
     price.is_some()
 }
 
+/// A model's name from a `models.json` beside a skill's `SKILL.md`, a list
+/// of `{service, model, name}`, as the Studio-as-a-setup contract's
+/// Formats table settled it on 2026-11-17. Read from this computer, never
+/// the network; None when no skill names it.
+pub(crate) fn local_name(skills: &[crate::skills_setup::Skill], model: &str) -> Option<String> {
+    let named = |entry: &Value| (entry.get("model").and_then(Value::as_str) == Some(model)).then(|| entry.get("name").and_then(Value::as_str)).flatten().map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
+    skills.iter().find_map(|skill| {
+        let listed: Value = std::fs::read_to_string(skill.folder.join("models.json")).ok().and_then(|text| serde_json::from_str(&text).ok())?;
+        listed.as_array()?.iter().find_map(named)
+    })
+}
+
 /// Every `pricing` list in a reply, wherever it is.
 fn pricing_lists(value: &Value, found: &mut Vec<Value>) {
     match value {
@@ -425,6 +437,20 @@ mod tests {
             asked
         });
         (root, serve)
+    }
+
+    /// Catches a video model shown by the tail of its id when a skill
+    /// names it.
+    #[test]
+    fn a_skill_names_its_models_first() {
+        let folder = std::env::temp_dir().join(format!("prices-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("models.json"), json!([{ "service": "fal", "model": "minimax/h3-max/reference-to-video", "name": "MiniMax H3 Max" }]).to_string()).unwrap();
+        let skill = crate::skills_setup::Skill { name: String::from("generate-shot"), description: String::new(), implements: Vec::new(), helps: Vec::new(), folder: folder.clone(), root: folder.clone() };
+        assert_eq!(local_name(std::slice::from_ref(&skill), "minimax/h3-max/reference-to-video").as_deref(), Some("MiniMax H3 Max"));
+        assert_eq!(local_name(&[skill], "other/model"), None);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// Catches a price guessed from per-token prices, a fal price read
