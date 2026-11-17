@@ -217,7 +217,7 @@ impl Session {
                     rename: false,
                 },
             })
-            .chain(film_menu_rows())
+            .chain(film_menu_rows(self.is_skills()))
             .collect()
     }
 
@@ -984,7 +984,7 @@ pub(crate) fn session_value(value: protocol::PropValue) -> PropValue {
 
 /// The film's rows of the workspace menu, as the approved menu-workspace
 /// shows them: sound arrives and the animatic leaves from here.
-fn film_menu_rows() -> Vec<MenuEntry> {
+fn film_menu_rows(skills: bool) -> Vec<MenuEntry> {
     let row = |label: &str, id: &str, divider: bool| MenuEntry {
         label: label.to_string(),
         icon: None,
@@ -994,5 +994,11 @@ fn film_menu_rows() -> Vec<MenuEntry> {
         submenu: Vec::new(),
         rename: false,
     };
-    vec![row("Import sound…", "import_sound", true), row("Export animatic video", "export_animatic", false)]
+    let mut rows = vec![row("Import sound…", "import_sound", true), row("Export animatic video", "export_animatic", false)];
+    // A Skills project's animatic opens from, and saves to, its step.
+    if skills {
+        rows.push(row("Open animatic", "open_animatic", true));
+        rows.push(row("Save timing to the project", "save_timing", false));
+    }
+    rows
 }

@@ -69,6 +69,9 @@ pub struct Record {
     listening: f64,
     /// What the last finished animatic export was made from.
     exported: Option<crate::export::Exported>,
+    /// The project's assembly this storyboard was opened from or last saved
+    /// as, with each time as read.
+    assembly: Option<crate::assembly::Read>,
     id: DrawingId,
     name: String,
     generated_name: String,
@@ -112,6 +115,7 @@ impl Record {
             onion: Onion::default(),
             listening: 1.0,
             exported: None,
+            assembly: None,
             id,
             generated_name: name.clone(),
             name,
@@ -198,6 +202,18 @@ impl Record {
         self.listening = volume;
         self.dirty = true;
         true
+    }
+
+    pub fn assembly(&self) -> Option<&crate::assembly::Read> {
+        self.assembly.as_ref()
+    }
+
+    /// Kept beside the film, so undo never takes it back.
+    pub fn set_assembly(&mut self, assembly: Option<crate::assembly::Read>) {
+        if self.assembly != assembly {
+            self.assembly = assembly;
+            self.dirty = true;
+        }
     }
 
     pub fn exported(&self) -> Option<&crate::export::Exported> {
@@ -711,7 +727,7 @@ pub fn copy_drawing(source: &Drawing, ids: &mut Allocator) -> Option<Drawing> {
 }
 
 /// A new keyframe's drawing: one canvas, with the brush's colours.
-fn blank_drawing(ids: &mut Allocator, palette: &[ToolColor]) -> Drawing {
+pub(crate) fn blank_drawing(ids: &mut Allocator, palette: &[ToolColor]) -> Drawing {
     let mut drawing = Drawing::untitled(ids, palette);
     drawing.focus_origin();
     drawing

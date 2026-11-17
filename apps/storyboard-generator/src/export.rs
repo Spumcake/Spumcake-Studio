@@ -74,6 +74,8 @@ pub struct Image {
     marks: Vec<SceneMark>,
     min: [f64; 2],
     max: [f64; 2],
+    /// An image key's image under the marks, by its path in the project.
+    key: Option<String>,
 }
 
 /// What one frame of the film shows.
@@ -94,6 +96,8 @@ pub struct Plan {
     /// Each taken when it is first drawn.
     pub images: Vec<Option<Image>>,
     pub tracks: Vec<media::Track>,
+    /// The project image keys are found in.
+    pub project: Option<std::path::PathBuf>,
 }
 
 /// The even frame size an export of `film` is written at.
@@ -102,7 +106,7 @@ pub fn size_of(film: &Film) -> (u32, u32) {
 }
 
 /// What each frame of the film shows, each distinct image listed once.
-pub fn plan(record: &Record, tracks: Vec<media::Track>) -> Plan {
+pub fn plan(record: &Record, tracks: Vec<media::Track>, project: Option<&std::path::Path>) -> Plan {
     let film = record.film();
     let length = film.length();
     let mut frames = vec![if film.shots_visible { Shown::Gap } else { Shown::White }; length as usize];
@@ -123,6 +127,7 @@ pub fn plan(record: &Record, tracks: Vec<media::Track>) -> Plan {
                     marks: crate::board::marks(record, clip, *change),
                     min: [x, y],
                     max: [x + width, y + height],
+                    key: crate::images::image_at(clip, *change).map(str::to_string),
                 }));
                 for frame in clip.start + change..clip.start + end {
                     if let Some(shown) = frames.get_mut(frame as usize) {
@@ -132,7 +137,7 @@ pub fn plan(record: &Record, tracks: Vec<media::Track>) -> Plan {
             }
         }
     }
-    Plan { size: size_of(film), frames, images, tracks }
+    Plan { size: size_of(film), frames, images, tracks, project: project.map(std::path::Path::to_path_buf) }
 }
 
 /// A frame's pixels at exactly `size`: the image, which is taken from
@@ -152,7 +157,9 @@ pub fn pixels(looker: &mut Looker, plan: &mut Plan, shown: Shown) -> Vec<u8> {
     let Some(image) = plan.images.get_mut(index).and_then(Option::take) else {
         return fill(WHITE);
     };
-    let Some((rendered, w, h)) = looker.pixels(image.marks, image.min, image.max, width.max(height), WHITE) else {
+    let side = width.max(height);
+    let base = keyed(plan.project.as_deref(), &image, side);
+    let Some((rendered, w, h)) = looker.pixels_on(image.marks, image.min, image.max, side, WHITE, base.as_deref()) else {
         return fill(WHITE);
     };
     placed(&rendered, (w, h), plan.size)
@@ -160,11 +167,20 @@ pub fn pixels(looker: &mut Looker, plan: &mut Plan, shown: Shown) -> Vec<u8> {
 
 /// A image's pixels at exactly `size`, as playback shows it: the same
 /// as the export writes, its marks copied rather than taken.
-pub fn render_image(looker: &mut Looker, image: &Image, size: (u32, u32)) -> Vec<u8> {
-    match looker.pixels(image.marks.clone(), image.min, image.max, size.0.max(size.1), WHITE) {
+pub fn render_image(looker: &mut Looker, image: &Image, size: (u32, u32), project: Option<&std::path::Path>) -> Vec<u8> {
+    let side = size.0.max(size.1);
+    let base = keyed(project, image, side);
+    match looker.pixels_on(image.marks.clone(), image.min, image.max, side, WHITE, base.as_deref()) {
         Some((rendered, w, h)) => placed(&rendered, (w, h), size),
         None => placed(&[], (0, 0), size),
     }
+}
+
+/// An image key's image, fitted to the size the field is drawn at.
+fn keyed(project: Option<&std::path::Path>, image: &Image, side: u32) -> Option<Vec<u8>> {
+    let key = image.key.as_deref()?;
+    let (width, height, _) = crate::look::size_for(image.min, image.max, side);
+    crate::images::fitted(project, key, (width, height))
 }
 
 /// Pixels rendered at the field's size, give or take a pixel, placed on

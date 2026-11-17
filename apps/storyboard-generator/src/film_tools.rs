@@ -83,6 +83,11 @@ pub fn group() -> ToolGroup {
             tool("export_animatic", "Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done.", json!({}), &[]),
             tool("cancel_export", "Cancel the export under way.", json!({}), &[]),
             tool("list_items", "Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed.", json!({}), &[]),
+            tool("insert_image_key", "Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does.", json!({ "image": { "type": "string", "description": "The image's path in the project, such as library/keyframe.png." } }), &["image"]),
+            tool("publish_hold", "In a Skills project, publish the open clip's hold under the playhead, drawing and all, as the rough board \"<shot>: rough board\", as Publish hold does, so the animatic can use it. The user approves it on the publish card.", json!({}), &[]),
+            tool("open_animatic", "In a Skills project, open the project's animatic as a storyboard: the assembly its build-animatic step names, with its keyframes as image keys and its sound. It opens when the project answers; read_film then shows it.", json!({ "step": { "type": "string", "description": "The step's name, when the project has several animatics. Leave out for the first." } }), &[]),
+            tool("save_timing", "In a Skills project, save the open animatic's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published.", json!({}), &[]),
+            tool("follow_retime", "Take the timing the project's animatic step now names, after it was retimed in another tool, as one undo step, as Follow does.", json!({}), &[]),
             tool("render_again", "Render an item again from what made it: the animatic is exported again.", json!({ "item": { "type": "string", "description": "The item's id, such as \"animatic\"." } }), &["item"]),
         ],
     }
@@ -559,6 +564,24 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                     "animatic": animatic,
                 }));
             }
+            "insert_image_key" => {
+                in_clip(session)?;
+                let image = text(input, "image").ok_or("image is missing")?;
+                if !session.project().is_some_and(|project| project.join(image).is_file()) {
+                    return Err(format!("{image} is not an image of the project"));
+                }
+                changed(session.insert_image_key(image), "that frame already shows that image")?;
+            }
+            "publish_hold" => {
+                in_clip(session)?;
+                if !session.is_skills() {
+                    return Err("only a Skills project publishes holds".to_string());
+                }
+                made = json!({ "artifact": session.publish_hold().ok_or("that hold has nothing to publish")? });
+            }
+            "open_animatic" => session.open_animatic(text(input, "step"))?,
+            "save_timing" => session.save_timing()?,
+            "follow_retime" => session.follow_retime()?,
             "render_again" => {
                 if text(input, "item") != Some(crate::board::ANIMATIC) {
                     return Err("only the animatic is rendered again here; a clip's frames are drawn, not rendered".to_string());

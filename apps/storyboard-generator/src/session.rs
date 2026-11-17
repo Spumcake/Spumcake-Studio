@@ -18,11 +18,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+mod animatic;
 mod assist;
 mod declare;
 mod export;
 pub mod film;
 mod play;
+pub mod project;
 pub mod sound;
 pub(crate) use declare::{action_named, command_named, session_value, tool_named};
 
@@ -55,6 +57,8 @@ pub(crate) enum FileIntent {
     Open,
     /// Import sound…: a sound or video file from anywhere.
     ImportSound,
+    /// Insert image key…: an image of the project.
+    ImageKey,
     Save {
         id: DrawingId,
         copy: bool,
@@ -349,6 +353,32 @@ pub struct Session {
     playback: Option<crate::playback::Playback>,
     /// The loop button inside a clip.
     looping: bool,
+    /// Image keys' images as the stage shows them, by path and size.
+    key_images: HashMap<(String, u32, u32), Option<protocol::Thumbnail>>,
+    /// The project is a Skills project: storyboards are kept in `work/`,
+    /// and what reaches the project goes through Skills' scripts.
+    skills: bool,
+    /// Holds asked to be published, by their artifact: the storyboard, the
+    /// clip, and the hold's first frame in it.
+    publishing: HashMap<String, (DrawingId, u64, u32)>,
+    /// Publishes asked for and not yet sent to the host: the artifact, the
+    /// file, and where it came from.
+    to_publish: Vec<(String, String, Vec<String>)>,
+    /// Messages for the host: canon reads, files to file, and step edits.
+    outgoing: Vec<protocol::AppMessage>,
+    /// Canon reads waiting for their answer, and what each was for.
+    canon_asked: HashMap<String, project::Asked>,
+    /// The project's animatic steps as last read, by "chain: name".
+    steps: HashMap<String, project::AnimaticStep>,
+    /// Published files and their artifacts, as last read or published.
+    canon_files: HashMap<String, String>,
+    published_files: HashMap<String, String>,
+    /// A Save timing to the project under way.
+    saving: Option<project::Saving>,
+    /// The assembly the open animatic's step names now, when it was
+    /// retimed in another tool.
+    retimed: Option<String>,
+    last_check: Option<std::time::Instant>,
 }
 
 impl Session {
@@ -406,6 +436,18 @@ impl Session {
             export: None,
             playback: None,
             looping: false,
+            key_images: HashMap::new(),
+            skills: false,
+            publishing: HashMap::new(),
+            to_publish: Vec::new(),
+            outgoing: Vec::new(),
+            canon_asked: HashMap::new(),
+            steps: HashMap::new(),
+            canon_files: HashMap::new(),
+            published_files: HashMap::new(),
+            saving: None,
+            retimed: None,
+            last_check: None,
         };
         session.push_blank();
         session
@@ -709,9 +751,14 @@ impl Session {
     /// nothing, such as `Beach.smx`, then `Beach 2.smx`. Returns the
     /// file, or none for an untouched storyboard that has nothing to write.
     pub(crate) fn write_into_project(&mut self, id: DrawingId) -> Result<Option<PathBuf>, String> {
-        let Some(folder) = self.project.clone() else {
+        let Some(mut folder) = self.project.clone() else {
             return Err("No project folder.".to_string());
         };
+        // In a Skills project, workspace files are kept in `work/`.
+        if self.skills {
+            folder = folder.join("work");
+            std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
+        }
         let Some(index) = self.index_of(id) else {
             return Ok(None);
         };

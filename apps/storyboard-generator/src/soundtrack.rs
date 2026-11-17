@@ -235,7 +235,17 @@ impl Film {
     /// fits there, or on the first unlocked Sound track it fits on, or on a
     /// new one. Returns the track's id and the sound clip's.
     pub fn place_sound(&mut self, track: Option<u64>, at: u32, file: &str, name: &str, source: u32) -> Option<(u64, u64)> {
-        let length = source.max(1);
+        self.lay_sound(track, at, 0, source, source, file, name)
+    }
+
+    /// Places `length` frames of a sound of `source` frames, from its frame
+    /// `from`, at `at`, by the same rule as `place_sound`: two sounds that
+    /// overlap on the film go on two tracks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lay_sound(&mut self, track: Option<u64>, at: u32, from: u32, length: u32, source: u32, file: &str, name: &str) -> Option<(u64, u64)> {
+        let source = source.max(1);
+        let from = from.min(source - 1);
+        let length = length.clamp(1, source - from);
         let fits = |track: &SoundTrack| !track.locked && track.fits(at, length);
         let chosen = track
             .and_then(|id| self.sound_track(id))
@@ -252,9 +262,9 @@ impl Film {
             file: file.to_string(),
             name: name.to_string(),
             at,
-            from: 0,
+            from,
             length,
-            source: length,
+            source,
             volume: 1.0,
         };
         let track_ref = self.sound_track_mut(track)?;

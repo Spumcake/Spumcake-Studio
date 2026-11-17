@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-110 tools.
+115 tools.
 
 ## The host
 
@@ -115,6 +115,11 @@ Make and time the film's clips and its sound, and inside a clip its layers, keyf
 - **`storyboard-generator__clips__export_animatic`**: Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done. Takes nothing.
 - **`storyboard-generator__clips__cancel_export`**: Cancel the export under way. Takes nothing.
 - **`storyboard-generator__clips__list_items`**: Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed. Takes nothing.
+- **`storyboard-generator__clips__insert_image_key`**: Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does. Takes `image` (string, required).
+- **`storyboard-generator__clips__publish_hold`**: In a Skills project, publish the open clip's hold under the playhead, drawing and all, as the rough board "<shot>: rough board", as Publish hold does, so the animatic can use it. The user approves it on the publish card. Takes nothing.
+- **`storyboard-generator__clips__open_animatic`**: In a Skills project, open the project's animatic as a storyboard: the assembly its build-animatic step names, with its keyframes as image keys and its sound. It opens when the project answers; read_film then shows it. Takes `step` (string).
+- **`storyboard-generator__clips__save_timing`**: In a Skills project, save the open animatic's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published. Takes nothing.
+- **`storyboard-generator__clips__follow_retime`**: Take the timing the project's animatic step now names, after it was retimed in another tool, as one undo step, as Follow does. Takes nothing.
 - **`storyboard-generator__clips__render_again`**: Render an item again from what made it: the animatic is exported again. Takes `item` (string, required).
 
 ### Read and look at a storyboard (`look`)

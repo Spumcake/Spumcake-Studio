@@ -527,7 +527,7 @@ fn playback_shows_the_exports_own_image() {
     let image = stage(&session).image.expect("an image");
     let shown = std::fs::read(&image.path).unwrap();
     let tracks = session.mix_tracks();
-    let mut plan = crate::export::plan(session.active_storyboard(), tracks);
+    let mut plan = crate::export::plan(session.active_storyboard(), tracks, session.project());
     let frame = plan.frames[40];
     let exported = crate::export::pixels(&mut Looker::new(), &mut plan, frame);
     assert_eq!((image.width, image.height), plan.size);

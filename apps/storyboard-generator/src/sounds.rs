@@ -230,8 +230,10 @@ pub struct Imported {
 
 /// Decodes `source` and, when it is sound, copies it into the project's
 /// `sounds/` folder. A file that is not sound is not copied. Outside a
-/// project the sound stays where it is.
-pub fn import(project: Option<&Path>, source: &Path) -> Result<Imported, String> {
+/// project the sound stays where it is, and so it does in a Skills project
+/// (`in_place`) when it is already inside the project, as a take in
+/// `library/` is.
+pub fn import(project: Option<&Path>, source: &Path, in_place: bool) -> Result<Imported, String> {
     let loaded = decode(source)?;
     let name = file_name(source);
     let Some(project) = project else {
@@ -242,6 +244,14 @@ pub fn import(project: Option<&Path>, source: &Path) -> Result<Imported, String>
     // A sound already in the folder is used where it is.
     if source.parent().is_some_and(|parent| crate::store::same_file(parent, &folder)) {
         let file = format!("{FOLDER}/{name}");
+        return Ok(Imported { file, name, loaded: Arc::new(loaded), path: source.to_path_buf() });
+    }
+    // In a Skills project, a sound already in the project, such as a take in
+    // `library/`, is used where it is.
+    let project_abs = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+    let source_abs = source.canonicalize().unwrap_or_else(|_| source.to_path_buf());
+    if let Ok(inside) = source_abs.strip_prefix(&project_abs).map_err(|_| ()).and_then(|inside| if in_place { Ok(inside) } else { Err(()) }) {
+        let file = inside.to_string_lossy().replace('\\', "/");
         return Ok(Imported { file, name, loaded: Arc::new(loaded), path: source.to_path_buf() });
     }
     std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
@@ -328,10 +338,10 @@ mod tests {
         let outside = scratch("import-source");
         let source = outside.join("Storm and radio.wav");
         std::fs::write(&source, wav_bytes(RATE, &clicks(48, &[30]))).unwrap();
-        let first = import(Some(&project), &source).unwrap();
+        let first = import(Some(&project), &source, false).unwrap();
         assert_eq!(first.file, "sounds/Storm and radio.wav");
         assert_eq!(first.loaded.frames, 48);
-        let second = import(Some(&project), &source).unwrap();
+        let second = import(Some(&project), &source, false).unwrap();
         assert_eq!(second.file, "sounds/Storm and radio 2.wav");
         // The click is the loudest thing, on its frame.
         let peaks = span_peaks(&first.loaded.peaks, 0, 48);
@@ -344,7 +354,7 @@ mod tests {
         let project = scratch("not-sound");
         let source = project.join("notes.txt");
         std::fs::write(&source, "not sound").unwrap();
-        assert!(import(Some(&project), &source).is_err());
+        assert!(import(Some(&project), &source, false).is_err());
         assert!(!project.join(FOLDER).exists());
     }
 

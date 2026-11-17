@@ -107,7 +107,8 @@ impl Session {
     /// fits there. Returns the sound clip's id. A file that is not sound is
     /// neither copied nor placed, and the error says why.
     pub fn import_sound(&mut self, path: &Path, track: Option<u64>, at: Option<u32>) -> Result<u64, String> {
-        let imported = crate::sounds::import(self.project.as_deref(), path)?;
+        self.importable(path)?;
+        let imported = crate::sounds::import(self.project.as_deref(), path, self.skills)?;
         self.place_imported(imported, track, at).ok_or_else(|| "The sound could not be placed.".to_string())
     }
 
@@ -116,15 +117,38 @@ impl Session {
         self.file_intent = Some(crate::session::FileIntent::ImportSound);
     }
 
+    /// Whether a sound may be imported: in a Skills project, only one
+    /// already in the project, since filing one from outside is Skills'
+    /// scripts' work.
+    fn importable(&self, path: &Path) -> Result<(), String> {
+        let Some(project) = self.project.as_deref().filter(|_| self.skills) else {
+            return Ok(());
+        };
+        let project = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+        let source = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if source.starts_with(&project) {
+            Ok(())
+        } else {
+            Err("In a Skills project, a sound from outside it is filed by Skills' scripts, which Studio cannot do yet.".to_string())
+        }
+    }
+
     /// Starts importing the sound the person chose. It is placed when it
     /// is decoded, at the playhead as it is now, and a notice says it is
     /// coming.
     pub fn start_import(&mut self, path: PathBuf) {
+        if let Err(reason) = self.importable(&path) {
+            let id = self.next_notice;
+            self.next_notice += 1;
+            self.keep_failed(id, "Sound not imported", &reason);
+            return;
+        }
         let (send, result) = std::sync::mpsc::channel();
         let project = self.project.clone();
         let source = path.clone();
+        let in_place = self.skills;
         std::thread::spawn(move || {
-            let _ = send.send(crate::sounds::import(project.as_deref(), &source));
+            let _ = send.send(crate::sounds::import(project.as_deref(), &source, in_place));
         });
         let id = self.next_notice;
         self.next_notice += 1;
@@ -170,7 +194,7 @@ impl Session {
         changed
     }
 
-    fn keep_failed(&mut self, id: u64, text: &str, detail: &str) {
+    pub(crate) fn keep_failed(&mut self, id: u64, text: &str, detail: &str) {
         self.kept_notices.push(Notice {
             id: format!("notice-{id}"),
             text: text.to_string(),
@@ -211,6 +235,7 @@ impl Session {
             })
             .collect();
         out.extend(self.playback_notice());
+        out.extend(self.retimed_notice());
         out.extend(self.export_notice());
         out.extend(self.kept_notices.iter().cloned());
         out

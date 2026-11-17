@@ -81,6 +81,9 @@ pub struct Layer {
     /// By frame. A folder has none; every other layer has one at frame 0.
     pub keys: Vec<Key>,
     pub marks: Vec<Mark>,
+    /// Image keys: a key that shows an image of the project, by its
+    /// path in the project, fitted to the clip's field, its drawing over it.
+    pub images: std::collections::BTreeMap<u64, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -265,6 +268,7 @@ impl Film {
             outline: false,
             keys: vec![Key { id: key, frame: 0, drawing }],
             marks: Vec::new(),
+            images: std::collections::BTreeMap::new(),
         };
         (layer, NewDrawing { id: drawing, copy_of: None })
     }
@@ -535,6 +539,11 @@ impl Layer {
     /// The key a frame shows: the last at or before it.
     pub fn key_at(&self, frame: u32) -> Option<&Key> {
         self.keys.iter().rev().find(|key| key.frame <= frame)
+    }
+
+    /// The image a frame shows, when its key is an image key.
+    pub fn image_at(&self, frame: u32) -> Option<&str> {
+        self.key_at(frame).and_then(|key| self.images.get(&key.id)).map(String::as_str)
     }
 
     /// The key's number on the layer, from 1, as A③ counts it.
@@ -1044,6 +1053,7 @@ fn layer_value(layer: &Layer) -> Value {
         "locked": layer.locked,
         "outline": layer.outline,
         "keys": layer.keys.iter().map(|key| json!({ "id": key.id, "frame": key.frame, "drawing": key.drawing })).collect::<Vec<_>>(),
+        "images": layer.images.iter().map(|(key, path)| (key.to_string(), json!(path))).collect::<Map<String, Value>>(),
         "marks": layer.marks.iter().map(|mark| json!({
             "id": mark.id,
             "frame": mark.frame,
@@ -1135,6 +1145,16 @@ fn layer_from(value: &Value) -> Option<Layer> {
         outline: flag(layer, "outline", false),
         keys,
         marks,
+        images: layer
+            .get("images")
+            .and_then(Value::as_object)
+            .map(|images| {
+                images
+                    .iter()
+                    .filter_map(|(key, path)| Some((key.parse().ok()?, path.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     row.sort();
     if !row.folder && !row.keys.iter().any(|key| key.frame == 0) {

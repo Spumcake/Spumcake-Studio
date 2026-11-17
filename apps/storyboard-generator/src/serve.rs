@@ -54,6 +54,7 @@ enum Waiting {
     },
     Open,
     ImportSound,
+    ImageKey,
 }
 
 /// What was last sent of each declaration, so only a change is sent again.
@@ -221,9 +222,10 @@ impl Server {
                 input,
                 group,
             } => last = self.invoke(call, &tab, &tool, &input, &group),
-            HostMessage::Project { folder, .. } => {
+            HostMessage::Project { folder, skills } => {
                 let folder = PathBuf::from(folder);
                 self.session.set_project(&folder);
+                self.session.set_skills(skills);
                 self.project = Some(folder);
                 // In a project every change is in its file, so there is
                 // nothing to recover.
@@ -401,9 +403,17 @@ impl Server {
             | HostMessage::Takes { .. }
             | HostMessage::CellBecameStep { .. }
             | HostMessage::View3dCamera { .. }
-            | HostMessage::View3dPicked { .. } | HostMessage::Published { .. } | HostMessage::History { .. }
-            | HostMessage::CanonRows { .. } | HostMessage::Filed { .. } | HostMessage::StepEdited { .. } | HostMessage::StepRan { .. }
-            | HostMessage::SkillScriptRan { .. } => {}
+            | HostMessage::View3dPicked { .. } | HostMessage::History { .. } => {}
+            HostMessage::Published { artifact, file, error, .. } => {
+                self.session.published(&artifact, &file, error.as_deref());
+            }
+            HostMessage::CanonRows { id, rows, error } => self.session.canon_rows(&id, &rows, error.as_deref()),
+            HostMessage::Filed { id, file, error } => self.session.filed(&id, &file, error.as_deref()),
+            HostMessage::StepEdited { id, error } => self.session.step_edited(&id, error.as_deref()),
+            HostMessage::SkillScriptRan { id, output, error } => self.session.skill_script_ran(&id, &output, error.as_deref()),
+            // A Skills project's export runs its step: answered once the
+            // runner's rerun lands.
+            HostMessage::StepRan { .. } => {}
             HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {
                 id,
                 thumbnail: None,
@@ -562,7 +572,9 @@ impl Server {
         }
         let mut out = Vec::new();
         let tab = tab_id(self.session.active_id());
-        let stage = self.session.playing_stage(crate::sheet::stage(self.session.active_storyboard(), tab.clone()));
+        let stage = crate::sheet::stage(self.session.active_storyboard(), tab.clone());
+        let stage = self.session.keyed_stage(stage);
+        let stage = self.session.playing_stage(stage);
         if self.sent.stage.as_ref() != Some(&stage) {
             out.push(AppMessage::Stage(stage.clone()));
             self.sent.stage = Some(stage);
@@ -600,6 +612,8 @@ impl Server {
         self.full_tick = Instant::now();
         // Imports and exports finish on threads of their own.
         let finished = self.session.poll_imports() | self.session.poll_export();
+        self.session.check_retimed(Instant::now());
+        let finished = finished || self.session.has_outgoing();
         if self.project.is_none() {
             return if finished { self.updates(false) } else { Vec::new() };
         }
@@ -823,6 +837,19 @@ impl Server {
                     filter,
                 }
             }
+            FileIntent::ImageKey => {
+                self.waiting = Some((request.clone(), Waiting::ImageKey));
+                AppMessage::File {
+                    id: request,
+                    kind: FileKind::Open,
+                    name: None,
+                    folder,
+                    filter: Some(FileFilter {
+                        name: "Images".to_string(),
+                        extensions: ["png", "jpg", "jpeg", "webp"].iter().map(|extension| extension.to_string()).collect(),
+                    }),
+                }
+            }
             FileIntent::ImportSound => {
                 self.waiting = Some((request.clone(), Waiting::ImportSound));
                 AppMessage::File {
@@ -873,6 +900,14 @@ impl Server {
             self.session.start_import(path);
             return false;
         }
+        // An image key names an image of the project, by its path there.
+        if let Waiting::ImageKey = wait {
+            if let Some(relative) = self.project.as_ref().and_then(|project| path.strip_prefix(project).ok()) {
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                self.session.insert_image_key(&relative);
+            }
+            return false;
+        }
         if !self.allowed_project_path(&path) {
             if let Waiting::Save {
                 close_after: true, ..
@@ -908,7 +943,7 @@ impl Server {
                 false
             }
             Waiting::Open => session.open_path(&path),
-            Waiting::ImportSound => false,
+            Waiting::ImportSound | Waiting::ImageKey => false,
         }
     }
 
@@ -1011,7 +1046,13 @@ impl Server {
             self.sent.timeline = Some(timeline);
         }
         self.notice_updates(&mut out);
-        let stage = self.session.playing_stage(crate::sheet::stage(self.session.active_storyboard(), tab));
+        for (artifact, source, from) in self.session.take_publishes() {
+            out.push(AppMessage::Publish { tab: tab.clone(), artifact, source, from, with: Vec::new() });
+        }
+        out.extend(self.session.take_outgoing());
+        let stage = crate::sheet::stage(self.session.active_storyboard(), tab);
+        let stage = self.session.keyed_stage(stage);
+        let stage = self.session.playing_stage(stage);
         if self.sent.stage.as_ref() != Some(&stage) {
             out.push(AppMessage::Stage(stage.clone()));
             self.sent.stage = Some(stage);

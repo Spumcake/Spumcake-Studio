@@ -130,6 +130,11 @@ fn action(id: &str) -> Option<Place> {
         "layer_flag" => Tool("clips__set_layer", None),
         // The film's sound, its tracks, and the animatic.
         "import_sound" => Tool("clips__import_sound", None),
+        "insert_image_key" => Tool("clips__insert_image_key", None),
+        "publish_hold" => Tool("clips__publish_hold", None),
+        "open_animatic" => Tool("clips__open_animatic", None),
+        "save_timing" => Tool("clips__save_timing", None),
+        "follow_retime" => Tool("clips__follow_retime", None),
         "new_sound_track" => Tool("clips__add_sound_track", None),
         "rename_sound_track" => Tool("clips__rename_sound_track", None),
         "delete_sound_track" => Tool("clips__delete_sound_track", None),

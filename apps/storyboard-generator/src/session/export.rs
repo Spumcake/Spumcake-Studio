@@ -33,7 +33,7 @@ impl Session {
             sources.push((crate::board::frames_id(clip.id), crate::board::frames_fingerprint(self.active_storyboard(), clip)));
         }
         let tracks = self.mix_tracks();
-        let plan = crate::export::plan(self.active_storyboard(), tracks);
+        let plan = crate::export::plan(self.active_storyboard(), tracks, Some(project.as_path()));
         self.kept_notices.retain(|notice| notice.id != CARD);
         self.export = Some(crate::export::start(plan, &project, file.clone(), self.active_id(), sources));
         Ok(file)
@@ -43,6 +43,10 @@ impl Session {
     fn export_refusal(&mut self) -> Option<String> {
         if self.project.is_none() {
             return Some("The storyboard is not in a project.".to_string());
+        }
+        // A Skills project's animatic is its build-animatic step's to make.
+        if self.skills {
+            return Some("In a Skills project, the animatic is made by running its step, which Studio cannot do yet.".to_string());
         }
         if self.film().clips.is_empty() {
             return Some("The film has no clips to export.".to_string());

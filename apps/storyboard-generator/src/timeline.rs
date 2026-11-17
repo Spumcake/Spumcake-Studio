@@ -394,6 +394,8 @@ fn frame_menu(session: &Session) -> Vec<MenuEntry> {
         entry("Insert frame\tF5", action("insert_frame"), true),
         entry("Insert keyframe\tF6", action("insert_keyframe"), true),
         entry("Insert blank keyframe\tF7", action("insert_blank_keyframe"), true),
+        entry("Insert image key…", action("insert_image_key"), true),
+        entry("Publish hold", action("publish_hold"), session.is_skills()),
         entry("Clear keyframe\t⇧F6", action("clear_keyframe"), true),
         entry("Remove frames\t⇧F5", action("remove_frames"), true),
         divider(),
@@ -971,6 +973,21 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
         }
         "timeline_page" => {}
         "import_sound" => session.ask_import_sound(),
+        "insert_image_key" => session.ask_image_key(),
+        "publish_hold" => {
+            session.publish_hold();
+        }
+        "open_animatic" => {
+            let _ = session.open_animatic(None);
+        }
+        "save_timing" => {
+            if let Err(reason) = session.save_timing() {
+                session.timing_refused(&reason);
+            }
+        }
+        "follow_retime" => {
+            let _ = session.follow_retime();
+        }
         "export_animatic" => {
             let _ = session.start_export();
         }

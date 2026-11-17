@@ -93,7 +93,21 @@ impl Looker {
     /// The same as `plain_image`, as `width × height × 4` bytes of RGBA with
     /// straight alpha, as the host reads a thumbnail.
     pub fn pixels(&mut self, marks: Vec<SceneMark>, min: Point, max: Point, max_side: u32, background: [u8; 3]) -> Option<(Vec<u8>, u32, u32)> {
-        let (pixmap, _) = self.paint(marks, min, max, max_side, background, false)?;
+        self.pixels_on(marks, min, max, max_side, background, None)
+    }
+
+    /// As `pixels`, with `base`, an opaque image of the size `size_for`
+    /// gives, under the marks instead of the background: an image key.
+    pub fn pixels_on(
+        &mut self,
+        marks: Vec<SceneMark>,
+        min: Point,
+        max: Point,
+        max_side: u32,
+        background: [u8; 3],
+        base: Option<&[u8]>,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let (pixmap, _) = self.paint_on(marks, min, max, max_side, background, false, base)?;
         let (width, height) = (pixmap.width(), pixmap.height());
         // The background is opaque, so every pixel is, and premultiplied
         // and straight alpha are the same bytes.
@@ -109,12 +123,26 @@ impl Looker {
         background: [u8; 3],
         grid: bool,
     ) -> Option<(Pixmap, f64)> {
-        let span = [(max[0] - min[0]).max(1.0), (max[1] - min[1]).max(1.0)];
-        let scale = (f64::from(max_side) / span[0].max(span[1])).min(4.0);
-        let width = (span[0] * scale).ceil().max(1.0) as u32;
-        let height = (span[1] * scale).ceil().max(1.0) as u32;
+        self.paint_on(marks, min, max, max_side, background, grid, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_on(
+        &mut self,
+        marks: Vec<SceneMark>,
+        min: Point,
+        max: Point,
+        max_side: u32,
+        background: [u8; 3],
+        grid: bool,
+        base: Option<&[u8]>,
+    ) -> Option<(Pixmap, f64)> {
+        let (width, height, scale) = size_for(min, max, max_side);
         let mut pixmap = Pixmap::new(width, height)?;
         pixmap.fill(tiny_skia::Color::from_rgba8(background[0], background[1], background[2], 255));
+        if let Some(base) = base.filter(|base| base.len() == pixmap.data().len()) {
+            pixmap.data_mut().copy_from_slice(base);
+        }
         if grid {
             paint_grid(&mut pixmap, min, max, scale);
         }
@@ -352,4 +380,12 @@ fn sample(atlas: &ColorImage, uv: [f64; 2]) -> [f64; 4] {
         let bottom = f64::from(c[i]) * (1.0 - fx) + f64::from(d[i]) * fx;
         top * (1.0 - fy) + bottom * fy
     })
+}
+
+/// The pixels an area of the drawing is painted at, its longest side
+/// `max_side`, and the scale.
+pub fn size_for(min: Point, max: Point, max_side: u32) -> (u32, u32, f64) {
+    let span = [(max[0] - min[0]).max(1.0), (max[1] - min[1]).max(1.0)];
+    let scale = (f64::from(max_side) / span[0].max(span[1])).min(4.0);
+    ((span[0] * scale).ceil().max(1.0) as u32, (span[1] * scale).ceil().max(1.0) as u32, scale)
 }
