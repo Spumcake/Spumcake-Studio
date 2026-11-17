@@ -1,4 +1,4 @@
-//! The runner's side of publishing from a workspace, in a Skills project,
+//! The runner's side of publishing from a workspace,
 //! as the Studio session manager laid it out on 2026-11-16: it takes what
 //! `publishing.rs` keeps in `Publishing::asked`, fills the publish card or
 //! answers the history, and carries out each card the user confirmed, all
@@ -536,10 +536,10 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
 }
 
 impl HostWindow {
-    /// Where publishing runs: the open Skills project's folder, scripts,
+    /// Where publishing runs: the open project's folder, scripts,
     /// and living pipeline.
     fn publish_place(&mut self) -> Option<Place> {
-        let (folder, env): (PathBuf, ScriptEnv) = self.skills_project()?;
+        let (folder, env): (PathBuf, ScriptEnv) = self.project_scripts()?;
         let pipeline = crate::prompt_page::living_pipeline(&folder)?;
         Some(Place { scripts: env.scripts?, vars: env.vars, folder, pipeline })
     }
@@ -591,10 +591,10 @@ impl HostWindow {
         }
         for (app, (id, _tab, step)) in runs {
             let Some(place) = self.publish_place() else {
-                self.send(app, HostMessage::StepRan { id, take: None, error: Some(String::from("Only a Skills project with a pipeline runs its steps.")) });
+                self.send(app, HostMessage::StepRan { id, take: None, error: Some(String::from("This project has no pipeline yet, so it has no step to run.")) });
                 continue;
             };
-            let Some((folder, env)) = self.skills_project() else { continue };
+            let Some((folder, env)) = self.project_scripts() else { continue };
             let input = serde_json::json!({ "pipeline": place.pipeline, "chain": step.chain, "step": step.step });
             if let crate::runner::Begun::Answered(answer) = self.runner.begin(&folder, env, &step_call(app, &id), "", crate::runner::RERUN_STEP, &input) {
                 self.answer_step_run(answer);

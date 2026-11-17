@@ -208,13 +208,13 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
     })
 }
 
-/// The host's tools. In a Skills project, every generation runs through
+/// The host's tools. In a project, every generation runs through
 /// `request.py`, so the host offers none of the tools that generate
 /// directly, its prompt tools and the person's skills, and offers the
-/// project tools and the skills the setup lists instead.
+/// project tools and Spumcake-Skills' skills instead.
 fn host_target(settings: &Settings, project: Option<&Path>) -> Target {
-    let tool_groups = match project.filter(|folder| skills_setup::is_skills_project(folder)) {
-        Some(folder) => vec![skills_setup::tool_group(folder, &skills_setup::listed_skills(&settings.skill_folders))],
+    let tool_groups = match project {
+        Some(folder) => vec![skills_setup::tool_group(folder, &skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders)))],
         None => {
             let mut tool_groups = vec![host_tools()];
             tool_groups.extend(your_skills(settings));
@@ -282,10 +282,10 @@ pub(crate) fn project_call(
         return ProjectAnswer::NotMine;
     }
     let Some((_, _, name)) = protocol::split_tool_key(tool) else { return ProjectAnswer::NotMine };
-    let Some(folder) = project.filter(|folder| skills_setup::is_skills_project(folder)) else {
-        return ProjectAnswer::Now(failed(call.to_string(), "No Skills project is open."));
+    let Some(folder) = project else {
+        return ProjectAnswer::Now(failed(call.to_string(), crate::skills_checkout::NO_PROJECT));
     };
-    let skills = skills_setup::listed_skills(&settings.skill_folders);
+    let skills = skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders));
     if runner::is_runner_tool(name) {
         return match runner.begin(folder, env(&skills), call, tool, name, input) {
             Begun::Answered(result) => ProjectAnswer::Now(result),

@@ -1,8 +1,8 @@
-//! The window's side of the Prompt page's runner duties, in a Skills
-//! project: a cell's card, its runs through the plan card, its rounds sent
-//! to its workspace, a step's edits saved to the step, and a workspace's
-//! files filed into the project. Outside a Skills project none of this
-//! runs, and cells run as they always have.
+//! The window's side of the Prompt page's runner duties: a cell's card, its
+//! runs through the plan card, its rounds sent to its workspace, a step's
+//! edits saved to the step, and a workspace's files filed into the
+//! project. Every generation runs through Spumcake-Skills' request.py; when
+//! Studio cannot find Spumcake-Skills, a cell says so and nothing is sent.
 
 use super::HostWindow;
 use crate::prompt_page::CardView;
@@ -16,47 +16,14 @@ fn cell_call(id: &str) -> String {
 }
 
 impl HostWindow {
-    /// The open Skills project's folder, and what Skills' scripts run with.
-    pub(super) fn skills_project(&mut self) -> Option<(PathBuf, ScriptEnv)> {
+    /// The open project's folder, and what Spumcake-Skills' scripts run
+    /// with, when Studio finds the scripts.
+    pub(super) fn project_scripts(&mut self) -> Option<(PathBuf, ScriptEnv)> {
         let folder = self.project.as_ref()?.folder.clone();
-        if !crate::skills_setup::is_skills_project(&folder) {
-            return None;
-        }
-        let skills = crate::skills_setup::listed_skills(&self.settings.skill_folders);
+        let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&self.settings.skill_folders));
         let (settings, keys, data) = (&self.settings, &mut self.keys, self.data.clone());
         let env = crate::runner::script_env(settings, &mut |id| keys.get(id), data.as_deref(), crate::runner::scripts_folder(&skills));
         env.scripts.is_some().then_some((folder, env))
-    }
-
-    /// Tells every running workspace `project` again when the open
-    /// project's folder becomes a Skills project, or stops being one, as
-    /// `library/` and `requests/` appear or go: looked at once a second at
-    /// most, as the window's other project polls are.
-    pub(super) fn tell_skills_project(&mut self) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
-        let Some((folder, told, at)) = self.project_skills.clone() else {
-            return;
-        };
-        if at.elapsed() < EVERY {
-            return;
-        }
-        let skills = crate::skills_setup::is_skills_project(&folder);
-        self.project_skills = Some((folder.clone(), skills, std::time::Instant::now()));
-        if skills == told {
-            return;
-        }
-        for started in self.apps.iter_mut().filter(|started| !started.running.exited()) {
-            started.running.send(&HostMessage::Project { folder: folder.display().to_string(), skills });
-        }
-    }
-
-    /// Why a run may not go straight to a model: the open project is a
-    /// Skills project, where every generation is a request.py request.
-    pub(super) fn direct_runs_refused(&self) -> Option<String> {
-        let folder = &self.project.as_ref()?.folder;
-        crate::skills_setup::is_skills_project(folder).then(|| {
-            String::from("In a Skills project every generation runs through Spumcake-Skills' request.py, so nothing is sent to a model directly. Add your Spumcake-Skills checkout under Settings, Skills, Skill folders.")
-        })
     }
 
     /// A cell as an item: its tab's file, relative to the project, and its id.
@@ -75,10 +42,10 @@ impl HostWindow {
         ItemRef { path, item: Some(id.to_string()) }
     }
 
-    /// What the card shows of a cell in a Skills project, and its rounds
+    /// What the card shows of a cell, and its rounds
     /// sent to its workspace when they changed.
     pub(super) fn prompt_card_view(&mut self, app: usize, tab: &str, cell: &Cell) -> Option<CardView> {
-        let (folder, env) = self.skills_project()?;
+        let (folder, env) = self.project_scripts()?;
         let scripts = env.scripts.clone()?;
         let at = self.cell_item(app, tab, &cell.id);
         let view = self.prompt_page.card(&folder, &scripts, &env.vars, &self.settings, cell, &at);
@@ -89,10 +56,17 @@ impl HostWindow {
         Some(view)
     }
 
-    /// Generate, or Try again, on a cell in a Skills project: its spec goes
-    /// to the plan card, and runs only as approved. False outside one.
+    /// Generate, or Try again, on a cell: its spec goes to the plan card,
+    /// and runs only as approved. With no project open it is not the
+    /// runner's, and false; with no Spumcake-Skills found, the cell says so.
     pub(super) fn run_prompt_cell(&mut self, id: &str) -> bool {
-        let Some((folder, env)) = self.skills_project() else { return false };
+        if self.project.is_none() {
+            return false;
+        }
+        let Some((folder, env)) = self.project_scripts() else {
+            self.board.failed.insert(id.to_string(), String::from(crate::skills_checkout::MISSING));
+            return true;
+        };
         let Some(scripts) = env.scripts.clone() else { return false };
         let Some((app, tab)) = self.cell_home(id) else { return false };
         let Some(cell) = self.panel_cell(app, &tab, id) else { return false };
@@ -151,7 +125,7 @@ impl HostWindow {
     pub(super) fn edit_prompt_step(&mut self, id: &str, input: &[CellPart], settings: Option<&serde_json::Value>) -> bool {
         let Some((app, tab)) = self.cell_home(id) else { return false };
         let Some(step) = self.panel_cell(app, &tab, id).and_then(|cell| cell.step) else { return false };
-        let Some((folder, env)) = self.skills_project() else { return false };
+        let Some((folder, env)) = self.project_scripts() else { return false };
         let Some(scripts) = env.scripts.clone() else { return false };
         if let Err(reason) = self.prompt_page.save_step(&folder, &scripts, &env.vars, &step, input, settings) {
             self.tell(format!("The step could not be saved: {reason}"));
@@ -163,7 +137,7 @@ impl HostWindow {
     pub(super) fn open_cell_report(&mut self, id: &str) {
         let Some((app, tab)) = self.cell_home(id) else { return };
         let Some(cell) = self.panel_cell(app, &tab, id) else { return };
-        let Some((folder, env)) = self.skills_project() else {
+        let Some((folder, env)) = self.project_scripts() else {
             self.tell(String::from("This cell's report is not known yet."));
             return;
         };
@@ -188,12 +162,12 @@ impl HostWindow {
         if asked.is_empty() {
             return;
         }
-        let Some((folder, env)) = self.skills_project() else {
-            let outside = String::from("Files are filed into a Skills project only.");
+        let Some((folder, env)) = self.project_scripts() else {
+            let why = String::from(if self.project.is_some() { crate::skills_checkout::MISSING } else { crate::skills_checkout::NO_PROJECT });
             for (app, (_, _, _, id)) in asked {
                 match id {
-                    Some(id) => self.send(app, HostMessage::Filed { id, file: String::new(), error: Some(outside.clone()) }),
-                    None => self.tell(outside.clone()),
+                    Some(id) => self.send(app, HostMessage::Filed { id, file: String::new(), error: Some(why.clone()) }),
+                    None => self.tell(why.clone()),
                 }
             }
             return;
@@ -261,7 +235,7 @@ impl HostWindow {
     }
 
     fn send_rounds(&mut self, id: &str) {
-        let Some((folder, env)) = self.skills_project() else { return };
+        let Some((folder, env)) = self.project_scripts() else { return };
         let Some(scripts) = env.scripts.clone() else { return };
         let Some((app, tab)) = self.cell_home(id) else { return };
         let Some(cell) = self.panel_cell(app, &tab, id) else { return };
@@ -293,7 +267,7 @@ impl HostWindow {
         if shown != model.rsplit('/').next().unwrap_or(model) {
             return shown;
         }
-        let skills = crate::skills_setup::listed_skills(&self.settings.skill_folders);
+        let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&self.settings.skill_folders));
         crate::prices::local_name(&skills, model).unwrap_or_default()
     }
 
@@ -305,7 +279,7 @@ impl HostWindow {
         let Some(id) = crate::prompt_page::cell_of_request(&folder, &request).and_then(|item| item.item) else { return };
         let Some((app, tab)) = self.cell_home(&id) else { return };
         self.prompt_page.forget();
-        let artifact = self.skills_project().and_then(|(folder, env)| {
+        let artifact = self.project_scripts().and_then(|(folder, env)| {
             let scripts = env.scripts.clone()?;
             self.prompt_page.canon(&folder, &scripts, &env.vars).step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned()
         });
