@@ -309,6 +309,14 @@ pub enum AppMessage {
         #[serde(default)]
         args: Vec<String>,
     },
+    /// Asks the host to open `path`, a file in the project, in the
+    /// workspace whose `edits` names `media_type`, which hears it as
+    /// `open_as_new`, as an Image cell's Edit opens its image.
+    OpenIn {
+        path: String,
+        #[serde(default)]
+        media_type: String,
+    },
 }
 
 /// The cell, and its image's path relative to the project, that new work
@@ -844,6 +852,7 @@ impl Declaration {
             | AppMessage::EditStep { .. }
             | AppMessage::RunStep { .. }
             | AppMessage::RunSkillScript { .. }
+            | AppMessage::OpenIn { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -1526,7 +1535,7 @@ mod tests {
                     ReferenceRole { label: "Start frame".into(), field: Some("image_url".into()), slot: true },
                 ],
                 reference_types: vec!["image/png".into(), "video/mp4".into()],
-                reference_menu: vec![MenuEntry { label: "Open".into(), icon: None, enabled: true, divider: false, action: Some(Action::new("open_reference")), submenu: Vec::new(), rename: false }],
+                reference_menu: vec![MenuEntry { tip: None, label: "Open".into(), icon: None, enabled: true, divider: false, action: Some(Action::new("open_reference")), submenu: Vec::new(), rename: false }],
                 settings: vec![
                     CellSetting { key: "seconds".into(), label: "Duration".into(), kind: RowKind::Number { min: 1.0, max: 10.0, percent: false, places: 1, centered: false } },
                     CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Choice { options: vec!["1024".into()], segmented: true, preview: ChoicePreview::Label } },
@@ -1857,6 +1866,7 @@ mod tests {
             args: vec!["--length".into(), "8.0".into(), "--json".into()],
         });
         round_trip_host(HostMessage::SkillScriptRan { id: "w1".into(), output: r#"{"path": "prompts/resources/a.json"}"#.into(), error: None });
+        round_trip_app(AppMessage::OpenIn { path: "work/start-frame.png".into(), media_type: "image/png".into() });
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: vec![serde_json::json!({"script": "python3 assemble.py"}), serde_json::json!(["8.0"])], error: None });
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: Vec::new(), error: Some("refused: --read-only, and this query writes".into()) });
         round_trip_host(HostMessage::Filed { id: "f1".into(), file: "prompts/resources/2026-11-17_10-00-assembly.json".into(), error: None });
@@ -1870,6 +1880,14 @@ mod tests {
         assert_eq!(
             parse_app_message(r#"{"type":"edit_step","id":"e1","tab":"1","step":{"chain":"Last order","step":"the animatic"}}"#).unwrap(),
             AppMessage::EditStep { id: "e1".into(), tab: "1".into(), step: animatic, script: None, refs: None }
+        );
+        let off: MenuEntry = serde_json::from_str(r#"{"label":"The animatic's frame at the playhead","enabled":false,"tip":"Add the shot's animatic as a Motion reference first."}"#).unwrap();
+        assert_eq!(off.tip.as_deref(), Some("Add the shot's animatic as a Motion reference first."));
+        assert_eq!(serde_json::from_str::<MenuEntry>(&serde_json::to_string(&off).unwrap()).unwrap(), off);
+        assert_eq!(serde_json::from_str::<MenuEntry>(r#"{"label":"Open"}"#).unwrap().tip, None);
+        assert_eq!(
+            parse_app_message(r#"{"type":"open_in","path":"a.png"}"#).unwrap(),
+            AppMessage::OpenIn { path: "a.png".into(), media_type: String::new() }
         );
         assert_eq!(parse_host_message(r#"{"type":"filed","id":"f1"}"#).unwrap(), HostMessage::Filed { id: "f1".into(), file: String::new(), error: None });
         assert_eq!(parse_host_message(r#"{"type":"step_ran","id":"s1"}"#).unwrap(), HostMessage::StepRan { id: "s1".into(), take: None, error: None });

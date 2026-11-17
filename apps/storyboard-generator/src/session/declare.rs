@@ -125,6 +125,7 @@ fn menu_rows(
 ) -> Vec<MenuEntry> {
     defs.iter()
         .map(|def| MenuEntry {
+            tip: None,
             label: def.label.to_string(),
             icon: None,
             enabled: enabled(def.action),
@@ -139,6 +140,7 @@ fn menu_rows(
 fn command_row(session: &Session, id: CommandId, icon: bool) -> MenuEntry {
     let definition = registry::command(id);
     MenuEntry {
+        tip: None,
         label: definition.label.to_string(),
         icon: icon.then(|| definition.icon.to_string()),
         enabled: session.command_enabled(id),
@@ -208,6 +210,7 @@ impl Session {
             .map(|row| match row {
                 registry::StoryboardMenuRow::Command(id) => command_row(self, *id, false),
                 registry::StoryboardMenuRow::Recent => MenuEntry {
+                    tip: None,
                     label: registry::RECENT_MENU_LABEL.to_string(),
                     icon: None,
                     enabled: !recent.is_empty(),
@@ -453,6 +456,7 @@ impl Session {
                             .iter()
                             .enumerate()
                             .map(|(index, (icon, label))| MenuEntry {
+                                tip: None,
                                 label: label.to_string(),
                                 icon: Some(icon.to_string()),
                                 enabled: true,
@@ -929,6 +933,7 @@ fn recent_rows(recent: &[PathBuf], clear_enabled: bool) -> Vec<MenuEntry> {
                 _ => title.clone(),
             };
             MenuEntry {
+                tip: None,
                 label,
                 icon: None,
                 enabled: true,
@@ -944,6 +949,7 @@ fn recent_rows(recent: &[PathBuf], clear_enabled: bool) -> Vec<MenuEntry> {
         .collect();
     let clear = registry::command(CommandId::ClearRecent);
     rows.push(MenuEntry {
+        tip: None,
         label: clear.label.to_string(),
         icon: None,
         enabled: clear_enabled,
@@ -986,6 +992,7 @@ pub(crate) fn session_value(value: protocol::PropValue) -> PropValue {
 /// shows them: sound arrives and the animatic leaves from here.
 fn film_menu_rows(skills: bool) -> Vec<MenuEntry> {
     let row = |label: &str, id: &str, divider: bool| MenuEntry {
+        tip: None,
         label: label.to_string(),
         icon: None,
         enabled: true,

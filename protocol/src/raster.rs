@@ -409,7 +409,7 @@ mod tests {
         film.items.push(FilmItem { pending: Some(FilmPending::Failed), ..tile });
         film.groups = vec![
             FilmGroup { label: "Round 14 · GPT Image 2.5".into(), count: 2, menu: Vec::new() },
-            FilmGroup { label: "Round 15 · GPT Image 2.5".into(), count: 3, menu: vec![crate::MenuEntry { label: "Next round from this".into(), icon: None, enabled: true, divider: false, action: Some(crate::Action::new("next_round")), submenu: Vec::new(), rename: false }] },
+            FilmGroup { label: "Round 15 · GPT Image 2.5".into(), count: 3, menu: vec![crate::MenuEntry { tip: None, label: "Next round from this".into(), icon: None, enabled: true, divider: false, action: Some(crate::Action::new("next_round")), submenu: Vec::new(), rename: false }] },
         ];
         let text = serde_json::to_string(&crate::AppMessage::Raster(view.clone())).unwrap();
         assert_eq!(crate::parse_app_message(&text).unwrap(), crate::AppMessage::Raster(view.clone()));

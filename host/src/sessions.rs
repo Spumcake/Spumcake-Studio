@@ -425,11 +425,11 @@ fn nav(ui: &mut egui::Ui, column: Rect, menu: &mut SessionMenu, events: &mut Vec
 fn project_menu(more: &egui::Response, project: &ProjectRow, menu: &mut SessionMenu, events: &mut Vec<SessionChoice>) {
     egui::Popup::menu(more).show(|ui| {
         let rows = [
-            widgets::MenuItem { label: "Rename", icon: Some("edit-pencil"), enabled: !project.locked, submenu: false, divider: false },
-            widgets::MenuItem { label: if project.pinned { "Unpin" } else { "Pin" }, icon: Some("pin"), enabled: true, submenu: false, divider: false },
-            widgets::MenuItem { label: if project.locked { "Unlock" } else { "Lock" }, icon: Some("lock"), enabled: true, submenu: false, divider: false },
-            widgets::MenuItem { label: "Share", icon: Some("share-ios"), enabled: false, submenu: false, divider: true },
-            widgets::MenuItem { label: "Archive", icon: Some("archive"), enabled: !project.locked, submenu: false, divider: true },
+            widgets::MenuItem { tip: None, label: "Rename", icon: Some("edit-pencil"), enabled: !project.locked, submenu: false, divider: false },
+            widgets::MenuItem { tip: None, label: if project.pinned { "Unpin" } else { "Pin" }, icon: Some("pin"), enabled: true, submenu: false, divider: false },
+            widgets::MenuItem { tip: None, label: if project.locked { "Unlock" } else { "Lock" }, icon: Some("lock"), enabled: true, submenu: false, divider: false },
+            widgets::MenuItem { tip: None, label: "Share", icon: Some("share-ios"), enabled: false, submenu: false, divider: true },
+            widgets::MenuItem { tip: None, label: "Archive", icon: Some("archive"), enabled: !project.locked, submenu: false, divider: true },
         ];
         match widgets::menu_rows(ui, &rows) {
             Some(0) if !project.locked => menu.renaming = Some((Renaming::Project(project.id.clone()), project.name.clone())),
@@ -695,10 +695,10 @@ fn row_menu(
         let unarchive = archived == Some(true);
         let mut rows = Vec::new();
         if unarchive {
-            rows.push(widgets::MenuItem { label: "Unarchive", icon: None, enabled: true, submenu: false, divider: false });
+            rows.push(widgets::MenuItem { tip: None, label: "Unarchive", icon: None, enabled: true, submenu: false, divider: false });
         }
-        rows.push(widgets::MenuItem { label: "Rename", icon: None, enabled: !locked, submenu: false, divider: false });
-        rows.push(widgets::MenuItem { label: "Delete", icon: None, enabled: !locked, submenu: false, divider: false });
+        rows.push(widgets::MenuItem { tip: None, label: "Rename", icon: None, enabled: !locked, submenu: false, divider: false });
+        rows.push(widgets::MenuItem { tip: None, label: "Delete", icon: None, enabled: !locked, submenu: false, divider: false });
         let picked = widgets::menu_rows(ui, &rows).map(|index| if unarchive { index } else { index + 1 });
         match picked {
             Some(0) => {

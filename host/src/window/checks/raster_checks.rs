@@ -345,6 +345,7 @@ const IMAGES: [(&str, u32, u32); 3] = [("Harbor", 32, 18), ("Tower", 18, 32), ("
 /// host, so the host frames the image above the strip.
 fn film(dir: &Path) -> Film {
     let row = |label: &str, id: &str, arg: Option<Value>| MenuEntry {
+        tip: None,
         label: label.to_string(),
         icon: None,
         enabled: true,

@@ -163,6 +163,8 @@ struct HostWindow {
     prompt_page: crate::prompt_page::PromptPage,
     /// What workspaces asked to publish, and the cards for it.
     publishing: publishing::Publishing,
+    /// Canon reads and skill scripts answered off the window's thread.
+    canon_answers: canon_steps::Answers,
     /// Connection tests and model lists, by endpoint.
     probes: crate::endpoints::Probes,
     /// The assistant's endpoint and prompt as last sent, so a change in
@@ -291,6 +293,7 @@ impl HostWindow {
             runner: crate::runner::Runner::default(),
             prompt_page: crate::prompt_page::PromptPage::default(),
             publishing: publishing::Publishing::default(),
+            canon_answers: canon_steps::Answers::default(),
             probes: crate::endpoints::Probes::default(),
             configured: None,
             level: None,
@@ -734,8 +737,10 @@ impl eframe::App for HostWindow {
         self.take_cell_requests();
         self.take_items();
         self.take_reports();
+        self.take_open_ins();
         self.take_publishing();
         self.take_canon_steps();
+        self.send_canon_answers();
         // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
         let editable = if self.locked() { Vec::new() } else { self.edited_types() };
@@ -1540,6 +1545,44 @@ impl HostWindow {
         for request in asked {
             self.open_report(&request);
         }
+    }
+
+    /// A workspace asked to open a project file in the workspace that edits
+    /// its media type, which opens it as new and is shown.
+    fn take_open_ins(&mut self) {
+        let mut asked = Vec::new();
+        for started in &mut self.apps {
+            asked.extend(started.running.declared.open_ins.drain(..));
+        }
+        for (path, media) in asked {
+            if let Err(reason) = self.open_in(&path, &media) {
+                self.tell(reason);
+            }
+        }
+    }
+
+    fn open_in(&mut self, path: &str, media: &str) -> Result<(), String> {
+        let folder = self.project.as_ref().map(|project| project.folder.clone()).ok_or("No project is open.")?;
+        let inside = !path.is_empty() && std::path::Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)));
+        if !inside {
+            return Err(format!("“{path}” is not a file in the project."));
+        }
+        let file = folder.join(path);
+        if !file.is_file() {
+            return Err(format!("{path} cannot be read."));
+        }
+        let app = self
+            .apps
+            .iter()
+            .position(|started| !started.running.exited() && started.running.declared.edits.iter().any(|known| known == media))
+            .ok_or("No application here edits this file.")?;
+        let name = file.file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_default();
+        if !self.workspace_shown() {
+            self.toggle_workspace();
+        }
+        self.selected = app;
+        self.send(app, HostMessage::OpenAsNew { path: file.display().to_string(), name, from: None });
+        Ok(())
     }
 
     /// Opens a request's report page, or says why there is none.
