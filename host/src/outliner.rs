@@ -29,6 +29,10 @@ fn name_font() -> egui::FontId {
 /// The layers. `paged` is a panel with page tabs, where the list follows the
 /// sections rather than starting the page.
 pub(crate) fn show(ui: &mut egui::Ui, layers: &Layers, paged: bool, sent: &mut Vec<Sent>) {
+    if layers.plain {
+        plain(ui, layers, paged, sent);
+        return;
+    }
     let flags = &layers.flags;
     if !paged {
         // The first row is centered on the same line as another page's first
@@ -130,6 +134,65 @@ pub(crate) fn show(ui: &mut egui::Ui, layers: &Layers, paged: bool, sent: &mut V
             let _ = data.remove::<(u64, u64)>(color_id);
         }
     });
+}
+
+/// A plain list, as the approved camera list (vp-camera-list) shows:
+/// each group row a grey heading with a hairline under it, and each other
+/// row its thumbnail or icon, its name, and its value in grey at the right,
+/// the selected row on pale blue. A click selects; there is no eye, lock,
+/// renaming, or dragging.
+fn plain(ui: &mut egui::Ui, layers: &Layers, paged: bool, sent: &mut Vec<Sent>) {
+    if !paged {
+        ui.add_space(crate::panel::FIRST_LINE - ROW / 2.0);
+    }
+    for node in &layers.rows {
+        if node.group {
+            ui.add_space(8.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+            ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, &node.name, name_font(), MUTED);
+            ui.painter().hline((rect.left() + 8.0)..=(rect.right() - 8.0), rect.bottom() - 0.5, Stroke::new(1.0, ROW_RULE));
+            continue;
+        }
+        let height = if node.thumbnail.is_some() { S.of(32.0) } else { ROW };
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+        if node.selected {
+            ui.painter().rect_filled(rect.shrink2(vec2(0.0, 1.0)), 6.0, PICKED);
+        } else if response.hovered() {
+            ui.painter().rect_filled(rect.shrink2(vec2(0.0, 1.0)), 6.0, SELECTED);
+        }
+        let x = rect.left() + 12.0;
+        let name_left = match &node.thumbnail {
+            Some(thumbnail) => {
+                let frame = Rect::from_min_size(pos2(x, rect.center().y - S.of(11.0)), vec2(S.of(36.0), S.of(22.0)));
+                let size = vec2(thumbnail.width.max(1) as f32, thumbnail.height.max(1) as f32);
+                let scale = (frame.width() / size.x).min(frame.height() / size.y);
+                let image = Rect::from_center_size(frame.center(), size * scale);
+                let painter = ui.painter().with_clip_rect(frame);
+                if let Some((texture, _)) =
+                    crate::raster::raw_image(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false)
+                {
+                    painter.image(texture, image, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                ui.painter().rect_stroke(frame, 2.0, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+                frame.right() + 12.0
+            }
+            None => {
+                toolbar::paint_icon(ui.painter(), pos2(x + 9.0, rect.center().y), &node.icon, S.of(15.0), TEXT);
+                x + 30.0
+            }
+        };
+        let right = match &node.value {
+            Some(value) => paint_value(ui.painter(), value, rect.right() - 12.0, rect.center().y) - VALUE_GAP,
+            None => rect.right() - 8.0,
+        };
+        let mut job = egui::text::LayoutJob::simple_singleline(node.name.clone(), name_font(), TEXT);
+        job.wrap = egui::text::TextWrapping::truncate_at_width((right - name_left).max(1.0));
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(pos2(name_left, rect.center().y - galley.size().y / 2.0), galley, TEXT);
+        if response.clicked() {
+            sent.push(Sent::Run(node.click.with_value(json!(false))));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

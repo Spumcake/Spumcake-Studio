@@ -15,6 +15,9 @@ kurbo = "=0.13.1"
 libc = "=0.2.190"
 octotablet = { version = "=0.1.0", default-features = false, features = ["wayland-tablet-unstable-v2"] }
 protocol = { path = "../protocol" }
+# Spumcake-Render's engine, which also brings its scene reader, at the commit
+# the Studio session manager set on 2026-11-16.
+spumcake-render = { git = "https://github.com/Spumcake/Spumcake-Render", rev = "7ed9095c6785ea9ba1c97766347aa06529f6dc06" }
 keyring = "=4.2.0"
 rfd = "=0.15.4"
 serde = { version = "=1.0.229", features = ["derive"] }

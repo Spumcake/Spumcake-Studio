@@ -1370,6 +1370,7 @@ impl Session {
             bounds: None,
             camera,
             camera_owner: RasterCamera::Workspace,
+            transport: None,
             film: Some(declare::film(self, &self.tabs[index])),
             #[cfg(feature = "transport")]
             transport: declare::transport(self, &self.tabs[index]),

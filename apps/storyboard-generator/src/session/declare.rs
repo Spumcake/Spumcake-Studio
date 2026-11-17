@@ -665,6 +665,7 @@ impl Session {
             reorder: Action::new("reorder"),
             sort_color: Action::new("sort_color"),
             nest: false,
+            plain: false,
             flags: flag_icons(),
             actions: Vec::new(),
         }

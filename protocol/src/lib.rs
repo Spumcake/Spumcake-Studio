@@ -12,6 +12,7 @@ mod items;
 mod raster;
 mod timeline;
 mod tools;
+mod transport;
 mod view3d;
 pub use cell::*;
 pub use declare::*;
@@ -19,6 +20,7 @@ pub use items::*;
 pub use raster::*;
 pub use timeline::*;
 pub use tools::*;
+pub use transport::*;
 pub use view3d::*;
 
 /// The version this crate speaks. A sub-application's first message says
@@ -211,6 +213,12 @@ pub enum AppMessage {
         names: bool,
         #[serde(default, skip_serializing_if = "View3dTool::is_default")]
         tool: View3dTool,
+        /// The scene's animation, played under the view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<Transport>,
+        /// A line under the view, such as which builder the scene came from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     /// Asks the host to show that request's report, `requests/<request>.html`
     /// in the project.
@@ -567,6 +575,13 @@ pub enum HostMessage {
         object: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         label: String,
+    },
+    /// The user scrubbed a tab's transport to `time`, in seconds, or the
+    /// host's clock stopped there.
+    TransportTime {
+        tab: String,
+        #[serde(default)]
+        time: f64,
     },
     /// A draft cell is now that chain step: keep only the pointer, as a
     /// step's cell does, with empty `input`, `versions`, and `output`.
@@ -1612,7 +1627,7 @@ mod tests {
             id: "v1".into(),
             thumbnail: Some(Thumbnail { path: "/run/w.rgba".into(), width: 120, height: 40, revision: 1 }),
             badge: "8.0 s".into(),
-            cues: vec![Cue { at: 3.25, label: "Door".into() }],
+            cues: vec![Cue { at: 3.25, label: "Door".into(), colour: None }],
             error: None,
         });
         round_trip_app(AppMessage::Previewed { id: "v2".into(), thumbnail: None, badge: String::new(), cues: Vec::new(), error: Some("This file could not be read.".into()) });
@@ -1698,6 +1713,8 @@ mod tests {
             time: 3.5,
             names: true,
             tool: View3dTool::Pan,
+            transport: None,
+            status: Some("far-end-wall · Scene from build-previs 4195103 · 105 objects".into()),
         });
         round_trip_app(AppMessage::View3d {
             tab: "1".into(),
@@ -1708,6 +1725,21 @@ mod tests {
             time: 0.0,
             names: false,
             tool: View3dTool::Orbit,
+            transport: Some(Transport {
+                length: 8.0,
+                fps: 24.0,
+                time: 3.4,
+                playing: true,
+                clock: TransportClock::Host,
+                cues: vec![Cue { at: 3.0, label: "door".into(), colour: Some([234, 88, 12]) }],
+                rows: vec![TransportRow {
+                    label: "Door".into(),
+                    image: Thumbnail { path: "/run/door.rgba".into(), width: 600, height: 20, revision: 2 },
+                }],
+                play: Action::new("transport.play"),
+                step: Action::new("transport.step"),
+            }),
+            status: None,
         });
         assert_eq!(
             parse_app_message(r#"{"type":"view3d","tab":"1"}"#).unwrap(),
@@ -1720,8 +1752,15 @@ mod tests {
                 time: 0.0,
                 names: false,
                 tool: View3dTool::Orbit,
+                transport: None,
+                status: None,
             }
         );
+        let transport: Transport = serde_json::from_str(r#"{"length":8,"play":{"id":"p"},"step":{"id":"s"}}"#).unwrap();
+        assert_eq!((transport.fps, transport.clock, transport.playing), (24.0, TransportClock::Host, false));
+        let cue: Cue = serde_json::from_str(r#"{"at":3}"#).unwrap();
+        assert_eq!(cue.colour, None);
+        round_trip_host(HostMessage::TransportTime { tab: "1".into(), time: 3.375 });
         let over: View3dReference = serde_json::from_str(r#"{"image":"r.rgba","width":2,"height":1,"show":{"kind":"over"}}"#).unwrap();
         assert_eq!(over.show, ReferenceShow::Over { opacity: 0.5 });
         round_trip_app(AppMessage::Contents { tab: "1".into(), kind: ContentsKind::View3d });

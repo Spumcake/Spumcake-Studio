@@ -170,6 +170,7 @@ impl Session {
             bounds: None,
             camera,
             camera_owner: protocol::RasterCamera::Host,
+            transport: None,
             film: Some(film),
             text: None,
         })
