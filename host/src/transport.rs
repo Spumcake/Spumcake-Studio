@@ -39,6 +39,19 @@ pub(crate) enum Event {
     Command(protocol::Action),
 }
 
+/// The transport row drawn this pass, if one was, as `film::drawn` says
+/// the filmstrip's.
+pub(crate) fn drawn(ctx: &egui::Context) -> Option<Rect> {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|data| data.get_temp::<(u64, Rect)>(drawn_id()))
+        .filter(|(at, _)| *at == pass)
+        .map(|(_, rect)| rect)
+}
+
+fn drawn_id() -> egui::Id {
+    egui::Id::new("transport-drawn")
+}
+
 /// The transport row under the view: play or pause, a frame back and
 /// forward, the time and the length, and the scrubber with its frame ticks,
 /// its cues, and its thin rows, as the approved views (vp-door-swing) show,
@@ -46,6 +59,9 @@ pub(crate) enum Event {
 /// With the host's clock, the time runs on while playing, snapped to frames,
 /// and stops at the end; returns the time to draw.
 pub(crate) fn row(ui: &mut egui::Ui, clock: &mut Clock, t: &protocol::Transport, band: Rect, out: &mut Vec<Event>) -> f64 {
+    // Where it was drawn this pass, so a tab's notices sit above it.
+    let pass = ui.ctx().cumulative_pass_nr();
+    ui.ctx().data_mut(|data| data.insert_temp(drawn_id(), (pass, band)));
     let fps = if t.fps > 0.0 { t.fps } else { 24.0 };
     let snap = |time: f64| ((time * fps).round() / fps).clamp(0.0, t.length.max(0.0));
     let host_clock = t.clock == protocol::TransportClock::Host;

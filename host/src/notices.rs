@@ -1,8 +1,8 @@
 //! A tab's notice cards, at the bottom right of its contents, or the bottom
 //! left when the workspace asks: text, a detail line, progress, done or
 //! failed, actions, and a close mark, drawn from what the workspace declared
-//! with `notices`. In a raster tab they sit above its filmstrip, never over
-//! it.
+//! with `notices`. In a raster tab they sit above its filmstrip and its
+//! transport row, never over them.
 
 use eframe::egui::{self, Align2, Color32, Rect, Sense, pos2, vec2};
 use protocol::{Action, Notice, NoticeCorner, NoticeState};
@@ -28,7 +28,7 @@ const FIT_MAX: f32 = 480.0;
 /// chosen.
 pub(crate) fn show_in(ui: &mut egui::Ui, notices: &[Notice], corner: NoticeCorner, area: Rect, locked: bool) -> Vec<Action> {
     let mut chosen = Vec::new();
-    let area = above_strip(area, crate::film::drawn(ui.ctx()));
+    let area = above_strip(above_strip(area, crate::film::drawn(ui.ctx())), crate::transport::drawn(ui.ctx()));
     let mut bottom = area.bottom() - MARGIN;
     for notice in notices.iter().rev() {
         let width = match corner {
@@ -52,8 +52,8 @@ pub(crate) fn show_in(ui: &mut egui::Ui, notices: &[Notice], corner: NoticeCorne
     chosen
 }
 
-/// `area` with a filmstrip drawn along its bottom left out, so notices sit
-/// above the strip.
+/// `area` with a filmstrip or a transport row drawn along its bottom left
+/// out, so notices sit above it.
 fn above_strip(area: Rect, strip: Option<Rect>) -> Rect {
     match strip {
         Some(strip) if strip.top() > area.top() && strip.top() < area.bottom() && strip.x_range().intersects(area.x_range()) => {
@@ -192,7 +192,7 @@ mod tests {
     use super::*;
 
     /// Catches a bottom-left card that grows past its limits, or notices
-    /// drawn over a raster tab's filmstrip.
+    /// drawn over a raster tab's filmstrip or transport row.
     #[test]
     fn notices_fit_their_words_and_sit_above_the_strip() {
         assert_eq!(fit(10.0), FIT_MIN);
@@ -202,6 +202,9 @@ mod tests {
         let strip = Rect::from_min_max(pos2(0.0, 532.0), pos2(800.0, 600.0));
         assert_eq!(above_strip(area, Some(strip)).bottom(), 532.0);
         assert_eq!(above_strip(area, None), area);
+        // A transport row above the strip: notices sit above both.
+        let transport = Rect::from_min_max(pos2(0.0, 470.0), pos2(800.0, 532.0));
+        assert_eq!(above_strip(above_strip(area, Some(strip)), Some(transport)).bottom(), 470.0);
         // A strip from another place, outside the area, moves nothing.
         let elsewhere = Rect::from_min_max(pos2(900.0, 532.0), pos2(1200.0, 600.0));
         assert_eq!(above_strip(area, Some(elsewhere)), area);

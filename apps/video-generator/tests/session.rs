@@ -1614,7 +1614,7 @@ fn retime_and_upscale_make_drafts_the_host_runs() {
     );
     assert_eq!(
         retime.input,
-        [protocol::CellPart::Path { path: "takes/Wide.mp4".into(), media_type: "video/mp4".into(), role: Some("Reference".into()), field: Some("video_url".into()) }]
+        [protocol::CellPart::Path { path: "takes/Wide.mp4".into(), media_type: "video/mp4".into(), role: Some("structure".into()), field: Some("video_url".into()) }]
     );
     let run = program.wait("run_cell", |message| match message {
         AppMessage::RunCell { tab, cell, .. } if tab == "1" => Some(cell.clone()),
@@ -1645,7 +1645,7 @@ fn a_finished_take_is_labelled_and_compared_with_its_source() {
     let (dir, mut program, cell) = requests("finished");
     let mut retime = round("q2", 2, vec![take_file("takes/Dusk.mp4", false)]);
     retime.model = "topaz/interpolate/video".into();
-    retime.references = vec![protocol::SentReference { path: "takes/Dawn.mp4".into(), role: Some("Reference".into()) }];
+    retime.references = vec![protocol::SentReference { path: "takes/Dawn.mp4".into(), role: Some("structure".into()) }];
     send_takes(&mut program, &cell, vec![round("q1", 1, vec![take_file("takes/Dawn.mp4", false)]), retime]);
     let film = film_of(&program, "the two rounds", |film| film.groups.len() == 2);
     assert_eq!(film.groups[1].label, "Take 1 · 60 fps, from Take 1");
