@@ -517,7 +517,31 @@ fn a_request_stops_after_the_call_limit() {
     assert_eq!(stand_in.chats().len(), MAX_CALLS);
     let notes = notes(&events);
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("40"), "{notes:?}");
+    assert!(notes[0].contains(&MAX_CALLS.to_string()), "{notes:?}");
+}
+
+/// Catches a long chain that outgrows the model's context: a request of
+/// 100 calls, each answered with 20,000 characters, keeps what it sends
+/// each turn bounded, and its latest output whole.
+#[test]
+fn a_long_chain_stays_within_its_budget() {
+    let stand_in = StandIn::start(|n, _| {
+        if n < 100 {
+            calls_reply(&[("fixture-notes__reading__list", json!({"tab": "n1", "text": "x"}))])
+        } else {
+            text_reply("Done.")
+        }
+    });
+    let assistant = spawn(&stand_in.url, Some("test-key"));
+    assistant.send(Command::Send(request("a long chain", targets())));
+    let latest = format!("latest-{}", "y".repeat(20_000));
+    drive(&assistant, answer(json!({ "text": latest }), Vec::new()));
+    let chats = stand_in.chats();
+    assert_eq!(chats.len(), 101);
+    let last = chats[100].to_string();
+    assert!(last.len() < 400_000, "the 100th turn sent {} characters", last.len());
+    assert!(last.contains(&latest[..200]), "the latest output was cut");
+    assert!(last.contains("seen earlier in this request"), "nothing was cut");
 }
 
 #[test]

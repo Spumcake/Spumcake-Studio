@@ -27,6 +27,7 @@ mod route;
 mod runner;
 mod plan_card;
 mod prompt_page;
+mod prices;
 mod publish_card;
 mod tablet;
 mod tabs;

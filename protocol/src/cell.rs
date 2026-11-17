@@ -279,6 +279,11 @@ pub struct Round {
     /// Counted from 1 among the cell's rounds, as "Round 14" shows it.
     pub number: u32,
     pub model: String,
+    /// The model's name as it is read, such as "GPT Image 2.5", the name
+    /// the card shows; empty when the host does not know it, and the
+    /// workspace shows `model`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_name: String,
     /// The prompt as it was sent.
     #[serde(default)]
     pub prompt: String,

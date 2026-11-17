@@ -52,6 +52,8 @@ struct Busy {
     targets: Vec<Target>,
     stopped: bool,
     calls: usize,
+    /// Where this request's messages begin in the history.
+    start: usize,
 }
 
 struct Agent {
@@ -275,6 +277,7 @@ impl Agent {
             targets: request.targets,
             stopped: false,
             calls: 0,
+            start: self.history.len(),
         };
         if let Some(note) = self.converse(&mut busy) {
             self.entry(Role::Note, note);
@@ -343,6 +346,8 @@ impl Agent {
             if !image_parts.is_empty() {
                 self.history.push(json!({"role": "user", "content": image_parts}));
             }
+            let start = busy.start.min(self.history.len());
+            compact_request(&mut self.history[start..]);
             if busy.stopped {
                 return Some(String::from(STOPPED));
             }
@@ -700,35 +705,204 @@ fn reread(path: &Path) -> Value {
 /// of the person and the assistant, stay.
 fn compact(history: &mut [Value]) {
     for message in history.iter_mut() {
-        match message.get("role").and_then(Value::as_str) {
-            Some("tool") => {
-                let ok = message
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .and_then(|content| serde_json::from_str::<Value>(content).ok())
-                    .and_then(|content| content.get("ok").and_then(Value::as_bool));
-                let stub = json!({"ok": ok, "output": EARLIER}).to_string();
-                message["content"] = Value::String(stub);
+        stub(message, EARLIER, EARLIER_IMAGES);
+    }
+}
+
+/// Cuts a tool's output, or the message carrying tools' images, to a stub
+/// saying it was seen. Returns whether it was cut.
+fn stub(message: &mut Value, output: &str, images: &str) -> bool {
+    match message.get("role").and_then(Value::as_str) {
+        Some("tool") => {
+            let content = message.get("content").and_then(Value::as_str).and_then(|content| serde_json::from_str::<Value>(content).ok());
+            if content.as_ref().and_then(|content| content.get("output")).and_then(Value::as_str).is_some_and(|said| said == output) {
+                return false;
             }
-            Some("user") => {
-                // The message that carries tools' images, as `converse`
-                // builds it, not one the person sent.
-                let tool_images = message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .is_some_and(|parts| {
-                        parts.iter().any(|part| {
-                            part.get("text")
-                                .and_then(Value::as_str)
-                                .is_some_and(|text| text.starts_with(IMAGES_LEAD))
-                        })
-                    });
-                if tool_images {
-                    message["content"] = Value::String(String::from(EARLIER_IMAGES));
+            let ok = content.and_then(|content| content.get("ok").and_then(Value::as_bool));
+            message["content"] = Value::String(json!({"ok": ok, "output": output}).to_string());
+            true
+        }
+        Some("user") => {
+            // The message that carries tools' images, as `converse`
+            // builds it, not one the person sent.
+            let tool_images = message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.starts_with(IMAGES_LEAD))
+                    })
+                });
+            if tool_images {
+                message["content"] = Value::String(String::from(images));
+            }
+            tool_images
+        }
+        _ => false,
+    }
+}
+
+/// The most of one request's own messages kept whole, in characters, with
+/// each image counted as `IMAGE_WEIGHT`: about 60,000 tokens, so a long
+/// chain, such as a Skills step of 60 calls or more, stays within the
+/// model's context and each turn costs about the same as the last.
+const REQUEST_BUDGET: usize = 240_000;
+/// Once over the budget, cutting goes down to this, so the start of the
+/// request stays the same for many turns after, and a prompt cache holds.
+const REQUEST_AFTER_CUT: usize = 150_000;
+/// What one image weighs against the budget: about the 1,500 tokens a
+/// model reads one as, not the length of its encoding.
+const IMAGE_WEIGHT: usize = 6_000;
+/// The latest messages of a request, always kept whole.
+const KEEP_RECENT: usize = 12;
+/// The most image data one request carries, encoded: far below what model
+/// services accept in one request (about 20 MB for some), however few
+/// tokens the images come to.
+const IMAGE_BYTES: usize = 12_000_000;
+/// Once over it, older images are cut down to this.
+const IMAGE_BYTES_AFTER_CUT: usize = 8_000_000;
+
+/// The encoded bytes of a message's images.
+fn image_bytes(message: &Value) -> usize {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| parts.iter().filter_map(|part| part.pointer("/image_url/url").and_then(Value::as_str).map(str::len)).sum())
+        .unwrap_or(0)
+}
+
+/// What a message weighs: its text, with each image counted as
+/// `IMAGE_WEIGHT` rather than its encoded length.
+fn weight(message: &Value) -> usize {
+    let images: Vec<usize> = message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| parts.iter().filter_map(|part| part.pointer("/image_url/url").and_then(Value::as_str).map(str::len)).collect())
+        .unwrap_or_default();
+    message.to_string().len().saturating_sub(images.iter().sum()) + images.len() * IMAGE_WEIGHT
+}
+
+/// The ids of the calls that read the method the chain follows: a skill,
+/// or a file read by its full path, as a skill's own linked files are,
+/// outside the project. They are cut only when nothing else is left.
+fn skill_reads(messages: &[Value]) -> std::collections::HashSet<String> {
+    let method = |call: &Value| {
+        let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+        let path = || call.pointer("/function/arguments").and_then(Value::as_str).and_then(|arguments| serde_json::from_str::<Value>(arguments).ok()).and_then(|arguments| arguments.get("path").and_then(Value::as_str).map(String::from));
+        name.ends_with("read_skill") || name.ends_with("read_file") && path().is_some_and(|path| path.starts_with('/'))
+    };
+    messages
+        .iter()
+        .filter_map(|message| message.get("tool_calls").and_then(Value::as_array))
+        .flatten()
+        .filter(|call| method(call))
+        .filter_map(|call| call.get("id").and_then(Value::as_str).map(String::from))
+        .collect()
+}
+
+/// During a long request, its oldest images, then its oldest tool outputs,
+/// are cut to a stub once its messages pass the budget, never the latest
+/// few, and a skill's body only last. The calls, and every word of the
+/// person and the assistant, stay.
+fn compact_request(messages: &mut [Value]) {
+    // Images are cut first by their bytes, which a service limits however
+    // few tokens they come to, oldest first, never the latest.
+    let mut bytes: usize = messages.iter().map(image_bytes).sum();
+    if bytes > IMAGE_BYTES {
+        let latest = messages.iter().rposition(|message| image_bytes(message) > 0).unwrap_or(0);
+        for message in &mut messages[..latest] {
+            let before = image_bytes(message);
+            if before > 0 && stub(message, EARLIER_IN_REQUEST, EARLIER_IN_REQUEST_IMAGES) {
+                bytes -= before;
+                if bytes <= IMAGE_BYTES_AFTER_CUT {
+                    break;
                 }
             }
-            _ => {}
         }
+    }
+    let mut total: usize = messages.iter().map(weight).sum();
+    if total <= REQUEST_BUDGET {
+        return;
+    }
+    let skills = skill_reads(messages);
+    let is_skill = |message: &Value| message.get("tool_call_id").and_then(Value::as_str).is_some_and(|id| skills.contains(id));
+    let end = messages.len().saturating_sub(KEEP_RECENT);
+    // Images first, then outputs other than a skill's, then a skill's.
+    for pass in 0..3 {
+        for message in &mut messages[..end] {
+            let image = message.get("role").and_then(Value::as_str) == Some("user");
+            let wanted = match pass {
+                0 => image,
+                1 => !image && !is_skill(message),
+                _ => !image && is_skill(message),
+            };
+            if !wanted {
+                continue;
+            }
+            let before = weight(message);
+            if stub(message, EARLIER_IN_REQUEST, EARLIER_IN_REQUEST_IMAGES) {
+                total = total.saturating_sub(before.saturating_sub(weight(message)));
+                if total <= REQUEST_AFTER_CUT {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod compaction {
+    use super::*;
+
+    fn call(id: &str, name: &str) -> Value {
+        json!({ "role": "assistant", "content": null, "tool_calls": [{ "id": id, "type": "function", "function": { "name": name, "arguments": "{}" } }] })
+    }
+
+    fn output(id: &str, text: &str) -> Value {
+        json!({ "role": "tool", "tool_call_id": id, "content": json!({ "ok": true, "output": text }).to_string() })
+    }
+
+    /// Catches a chain that forgets its method when it looks at an image:
+    /// a skill read, many outputs, then a large image keep the skill whole,
+    /// and the request bounded.
+    #[test]
+    fn an_image_does_not_cut_the_skill_a_chain_follows() {
+        let skill = "s".repeat(10_000);
+        let mut messages = vec![call("read", "inpainter__project__read_skill"), output("read", &skill)];
+        for n in 0..20 {
+            messages.push(call(&format!("c{n}"), "inpainter__project__read_file"));
+            messages.push(output(&format!("c{n}"), &"x".repeat(15_000)));
+        }
+        messages.push(call("seen", "inpainter__project__look_at_file"));
+        messages.push(output("seen", "looked"));
+        messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": format!("{IMAGES_LEAD}`look_at_file` returned:") }, image_part("image/png", &"A".repeat(1_400_000))] }));
+        compact_request(&mut messages);
+        assert!(messages[1]["content"].as_str().unwrap().contains(&skill), "the skill's body was cut");
+        assert!(messages.last().unwrap().to_string().contains(&"A".repeat(1000)), "the latest image was cut");
+        let total: usize = messages.iter().map(weight).sum();
+        assert!(total <= REQUEST_BUDGET, "the request was left at {total}");
+    }
+
+    /// Catches a chain that looks at many keyframes sending a request too
+    /// large for a service to accept: twenty 2 MB images keep the request's
+    /// images under the byte limit, the latest whole, and the skill whole.
+    #[test]
+    fn many_keyframes_stay_within_what_a_service_accepts() {
+        let skill = "s".repeat(10_000);
+        let mut messages = vec![call("read", "inpainter__project__read_skill"), output("read", &skill)];
+        for n in 0..20 {
+            let id = format!("k{n}");
+            messages.push(call(&id, "inpainter__project__look_at_file"));
+            messages.push(output(&id, "looked"));
+            messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": format!("{IMAGES_LEAD}`look_at_file` returned:") }, image_part("image/png", &format!("{n:02}{}", "A".repeat(2_000_000)))] }));
+        }
+        compact_request(&mut messages);
+        let bytes: usize = messages.iter().map(image_bytes).sum();
+        assert!(bytes <= IMAGE_BYTES, "the request still carries {bytes} bytes of images");
+        assert!(messages.last().unwrap().to_string().contains("19AAAA"), "the latest image was cut");
+        assert!(messages[1]["content"].as_str().unwrap().contains(&skill), "the skill's body was cut");
     }
 }
 
@@ -738,4 +912,6 @@ fn compact(history: &mut [Value]) {
 // the owner saw on 2026-10-30.
 const EARLIER: &str = "This tool's output was seen when an earlier request ran and is no longer kept here. The replies after it were based on it. To know what is there now, read or look again.";
 const IMAGES_LEAD: &str = "The images ";
+const EARLIER_IN_REQUEST: &str = "This tool's output was seen earlier in this request and is no longer kept here, to save space. The replies after it were based on it. To know what is there now, read or look again.";
+const EARLIER_IN_REQUEST_IMAGES: &str = "[The images the tools returned here were seen earlier in this request; they are no longer kept, to save space. The replies after them were based on them. To see what is there now, look again.]";
 const EARLIER_IMAGES: &str = "[The images the tools returned here were seen when an earlier request ran; they are no longer kept, to save space. The replies after them were based on them. To see what is there now, look again.]";
