@@ -203,7 +203,7 @@ impl Session {
     }
 
     /// Publish hold: the hold of the open clip under the playhead, composited
-    /// as the export draws it, written as a PNG in the project, and asked to
+    /// as the export draws it, written as a PNG in `work/`, and asked to
     /// be published as "<shot>: rough board", made from the images its keys
     /// show. The storyboard in `work/` is never named as an input. Returns
     /// the artifact asked for, or why not.
@@ -219,12 +219,19 @@ impl Session {
         let mut plan = crate::export::plan(self.active_storyboard(), tracks, Some(project.as_path()));
         let shown = *plan.frames.get((clip.start + hold.start) as usize).ok_or_else(nothing)?;
         let pixels = crate::export::pixels(&mut crate::look::Looker::new(), &mut plan, shown);
-        let folder = project.join(protocol::PROJECT_DIR).join("cache").join("storyboard-generator");
+        // Written in `work/`, the setup's own folder, which the host files
+        // into the project with `request.py resource` before publishing.
+        let folder = project.join("work");
         std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
-        let name = format!("{}-{}-rough-board-{}.png", self.active_id().get(), clip.name.replace(' ', "-").to_lowercase(), hold.start);
-        let path = folder.join(&name);
-        media::write_png(&path, &pixels, plan.size).map_err(|error| error.to_string())?;
-        let source = format!("{}/cache/storyboard-generator/{name}", protocol::PROJECT_DIR);
+        let base = format!("{}-{}-rough-board-{}", self.active_id().get(), clip.name.replace(' ', "-").to_lowercase(), hold.start + 1);
+        let name = (1..1000).map(|n| if n == 1 { format!("{base}.png") } else { format!("{base}-{n}.png") }).find(|name| !folder.join(name).exists()).unwrap_or_else(|| format!("{base}.png"));
+        // As RGB, as keyframes are: `assemble.py` joins its frames with
+        // ffmpeg's concat, which cuts the video short where one frame's
+        // pixel format differs from the others'.
+        let rgb: Vec<u8> = pixels.chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+        let image = image::RgbImage::from_raw(plan.size.0, plan.size.1, rgb).ok_or("that hold has nothing to publish")?;
+        image.save(folder.join(&name)).map_err(|error| error.to_string())?;
+        let source = format!("work/{name}");
         // Its inputs are the images under its drawing, such as the canon
         // keyframe, so `touches` follows keyframe to rough board.
         let mut from: Vec<String> = Vec::new();
@@ -235,7 +242,7 @@ impl Session {
         }
         let stamp = hold_stamp(self.active_storyboard(), &clip, hold.start);
         let artifact = format!("{}: rough board", clip.name);
-        self.publishing.insert(artifact.clone(), (self.active_id(), clip_id, hold.start, stamp));
+        self.publishing.insert(artifact.clone(), (self.active_id(), clip_id, hold.start, stamp, folder.join(&name)));
         self.to_publish.push((artifact.clone(), source, from));
         Ok(artifact)
     }
@@ -248,9 +255,11 @@ impl Session {
     /// The host's answer to a publish: a hold asked for is now its rough
     /// board's file, or a card says why not.
     pub fn published(&mut self, artifact: &str, file: &str, error: Option<&str>) {
-        let Some((storyboard, clip, frame, stamp)) = self.publishing.remove(artifact) else {
+        let Some((storyboard, clip, frame, stamp, written)) = self.publishing.remove(artifact) else {
             return;
         };
+        // Filed, or not wanted: the copy in work/ has done its work.
+        let _ = std::fs::remove_file(&written);
         if let Some(error) = error {
             self.keep_failed(self.next_notice, "Hold not published", error);
             self.next_notice += 1;
@@ -445,10 +454,25 @@ mod tests {
         let take = session.import_sound(&dir.join("library/2026-11-12_20-03-otis-line-1.wav"), None, Some(0)).unwrap();
         assert_eq!(session.film().sound(take).unwrap().1.file, "library/2026-11-12_20-03-otis-line-1.wav");
         assert!(!dir.join("sounds").exists());
-        // One from outside is Skills' scripts' to file.
+        // One from outside is copied into work/ and filed through the host,
+        // then placed where it was filed.
         let outside = std::env::temp_dir().join(format!("storyboard-animatic-outside-{}.wav", std::process::id()));
         std::fs::write(&outside, wav_bytes(RATE, &clicks(24, &[]))).unwrap();
-        assert!(session.import_sound(&outside, None, None).unwrap_err().starts_with("In a Skills project"));
+        session.start_import(outside.clone());
+        let Some(protocol::AppMessage::FileResource { path, id: Some(id), .. }) = session.take_outgoing().pop() else {
+            panic!("the sound was not asked to be filed");
+        };
+        assert_eq!(path, format!("work/{}", outside.file_name().unwrap().to_string_lossy()));
+        assert!(dir.join(&path).is_file());
+        std::fs::create_dir_all(dir.join("prompts/resources")).unwrap();
+        std::fs::copy(&outside, dir.join("prompts/resources/2026-11-17_10-00-outside.wav")).unwrap();
+        session.filed(&id, "prompts/resources/2026-11-17_10-00-outside.wav", None);
+        assert!(!dir.join(&path).exists(), "the copy in work/ was kept");
+        let started = std::time::Instant::now();
+        while !session.poll_imports() && started.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(session.film().sounds().any(|(_, clip)| clip.file == "prompts/resources/2026-11-17_10-00-outside.wav"));
         // Drawing over a keyframe, then Publish hold: a PNG, asked to be published.
         let second = session.film().clips[1].id;
         session.enter_clip(second);
@@ -456,7 +480,7 @@ mod tests {
         assert_eq!(session.publish_hold().unwrap(), "Shot 2: rough board");
         let asked = session.take_publishes();
         assert_eq!(asked.len(), 1);
-        assert!(dir.join(&asked[0].1).is_file(), "the hold was not written as a PNG");
+        assert!(asked[0].1.starts_with("work/") && dir.join(&asked[0].1).is_file(), "the hold was not written as a PNG in work/");
         // Made from the keyframe under it, never from the storyboard in work/.
         assert_eq!(asked[0].2, ["library/2026-11-14_16-04-keyframe-the-bell.png"]);
         // The host's answer makes it the hold's image.
@@ -464,8 +488,65 @@ mod tests {
         session.leave_clip();
         let (saved, _) = session.timing(Some(8.0)).unwrap();
         assert_eq!(saved.frames[1].image, "prompts/resources/2026-11-17_10-00-shot-2-rough-board.png");
-        // The export is the step's to make here.
-        assert!(session.start_export().unwrap_err().starts_with("In a Skills project"));
+        // No sounds/ folder was made, here or by the export.
+        assert!(!dir.join("sounds").exists() && !dir.join("exports").exists());
+    }
+
+    #[test]
+    fn a_skills_export_runs_the_step_and_offers_its_take() {
+        let mut session = from_its_step("export-step");
+        // Untouched: the step runs at once.
+        let step = session.start_export().unwrap();
+        assert_eq!(step, "the animatic: animatic");
+        let Some(protocol::AppMessage::RunStep { id, step, .. }) = session.take_outgoing().pop() else {
+            panic!("the step was not run");
+        };
+        assert_eq!((step.chain.as_str(), step.step.as_str()), ("the animatic", "animatic"));
+        assert_eq!(session.animatic_state()["state"], "exporting");
+        // Pressed again while it runs: no second run, and no card says so.
+        assert!(session.start_export().is_err());
+        assert!(session.take_outgoing().is_empty());
+        assert!(!session.kept_notices.iter().any(|notice| notice.text == "Animatic video not exported"));
+        let dir = session.project().unwrap().to_path_buf();
+        std::fs::write(dir.join("library/2026-11-17_10-01-animatic.mp4"), b"video").unwrap();
+        session.step_ran(&id, Some("library/2026-11-17_10-01-animatic.mp4"), None);
+        let Some(protocol::AppMessage::Publish { artifact, source, .. }) = session.take_outgoing().pop() else {
+            panic!("the take was not offered for publishing");
+        };
+        assert_eq!((artifact.as_str(), source.as_str()), ("Last order: animatic", "library/2026-11-17_10-01-animatic.mp4"));
+        assert!(session.kept_notices.iter().any(|notice| notice.text == "Animatic video exported" && notice.detail == "library/2026-11-17_10-01-animatic.mp4"));
+        // The take is the animatic's file now, for list_items and renders.
+        assert_eq!(session.animatic_state()["state"], "done");
+        assert_eq!(session.animatic_state()["file"], "library/2026-11-17_10-01-animatic.mp4");
+        assert!(!dir.join("exports").exists());
+        // Retimed in another tool: the storyboard's own timing is saved
+        // over it before the step runs.
+        session.retimed = Some((session.active_id(), "prompts/resources/other.json".into()));
+        session.start_export().unwrap();
+        assert!(matches!(session.take_outgoing().pop(), Some(protocol::AppMessage::RunSkillScript { .. })));
+        session.saving = None;
+        session.retimed = None;
+        // Retimed: the timing is saved first, then the step runs.
+        let (second, last) = (session.film().clips[1].id, session.film().clips[3].id);
+        session.resize_clip(second, true, 2);
+        session.resize_clip(last, true, -2);
+        session.start_export().unwrap();
+        let Some(protocol::AppMessage::RunSkillScript { id, .. }) = session.take_outgoing().pop() else {
+            panic!("the timing was not saved first");
+        };
+        std::fs::copy(dir.join("prompts/resources/2026-11-14_16-07-animatic-assembly.json"), dir.join("prompts/resources/new.json")).unwrap();
+        session.skill_script_ran(&id, "{\"path\": \"prompts/resources/new.json\"}", None);
+        let Some(protocol::AppMessage::EditStep { id, .. }) = session.take_outgoing().pop() else {
+            panic!("the step's edit was not asked");
+        };
+        session.step_edited(&id, None);
+        let Some(protocol::AppMessage::RunStep { id, .. }) = session.take_outgoing().pop() else {
+            panic!("the step did not run after the save");
+        };
+        // A step that is not approved says why on the export's card.
+        session.step_ran(&id, None, Some("The user did not approve it, so nothing ran."));
+        assert!(session.kept_notices.iter().any(|notice| notice.text == "Animatic video not exported" && notice.detail == "The user did not approve it, so nothing ran."));
+        assert!(session.take_outgoing().is_empty());
     }
 
     #[test]
@@ -508,7 +589,7 @@ mod tests {
         let (mut session, _) = opened(label);
         session.set_skills(true);
         let script = "python3 assemble.py prompts/resources/2026-11-14_16-07-animatic-assembly.json .build/animatic.mp4";
-        let step = crate::session::project::AnimaticStep { chain: "the animatic".into(), name: "animatic".into(), script: script.into() };
+        let step = crate::session::project::AnimaticStep { chain: "the animatic".into(), name: "animatic".into(), artifact: "Last order: animatic".into(), script: script.into() };
         session.steps.insert(step.key(), step);
         let record = session.active_storyboard_mut();
         let mut read = record.assembly().unwrap().clone();

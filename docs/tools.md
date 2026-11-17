@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-114 tools.
+119 tools.
 
 ## The host
 
@@ -111,7 +111,7 @@ Make and time the film's clips and its sound, and inside a clip its layers, keyf
 - **`storyboard-generator__clips__remove_mark`**: Remove a label or a comment. Takes `layer` (integer, required), `mark` (integer, required).
 - **`storyboard-generator__clips__set_onion_skin`**: Turn onion skin on or off, and set how many keys before and after it shows, its starting opacity, how much it fades, and whether it counts keys only. A view aid: not an undo step. Takes `after` (integer), `before` (integer), `fade` (number), `keys_only` (boolean), `on` (boolean), `opacity` (number).
 - **`storyboard-generator__clips__set_storyboard`**: Set the storyboard's title and scene, which the sheet's header shows, and the film's frame size and paper. Takes `height` (integer), `paper` (integer), `scene` (string), `title` (string), `width` (integer).
-- **`storyboard-generator__clips__import_sound`**: Import a sound, or a video's sound, from a file: it is copied into the project's sounds folder and placed whole on a Sound track, a new one when none has room. Takes `path` (string, required), `frame` (integer), `track` (integer).
+- **`storyboard-generator__clips__import_sound`**: Import a sound, or a video's sound, from a file: it is copied into the project's sounds folder and placed whole on a Sound track, a new one when none has room. In a Skills project, a sound already in the project is placed where it is, and one from outside is filed into the project first, then placed. Takes `path` (string, required), `frame` (integer), `track` (integer).
 - **`storyboard-generator__clips__add_sound_track`**: Add an empty Sound track under the others. Takes nothing.
 - **`storyboard-generator__clips__rename_sound_track`**: Rename a Sound track. Takes `name` (string, required), `track` (integer, required).
 - **`storyboard-generator__clips__delete_sound_track`**: Delete a Sound track and the sounds on it. Takes `track` (integer, required).
@@ -123,9 +123,14 @@ Make and time the film's clips and its sound, and inside a clip its layers, keyf
 - **`storyboard-generator__clips__delete_sound`**: Take a sound off its track. Its file stays in the sounds folder. Takes `sound` (integer, required).
 - **`storyboard-generator__clips__set_listening_volume`**: Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step. Takes `volume` (number, required).
 - **`storyboard-generator__clips__read_sound`**: How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound. Takes `end` (integer, required), `start` (integer, required).
-- **`storyboard-generator__clips__export_animatic`**: Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done. Takes nothing.
+- **`storyboard-generator__clips__export_animatic`**: Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done. In a Skills project, the project's animatic step makes it instead, after the timing is saved when it differs, and its take is offered for publishing. Takes nothing.
 - **`storyboard-generator__clips__cancel_export`**: Cancel the export under way. Takes nothing.
 - **`storyboard-generator__clips__list_items`**: Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed. Takes nothing.
+- **`storyboard-generator__clips__insert_image_key`**: Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does. Takes `image` (string, required).
+- **`storyboard-generator__clips__publish_hold`**: In a Skills project, publish the open clip's hold under the playhead, drawing and all, as the rough board "<shot>: rough board", as Publish hold does, so the animatic can use it. The user approves it on the publish card. Takes nothing.
+- **`storyboard-generator__clips__open_animatic`**: In a Skills project, open the project's animatic as a storyboard: the assembly its build-animatic step names, with its keyframes as image keys and its sound. It opens when the project answers; read_film then shows it. Takes `step` (string).
+- **`storyboard-generator__clips__save_timing`**: In a Skills project, save the open animatic's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published. Takes nothing.
+- **`storyboard-generator__clips__follow_retime`**: Take the timing the project's animatic step now names, after it was retimed in another tool, as one undo step, as Follow does. Takes nothing.
 - **`storyboard-generator__clips__render_again`**: Render an item again from what made it: the animatic is exported again. Takes `item` (string, required).
 
 ### Read and look at a storyboard (`look`)

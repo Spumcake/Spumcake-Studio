@@ -360,7 +360,7 @@ pub struct Session {
     skills: bool,
     /// Holds asked to be published, by their artifact: the storyboard, the
     /// clip, and the hold's first frame in it.
-    publishing: HashMap<String, (DrawingId, u64, u32, String)>,
+    publishing: HashMap<String, (DrawingId, u64, u32, String, PathBuf)>,
     /// Publishes asked for and not yet sent to the host: the artifact, the
     /// file, and where it came from.
     to_publish: Vec<(String, String, Vec<String>)>,
@@ -381,6 +381,11 @@ pub struct Session {
     /// The last Save timing to the project that finished: the storyboard
     /// and the assembly it filed.
     last_saved: Option<(DrawingId, String)>,
+    /// Export animatic video in a Skills project, running the step.
+    stepping: Option<project::Stepping>,
+    /// Sounds from outside a Skills project being filed into it, by the
+    /// filing's id.
+    filing: HashMap<String, sound::Filing>,
     last_check: Option<std::time::Instant>,
 }
 
@@ -451,6 +456,8 @@ impl Session {
             saving: None,
             retimed: None,
             last_saved: None,
+            stepping: None,
+            filing: HashMap::new(),
             last_check: None,
         };
         session.push_blank();

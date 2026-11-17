@@ -23,8 +23,9 @@ pub const SAVE_WAIT: Duration = Duration::from_secs(600);
 const SEPARATOR: char = '\u{1f}';
 
 /// The project's animatics: each `build-animatic` step whose script runs
-/// `assemble.py`, by its chain and name, with its script.
-const STEPS: &str = "SELECT chain || char(31) || name || char(31) || script FROM step WHERE skill = 'build-animatic' AND script LIKE '%assemble.py%' ORDER BY chain, ord";
+/// `assemble.py`, by its chain and name, with the artifact it makes and its
+/// script.
+const STEPS: &str = "SELECT chain || char(31) || name || char(31) || coalesce(artifact, '') || char(31) || script FROM step WHERE skill = 'build-animatic' AND script LIKE '%assemble.py%' ORDER BY chain, ord";
 /// Every published file and the artifact it is published as.
 const ARTIFACTS: &str = "SELECT file || char(31) || id FROM artifact WHERE file IS NOT NULL";
 
@@ -33,6 +34,8 @@ const ARTIFACTS: &str = "SELECT file || char(31) || id FROM artifact WHERE file 
 pub struct AnimaticStep {
     pub chain: String,
     pub name: String,
+    /// The canon artifact it makes, such as "Last order: animatic".
+    pub artifact: String,
     pub script: String,
 }
 
@@ -93,6 +96,21 @@ pub struct Saving {
     /// Waiting for Skills' writer to file it, then for the step's edit.
     pub file: Option<String>,
     pub waiting: String,
+    /// Export animatic video asked for the save: the step runs once it is
+    /// done, made from these items.
+    pub then_export: Option<Vec<(String, String)>>,
+}
+
+/// Export animatic video in a Skills project: the animatic's step running
+/// again through the host, for the storyboard that asked.
+#[derive(Clone, Debug)]
+pub struct Stepping {
+    pub id: String,
+    pub storyboard: DrawingId,
+    pub step: AnimaticStep,
+    /// The items the animatic is made from, as the export began.
+    pub sources: Vec<(String, String)>,
+    pub since: Instant,
 }
 
 fn row_text(row: &Value) -> Option<String> {
@@ -107,8 +125,13 @@ fn steps_of(rows: &[Value]) -> Vec<AnimaticStep> {
     rows.iter()
         .filter_map(row_text)
         .filter_map(|text| {
-            let mut parts = text.splitn(3, SEPARATOR);
-            Some(AnimaticStep { chain: parts.next()?.to_string(), name: parts.next()?.to_string(), script: parts.next()?.to_string() })
+            let mut parts = text.splitn(4, SEPARATOR);
+            Some(AnimaticStep {
+                chain: parts.next()?.to_string(),
+                name: parts.next()?.to_string(),
+                artifact: parts.next()?.to_string(),
+                script: parts.next()?.to_string(),
+            })
         })
         .collect()
 }
@@ -155,9 +178,14 @@ impl Session {
     /// while the last ask is unanswered. A save that waited too long for
     /// the host gives up with a card.
     pub fn check_retimed(&mut self, now: Instant) {
-        if self.saving.as_ref().is_some_and(|saving| now.duration_since(saving.since) >= SAVE_WAIT) {
-            self.saving = None;
+        if let Some(saving) = self.saving.take_if(|saving| now.duration_since(saving.since) >= SAVE_WAIT) {
             self.timing_refused("The project did not answer.");
+            if saving.then_export.is_some() {
+                self.step_export_failed("The project did not answer.");
+            }
+        }
+        if self.stepping.take_if(|stepping| now.duration_since(stepping.since) >= SAVE_WAIT).is_some() {
+            self.step_export_failed("The project did not answer.");
         }
         let has_step = self.active_storyboard().assembly().is_some_and(|read| read.step.is_some());
         let asking = self.canon_asked.values().any(|asked| matches!(asked, Asked::Check(_)));
@@ -273,8 +301,75 @@ impl Session {
             args: writer_args(&assembly),
         });
         let storyboard = self.active_id();
-        self.saving = Some(Saving { storyboard, since: Instant::now(), assembly, notes, refs, step, file: None, waiting: id });
+        self.saving = Some(Saving { storyboard, since: Instant::now(), assembly, notes, refs, step, file: None, waiting: id, then_export: None });
         Ok(())
+    }
+
+    /// Export animatic video in a Skills project: the animatic is made by
+    /// running its step again, as `build-animatic` makes it, after saving
+    /// the timing when it differs. The take is then offered for publishing
+    /// on the publish card. Returns the step being run.
+    pub(crate) fn export_by_step(&mut self) -> Result<String, String> {
+        let read = self.active_storyboard().assembly().cloned().ok_or("This storyboard was not opened from the project's animatic.")?;
+        let (chain, name) = read.step.clone().ok_or("This storyboard was not opened from the project's animatic.")?;
+        let step = self.steps.get(&format!("{chain}: {name}")).cloned().ok_or("The project's animatic step is not known yet.")?;
+        if self.saving.is_some() {
+            return Err("The timing is already being saved.".to_string());
+        }
+        // A retime made elsewhere is not what the storyboard shows, so the
+        // storyboard's timing is saved over it first.
+        let differs = match self.timing(Some(read.assembly.length)) {
+            Ok((assembly, _)) => assembly != read.assembly || self.retimed().is_some(),
+            Err(reason) => return Err(reason),
+        };
+        let sources = self.export_sources();
+        if differs {
+            self.save_timing()?;
+            if let Some(saving) = self.saving.as_mut() {
+                saving.then_export = Some(sources);
+            }
+        } else {
+            self.run_step(self.active_id(), step.clone(), sources);
+        }
+        Ok(step.key())
+    }
+
+    /// Whether Export animatic video is running the animatic's step, or
+    /// saving the timing before it.
+    pub(crate) fn exporting_by_step(&self) -> bool {
+        self.stepping.is_some() || self.saving.as_ref().is_some_and(|saving| saving.then_export.is_some())
+    }
+
+    /// Asks the host to run the animatic's step again.
+    fn run_step(&mut self, storyboard: DrawingId, step: AnimaticStep, sources: Vec<(String, String)>) {
+        let id = self.next_request();
+        self.outgoing.push(AppMessage::RunStep { id: id.clone(), tab: storyboard.get().to_string(), step: step.step_ref() });
+        self.stepping = Some(Stepping { id, storyboard, step, sources, since: Instant::now() });
+    }
+
+    /// The host ran the animatic's step: its take is offered for publishing
+    /// as the step's artifact, and the export's card says where it is.
+    pub fn step_ran(&mut self, id: &str, take: Option<&str>, error: Option<&str>) {
+        let Some(stepping) = self.stepping.take_if(|stepping| stepping.id == id) else {
+            return;
+        };
+        let take = match (error, take) {
+            (None, Some(take)) if !take.is_empty() => take.to_string(),
+            (error, _) => {
+                self.step_export_failed(error.unwrap_or_default());
+                return;
+            }
+        };
+        if !stepping.step.artifact.is_empty() {
+            self.outgoing.push(AppMessage::Publish {
+                tab: stepping.storyboard.get().to_string(),
+                artifact: stepping.step.artifact.clone(),
+                source: take.clone(),
+                from: Vec::new(),
+                with: Vec::new(),
+            });
+        }
+        self.step_exported(stepping.storyboard, &take, stepping.sources);
     }
 
     /// Skills' writer ran: its output is the filed file's `{path, sha256}`.
@@ -308,22 +403,31 @@ impl Session {
         }
     }
 
-    /// The host filed a file: the saved timing, now pointed at by the step.
+    /// The host filed a file: a sound brought in from outside, or the saved
+    /// timing, now pointed at by the step.
     pub fn filed(&mut self, id: &str, file: &str, error: Option<&str>) {
+        if self.filing.contains_key(id) {
+            self.sound_filed(id, file, error);
+            return;
+        }
         let Some(saving) = self.saving.as_mut().filter(|saving| saving.waiting == id) else {
             return;
         };
         if let Some(error) = error {
             let error = error.to_string();
-            self.saving = None;
-            let id = self.next_notice;
-            self.next_notice += 1;
-            self.keep_failed(id, "Timing not saved", &error);
+            let export = self.saving.take().is_some_and(|saving| saving.then_export.is_some());
+            self.timing_refused(&error);
+            if export {
+                self.step_export_failed(&error);
+            }
             return;
         }
         let Some(script) = crate::assembly::repoint(&saving.step.script, file) else {
-            self.saving = None;
+            let export = self.saving.take().is_some_and(|saving| saving.then_export.is_some());
             self.timing_refused("The animatic's step names no assembly.");
+            if export {
+                self.step_export_failed("The animatic's step names no assembly.");
+            }
             return;
         };
         saving.file = Some(file.to_string());
@@ -347,10 +451,14 @@ impl Session {
             return;
         };
         if let Some(error) = error {
-            let id = self.next_notice;
-            self.next_notice += 1;
-            self.keep_failed(id, "Timing not saved", error);
+            self.timing_refused(error);
+            if saving.then_export.is_some() {
+                self.step_export_failed(error);
+            }
             return;
+        }
+        if let Some(sources) = saving.then_export.clone() {
+            self.run_step(saving.storyboard, saving.step.clone(), sources);
         }
         let file = saving.file.clone().unwrap_or_default();
         let bytes = self.project.as_ref().and_then(|project| std::fs::read(project.join(&file)).ok()).unwrap_or_default();
@@ -486,9 +594,9 @@ mod tests {
     #[test]
     fn rows_name_the_animatic_steps_whole() {
         let script = "python3 \"/skills/build-animatic/scripts/assemble.py\" prompts/resources/a.json .build/animatic.mp4";
-        let rows = vec![Value::String(format!("the animatic{SEPARATOR}animatic{SEPARATOR}{script}")), serde_json::json!([format!("x{SEPARATOR}y{SEPARATOR}z | w")])];
+        let rows = vec![Value::String(format!("the animatic{SEPARATOR}animatic{SEPARATOR}Last order: animatic{SEPARATOR}{script}")), serde_json::json!([format!("x{SEPARATOR}y{SEPARATOR}{SEPARATOR}z | w")])];
         let steps = steps_of(&rows);
-        assert_eq!(steps[0], AnimaticStep { chain: "the animatic".into(), name: "animatic".into(), script: script.into() });
+        assert_eq!(steps[0], AnimaticStep { chain: "the animatic".into(), name: "animatic".into(), artifact: "Last order: animatic".into(), script: script.into() });
         assert_eq!(steps[1].script, "z | w");
         assert_eq!(steps[0].key(), "the animatic: animatic");
     }

@@ -77,6 +77,63 @@ impl Copy {
         }
     }
 
+    /// Files a workspace's file as the host's runner does, giving its new
+    /// path in the project.
+    fn file(&self, path: &str, from: &[String]) -> Result<String, String> {
+        let stem = Path::new(path).file_stem().unwrap().to_string_lossy().to_string();
+        let mut args = vec!["resource".to_string(), path.to_string(), "--name".to_string(), stem];
+        for input in from {
+            args.extend(["--from".to_string(), input.clone()]);
+        }
+        let printed = self.run(&self.scripts.join("request.py"), &args)?;
+        Ok(printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().to_string())
+    }
+
+    /// Publishes a workspace's file as the host's runner does on the
+    /// publish card's yes: filed, then published as made from the canon
+    /// files it names.
+    fn publish(&self, artifact: &str, source: &str, from: &[String]) -> Result<String, String> {
+        let filed = self.file(source, from)?;
+        let mut args = vec!["publish", artifact, "--file", filed.as_str()];
+        let canon = self.pipeline(&["sql", "SELECT id || char(31) || file FROM artifact WHERE file IS NOT NULL", "--read-only"])?;
+        let names: Vec<String> = from.iter().filter_map(|input| canon.lines().find_map(|line| line.split_once('\u{1f}').filter(|(_, file)| file == input).map(|(name, _)| name.to_string()))).collect();
+        for name in &names {
+            args.extend(["--from", name.as_str(), "input"]);
+        }
+        self.pipeline(&args)?;
+        Ok(filed)
+    }
+
+    /// Publishes a step's take as the host's runner does on the publish
+    /// card's yes: made from what the step refers to, with their roles.
+    fn publish_take(&self, artifact: &str, take: &str) -> Result<String, String> {
+        let quoted = artifact.replace('\'', "''");
+        let chain = self.pipeline(&["sql", &format!("SELECT chain FROM step WHERE artifact = '{quoted}'"), "--read-only"])?;
+        let refs = self.pipeline(&["sql", &format!("SELECT refs FROM step WHERE artifact = '{quoted}'"), "--read-only"])?;
+        let refs: Vec<Value> = serde_json::from_str(refs.trim()).map_err(|error| error.to_string())?;
+        let chain = chain.trim().to_string();
+        let mut args = vec!["publish", artifact, "--file", take, "--chain", chain.as_str()];
+        let mut seen: Vec<&str> = Vec::new();
+        for reference in &refs {
+            let (Some(name), Some(role)) = (reference["artifact"].as_str(), reference["role"].as_str()) else { continue };
+            if !seen.contains(&name) {
+                seen.push(name);
+                args.extend(["--from", name, role]);
+            }
+        }
+        self.pipeline(&args)?;
+        Ok(take.to_string())
+    }
+
+    /// Runs a step again as the host's runner does, giving the take.
+    fn rerun(&self, chain: &str, step: &str) -> Result<Value, String> {
+        let ran = self.pipeline(&["rerun", "--step", chain, step, "--json"])?;
+        let take: Value = ran.lines().rev().find_map(|line| serde_json::from_str(line).ok()).ok_or_else(|| format!("rerun said: {ran}"))?;
+        // The step ran for real, never as a stand-in.
+        assert_eq!(take["stand_in"], json!(false), "{take}");
+        Ok(take)
+    }
+
     fn pipeline(&self, args: &[&str]) -> Result<String, String> {
         let mut all = vec![args[0].to_string(), PIPELINE.to_string()];
         all.extend(args[1..].iter().map(|arg| arg.to_string()));
@@ -110,6 +167,21 @@ impl Copy {
                     }
                     Some(HostMessage::StepEdited { id: id.clone(), error: self.pipeline(&args).err() })
                 }
+                AppMessage::FileResource { path, from, id: Some(id), .. } => Some(match self.file(path, from) {
+                    Ok(file) => HostMessage::Filed { id: id.clone(), file, error: None },
+                    Err(error) => HostMessage::Filed { id: id.clone(), file: String::new(), error: Some(error) },
+                }),
+                AppMessage::Publish { tab, artifact, source, from, .. } => {
+                    let published = if source.starts_with("work/") { self.publish(artifact, source, from) } else { self.publish_take(artifact, source) };
+                    Some(match published {
+                        Ok(file) => HostMessage::Published { tab: tab.clone(), artifact: artifact.clone(), file, version: None, error: None },
+                        Err(error) => HostMessage::Published { tab: tab.clone(), artifact: artifact.clone(), file: String::new(), version: None, error: Some(error) },
+                    })
+                }
+                AppMessage::RunStep { id, step, .. } => Some(match self.rerun(&step.chain, &step.step) {
+                    Ok(take) => HostMessage::StepRan { id: id.clone(), take: take["files"][0].as_str().map(str::to_string), error: None },
+                    Err(error) => HostMessage::StepRan { id: id.clone(), take: None, error: Some(error) },
+                }),
                 _ => None,
             };
             seen.push(message);
@@ -135,13 +207,15 @@ fn copy_or_skip() -> Option<Copy> {
 #[test]
 fn last_order_on_a_test_copy() {
     let Some(copy) = copy_or_skip() else { return };
-    let checks: [(&str, fn(&Copy)); 6] = [
+    let checks: [(&str, fn(&Copy)); 8] = [
         ("opens and saves back unchanged", opens_from_its_step_and_saves_back_unchanged),
         ("the step decides, not the newest file", the_step_decides_not_the_newest_file),
         ("Studio's retime is what build-animatic assembles", studios_retime_is_what_build_animatic_assembles),
         ("a retime in Claude Code shows in Studio", a_retime_in_claude_code_shows_in_studio),
         ("Claude Code's retime with Studio's files gone", claude_codes_retime_needs_none_of_studios_files),
         ("the step found by its skill", the_step_is_found_by_its_skill),
+        ("drawing reaches the animatic through canon", drawing_reaches_the_animatic_through_canon),
+        ("import and export the Skills way", import_and_export_the_skills_way),
     ];
     for (name, check) in checks {
         copy.reset();
@@ -401,4 +475,126 @@ fn the_step_is_found_by_its_skill(copy: &Copy) {
     let film = tool(&mut server, copy, &other, "read_film", json!({}));
     assert_eq!(film["project_animatic"]["step"], "the animatic: the other cut");
     assert_eq!(spans(&film)[0], (0, 48));
+}
+
+/// The decoded video's frame `frame`, small.
+fn frame_at(video: &Path, frame: u32) -> Vec<u8> {
+    let mut decoded = media::Video::open(video).unwrap();
+    decoded.frames(0, (192, 108)).map(Result::unwrap).find(|decoded| decoded.index == frame).unwrap().rgba
+}
+
+/// How far apart two frames are: the mean difference of their channels.
+fn apart(a: &[u8], b: &[u8]) -> f64 {
+    a.iter().zip(b).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / a.len().max(1) as f64
+}
+
+/// Check 4: a mark drawn on shot 2 is refused until its hold is published
+/// as "Shot 2: rough board", made from shot 2's keyframe; saved, the step
+/// assembles it, and `touches` follows the rough board to the animatic.
+fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
+    std::fs::create_dir_all(copy.project.join(".build")).unwrap();
+    // The animatic from the keyframes alone, assembled into .build/, which
+    // files nothing.
+    let published = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: animatic'", "--read-only"]).unwrap();
+    let assemble = copy.skills.join("skills/build-animatic/scripts/assemble.py");
+    copy.run(&assemble, &["prompts/resources/2026-11-14_16-07-animatic-assembly.json".to_string(), ".build/before.mp4".to_string()]).unwrap();
+    let before = copy.project.join(".build/before.mp4");
+    let before = (frame_at(&before, 30), frame_at(&before, 85));
+    let (mut server, tab) = opened(copy);
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    let second = film["clips"][1]["id"].as_u64().unwrap();
+    tool(&mut server, copy, &tab, "edit_clip", json!({ "clip": second }));
+    for row in 0..6 {
+        let y = 380.0 + f64::from(row) * 12.0;
+        let drawn = tool_in(&mut server, copy, &tab, "draw", "draw_stroke", json!({ "points": (0..40).map(|step| json!([400.0 + f64::from(step) * 20.0, y, 1.0])).collect::<Vec<_>>() }));
+        assert!(drawn.get("error").is_none(), "{drawn}");
+    }
+    tool(&mut server, copy, &tab, "leave_clip", json!({}));
+    let refused = tool(&mut server, copy, &tab, "save_timing", json!({}));
+    assert_eq!(refused["error"], "Shot 2 has drawing that is not published yet. Publish it first.");
+    tool(&mut server, copy, &tab, "edit_clip", json!({ "clip": second }));
+    let asked = tool(&mut server, copy, &tab, "publish_hold", json!({}));
+    assert_eq!(asked["made"]["artifact"], "Shot 2: rough board", "{asked}");
+    tool(&mut server, copy, &tab, "leave_clip", json!({}));
+    let made_from = copy.pipeline(&["sql", "SELECT source FROM made_from WHERE artifact = 'Shot 2: rough board'", "--read-only"]).unwrap();
+    assert_eq!(made_from.trim(), "Last order: keyframe, the bell");
+    // Filed with the keyframe as its input, and not from work/.
+    let board = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Shot 2: rough board'", "--read-only"]).unwrap();
+    let record = copy.run(&copy.scripts.join("request.py"), &["show".to_string(), board.trim().to_string()]).unwrap();
+    assert!(record.contains("library/2026-11-14_16-04-keyframe-the-bell.png") && !record.contains("\"work/"), "{record}");
+    // Export animatic video saves the timing, runs the step, and publishes
+    // its take on the card's yes.
+    let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
+    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    let (_, refs) = step(copy);
+    assert_eq!(refs[1]["artifact"], "Shot 2: rough board", "{refs}");
+    let take = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: animatic'", "--read-only"]).unwrap();
+    let touched = copy.pipeline(&["touches", "--artifact", "Shot 2: rough board", "--json"]).unwrap();
+    assert!(touched.contains("Last order: animatic"), "{touched}");
+    assert_ne!(take.trim(), published.trim(), "the take was not published");
+    let after = copy.project.join(take.trim());
+    // Shot 1 is as it was; shot 2 has the mark.
+    let (shot_1, shot_2) = (apart(&before.0, &frame_at(&after, 30)), apart(&before.1, &frame_at(&after, 85)));
+    assert!(shot_1 < 0.5 && shot_2 > 1.0, "the mark is not in shot 2 alone: shot 1 {shot_1:.2}, shot 2 {shot_2:.2}");
+    let cut = cuts(&after);
+    for want in [72u32, 101, 151] {
+        assert!(cut.iter().any(|at| at.abs_diff(want) <= 1), "the take's timing moved: {cut:?}");
+    }
+    nothing_published_changed(copy);
+}
+
+/// Check 10: a sound from outside is filed into the project, never into
+/// sounds/, and Export animatic video runs the step, never writing exports/.
+fn import_and_export_the_skills_way(copy: &Copy) {
+    std::fs::create_dir_all(copy.project.join(".build")).unwrap();
+    let (mut server, tab) = opened(copy);
+    let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
+    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    // The step made the animatic, and it is the animatic's file now.
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    assert_eq!(film["animatic"]["state"], "done", "{}", film["animatic"]);
+    let take = film["animatic"]["file"].as_str().unwrap();
+    assert!(copy.project.join(take).is_file() && !take.starts_with("exports/"), "{take}");
+    let outside = std::env::temp_dir().join(format!("storyboard-outside-sound-{}.wav", std::process::id()));
+    std::fs::write(&outside, crate::sounds::wav_bytes(crate::sounds::RATE, &crate::sounds::clicks(24, &[]))).unwrap();
+    let filing = tool(&mut server, copy, &tab, "import_sound", json!({ "path": outside.display().to_string() }));
+    let _ = std::fs::remove_file(&outside);
+    assert!(filing["made"].get("filing").is_some(), "{filing}");
+    // The import finishes on a thread of its own.
+    let started = std::time::Instant::now();
+    let mut placed = None;
+    while placed.is_none() && started.elapsed() < std::time::Duration::from_secs(10) {
+        let replies = server.tick();
+        copy.host(&mut server, replies);
+        let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+        placed = film["sound_tracks"].as_array().unwrap().iter().flat_map(|track| track["sounds"].as_array().unwrap().clone()).find_map(|sound| {
+            let file = sound["file"].as_str()?.to_string();
+            file.contains("storyboard-outside-sound").then_some(file)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let placed = placed.expect("the sound was not placed");
+    assert!(placed.starts_with("prompts/resources/"), "{placed}");
+    assert!(!copy.project.join("sounds").exists() && !copy.project.join("exports").exists());
+    assert!(!copy.project.join("work").join(outside.file_name().unwrap()).exists(), "the copy in work/ was kept");
+}
+
+fn tool_in(server: &mut Server, copy: &Copy, tab: &str, group: &str, name: &str, input: Value) -> Value {
+    let replies = server
+        .handle(HostMessage::Invoke {
+            call: format!("check-{name}"),
+            tab: tab.to_string(),
+            tool: protocol::tool_key("storyboard-generator", group, name),
+            input,
+            group: format!("check-{name}"),
+        })
+        .unwrap();
+    let mut output = Value::Null;
+    for reply in &replies {
+        if let AppMessage::ToolResult(result) = reply {
+            output = result.output.clone();
+        }
+    }
+    copy.host(server, replies);
+    output
 }

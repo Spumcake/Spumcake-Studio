@@ -13,11 +13,19 @@ const CARD: &str = "export";
 impl Session {
     /// Starts exporting the active storyboard's animatic into the project's
     /// `exports/` folder. Returns its file, relative to the project, or why
-    /// it cannot start, which the card also says.
+    /// it cannot start, which the card also says. In a Skills project the
+    /// animatic's step makes it, and this returns the step.
     pub fn start_export(&mut self) -> Result<String, String> {
         // The card under way already says so.
         if self.export.is_some() {
             return Err("An export is already under way.".to_string());
+        }
+        if self.skills && self.project.is_some() {
+            if self.exporting_by_step() {
+                return Err("An export is already under way.".to_string());
+            }
+            self.kept_notices.retain(|notice| notice.id != CARD);
+            return self.export_by_step().inspect_err(|reason| self.export_failed(reason));
         }
         let refused = self.export_refusal();
         if let Some(reason) = refused {
@@ -25,13 +33,9 @@ impl Session {
             return Err(reason);
         }
         let project = self.project.clone().expect("checked above");
-        let film = self.film().clone();
         // Named from the title, or from the storyboard's file when it has none.
         let file = crate::export::file_for(&crate::board::title_of(self.active_storyboard()));
-        let mut sources = vec![(CUT.to_string(), self.cut_fingerprint())];
-        for clip in &film.clips {
-            sources.push((crate::board::frames_id(clip.id), crate::board::frames_fingerprint(self.active_storyboard(), clip)));
-        }
+        let sources = self.export_sources();
         let tracks = self.mix_tracks();
         let plan = crate::export::plan(self.active_storyboard(), tracks, Some(project.as_path()));
         self.kept_notices.retain(|notice| notice.id != CARD);
@@ -39,14 +43,19 @@ impl Session {
         Ok(file)
     }
 
+    /// The items the animatic is made from, with their fingerprints now.
+    pub(crate) fn export_sources(&mut self) -> Vec<(String, String)> {
+        let mut sources = vec![(CUT.to_string(), self.cut_fingerprint())];
+        for clip in &self.film().clips {
+            sources.push((crate::board::frames_id(clip.id), crate::board::frames_fingerprint(self.active_storyboard(), clip)));
+        }
+        sources
+    }
+
     /// Why the animatic cannot be exported now, if it cannot.
     fn export_refusal(&mut self) -> Option<String> {
         if self.project.is_none() {
             return Some("The storyboard is not in a project.".to_string());
-        }
-        // A Skills project's animatic is its build-animatic step's to make.
-        if self.skills {
-            return Some("In a Skills project, the animatic is made by running its step, which Studio cannot do yet.".to_string());
         }
         if self.film().clips.is_empty() {
             return Some("The film has no clips to export.".to_string());
@@ -65,6 +74,30 @@ impl Session {
             progress: None,
             state: NoticeState::Failed,
             actions: vec![NoticeAction { label: "Try again".to_string(), action: Action::new("export_animatic") }],
+            close: Some(Action::with_arg("close_notice", serde_json::json!(CARD))),
+        });
+    }
+
+    /// The animatic's step could not make the animatic.
+    pub(crate) fn step_export_failed(&mut self, reason: &str) {
+        self.export_failed(reason);
+    }
+
+    /// The animatic's step made `storyboard`'s animatic as `take`, a file
+    /// in the project, which the publish card now offers: it is the
+    /// animatic's file from now on, as an export's is.
+    pub(crate) fn step_exported(&mut self, storyboard: draw::document::DrawingId, take: &str, sources: Vec<(String, String)>) {
+        let bytes = self.project.as_ref().and_then(|project| std::fs::read(project.join(take)).ok()).unwrap_or_default();
+        if let Some(record) = self.storyboards.iter_mut().find(|record| record.id() == storyboard) {
+            record.set_exported(Some(crate::export::Exported { file: take.to_string(), bytes: protocol::fingerprint(&bytes), sources }));
+        }
+        self.keep_notice(Notice {
+            id: CARD.to_string(),
+            text: "Animatic video exported".to_string(),
+            detail: take.to_string(),
+            progress: None,
+            state: NoticeState::Done,
+            actions: Vec::new(),
             close: Some(Action::with_arg("close_notice", serde_json::json!(CARD))),
         });
     }
@@ -121,8 +154,21 @@ impl Session {
         }
     }
 
-    /// The export's card while it runs.
+    /// The export's card while it runs: frames written, or, in a Skills
+    /// project, the step running.
     pub(crate) fn export_notice(&self) -> Option<Notice> {
+        let step = self.stepping.as_ref().map(|stepping| stepping.step.key()).or_else(|| self.saving.as_ref().filter(|saving| saving.then_export.is_some()).map(|saving| saving.step.key()));
+        if let Some(step) = step {
+            return Some(Notice {
+                id: CARD.to_string(),
+                text: "Exporting animatic video".to_string(),
+                detail: step,
+                progress: None,
+                state: NoticeState::Working,
+                actions: Vec::new(),
+                close: None,
+            });
+        }
         let job = self.export.as_ref()?;
         let written = job.written();
         Some(Notice {
@@ -149,7 +195,7 @@ impl Session {
             let project = self.project.as_deref()?;
             Some(path.strip_prefix(project).ok()?.to_string_lossy().replace('\\', "/"))
         });
-        let state = if self.export.is_some() {
+        let state = if self.export.is_some() || self.exporting_by_step() {
             "exporting"
         } else if self.kept_notices.iter().any(|notice| notice.id == CARD && notice.state == NoticeState::Failed) {
             "failed"

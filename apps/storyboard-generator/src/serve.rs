@@ -411,9 +411,7 @@ impl Server {
             HostMessage::Filed { id, file, error } => self.session.filed(&id, &file, error.as_deref()),
             HostMessage::StepEdited { id, error } => self.session.step_edited(&id, error.as_deref()),
             HostMessage::SkillScriptRan { id, output, error } => self.session.skill_script_ran(&id, &output, error.as_deref()),
-            // A Skills project's export runs its step: answered once the
-            // runner's rerun lands.
-            HostMessage::StepRan { .. } => {}
+            HostMessage::StepRan { id, take, error } => self.session.step_ran(&id, take.as_deref(), error.as_deref()),
             HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {
                 id,
                 thumbnail: None,
