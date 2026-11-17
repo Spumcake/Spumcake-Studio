@@ -1,14 +1,17 @@
 //! What the Image Generator and the Video Generator do alike: a layer's
 //! link to a file it never writes, notes marked on an image, the pre-vis
-//! check's edges, laying out a round's takes, and drawing the views' small
-//! labels in Inter, which ships here. Images here are straight
+//! check's edges, laying out a round's takes, drawing the views' small
+//! labels in Inter, which ships here, how a workspace's file keeps a
+//! cell, and a round's words. Images here are straight
 //! RGBA, rows top to bottom, as both workspaces keep them.
 
+pub mod cells;
 pub mod edges;
 pub mod label;
 pub mod layout;
 pub mod link;
 pub mod notes;
+pub mod words;
 
 /// An image as both workspaces hold one: `width` × `height` × 4 bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]

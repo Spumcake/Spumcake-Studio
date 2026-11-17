@@ -190,6 +190,7 @@ fn layer_row(dir: &Path, id: u64, parent: Option<u64>, depth: u32, name: &str, g
         mark: None,
         detail: None,
         toggle_icon: None,
+        toggle_tip: None,
         value: None,
     }
 }

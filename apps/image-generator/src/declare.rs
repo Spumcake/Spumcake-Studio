@@ -161,6 +161,24 @@ pub fn toolbar(session: &Session) -> Toolbar {
         button("frame", "Fit (Ctrl+0)", Action::new("canvas.fit"), true, false),
         ToolItem::Maximize { icon: "maximize".into(), restore_icon: "reduce".into(), tip: "Full screen".into() },
     ]);
+    // Beside the pre-vis check, while the image shown is of a take whose
+    // step publishes an artifact: the canon seal, whose click asks for the
+    // artifact's versions, which the host's history card shows under it,
+    // and Publish, for an edit, as ig-publish shows them. A take shown
+    // alone is never published.
+    if let Some((_, edited)) = session.publishing_as(session.active) {
+        let seal = ToolItem::Button {
+            icon: "badge-check".into(),
+            tip: "Published versions".into(),
+            enabled: true,
+            selected: session.is_published(session.active),
+            action: Some(Action::new("canon_history")),
+            menu: Vec::new(),
+        };
+        let publish = ToolItem::Push { label: "Publish".into(), dark: true, enabled: edited, action: Action::new("publish") };
+        let at = trailing.iter().position(|item| matches!(item, ToolItem::Popover { .. })).map_or(trailing.len(), |at| at + 1);
+        trailing.splice(at..at, [seal, publish]);
+    }
     let (options, options_trailing) = settings_row(session);
     Toolbar { items, trailing, options, options_trailing }
 }
@@ -796,6 +814,7 @@ fn notes_row(doc: &Doc) -> LayerRow {
         mark: None,
         detail: None,
         toggle_icon: None,
+        toggle_tip: None,
         value: None,
     }
 }
@@ -873,6 +892,7 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
             mark: Some("link".into()),
             detail: None,
             toggle_icon: None,
+            toggle_tip: None,
             value: None,
         });
     }
@@ -918,6 +938,7 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
         // that it is missing.
         detail: row_detail(node),
         toggle_icon: None,
+        toggle_tip: None,
         value: None,
     });
     if let Some(children) = &node.children {

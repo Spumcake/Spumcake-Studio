@@ -403,7 +403,7 @@ impl Server {
             | HostMessage::Takes { .. }
             | HostMessage::CellBecameStep { .. }
             | HostMessage::View3dCamera { .. }
-            | HostMessage::View3dPicked { .. } | HostMessage::History { .. } | HostMessage::TransportTime { .. } => {}
+            | HostMessage::View3dPicked { .. } | HostMessage::History { .. } | HostMessage::TransportTime { .. } | HostMessage::Delivered { .. } => {}
             HostMessage::Published { artifact, file, error, .. } => {
                 self.session.published(&artifact, &file, error.as_deref());
             }

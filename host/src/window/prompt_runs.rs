@@ -28,6 +28,28 @@ impl HostWindow {
         env.scripts.is_some().then_some((folder, env))
     }
 
+    /// Tells every running workspace `project` again when the open
+    /// project's folder becomes a Skills project, or stops being one, as
+    /// `library/` and `requests/` appear or go: looked at once a second at
+    /// most, as the window's other project polls are.
+    pub(super) fn tell_skills_project(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+        let Some((folder, told, at)) = self.project_skills.clone() else {
+            return;
+        };
+        if at.elapsed() < EVERY {
+            return;
+        }
+        let skills = crate::skills_setup::is_skills_project(&folder);
+        self.project_skills = Some((folder.clone(), skills, std::time::Instant::now()));
+        if skills == told {
+            return;
+        }
+        for started in self.apps.iter_mut().filter(|started| !started.running.exited()) {
+            started.running.send(&HostMessage::Project { folder: folder.display().to_string(), skills });
+        }
+    }
+
     /// Why a run may not go straight to a model: the open project is a
     /// Skills project, where every generation is a request.py request.
     pub(super) fn direct_runs_refused(&self) -> Option<String> {
@@ -251,16 +273,28 @@ impl HostWindow {
     }
 
     /// Each round with its model's name, the one the card shows.
-    fn named(&self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
+    fn named(&mut self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
         rounds
             .into_iter()
             .map(|mut round| {
                 if !round.model.is_empty() {
-                    round.model_name = crate::cells::model_name(&self.ctx, &round.model);
+                    round.model_name = self.model_name(&round.model);
                 }
                 round
             })
             .collect()
+    }
+
+    /// A model's name as the card shows it, from an endpoint's own model
+    /// list, or else a skill's `models.json`; empty when neither names it,
+    /// so the workspace shows the model's id as it is.
+    fn model_name(&mut self, model: &str) -> String {
+        let shown = crate::cells::model_name(&self.ctx, model);
+        if shown != model.rsplit('/').next().unwrap_or(model) {
+            return shown;
+        }
+        let skills = crate::skills_setup::listed_skills(&self.settings.skill_folders);
+        crate::prices::local_name(&skills, model).unwrap_or_default()
     }
 
     /// When the agent records a step with the request a draft cell made,

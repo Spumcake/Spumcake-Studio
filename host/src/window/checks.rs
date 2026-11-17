@@ -73,10 +73,39 @@ fn ledger_program(dir: &Path) -> PathBuf {
 }
 
 fn built(program: &str) -> PathBuf {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../target/debug")
-        .join(program);
+    let path = crate::apps::built_programs().join(program);
     assert!(path.exists(), "{} is missing: run `cargo build` first", path.display());
+    path
+}
+
+/// A sub-application that writes down every `project` it is told, one line
+/// each, in `heard`, outside the project.
+fn hearer_program(dir: &Path, heard: &Path) -> PathBuf {
+    let script = format!(
+        r#"#!/bin/sh
+echo '{{"type":"hello","protocol":1}}'
+echo '{{"type":"tab","id":"h1","label":"Untitled Hearer"}}'
+echo '{{"type":"contents","tab":"h1","kind":"grid"}}'
+echo '{{"type":"end"}}'
+echo '{{"type":"tabs","tabs":[{{"id":"h1","label":"Untitled Hearer"}}],"active":"h1"}}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"ping"'*) echo '{{"type":"pong"}}' ;;
+    *'"type":"shutdown"'*) exit 0 ;;
+    *'"type":"project"'*) printf '%s\n' "$line" >> '{}' ;;
+    *'"type":"quit"'*) echo '{{"type":"quit_ready"}}' ;;
+  esac
+done
+"#,
+        heard.display()
+    );
+    let path = dir.join("hearer");
+    std::fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     path
 }
 
@@ -1754,6 +1783,40 @@ fn any_application_is_told_the_project_and_saves_into_it() {
     let written = folder.join("Ledger.ledger");
     window.until(|app| app.apps[0].running.tabs().0.iter().any(|tab| tab.path.as_deref() == Some(written.to_str().unwrap())));
     assert_eq!(std::fs::read_to_string(&written).unwrap(), "ledger");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Catches workspaces never told the project is a Skills project, as
+/// `project` once said `skills: false` always: a folder without `library/`
+/// and `requests/` is told no Skills; when they appear, every workspace is
+/// told `skills` within the second's poll; and a window opened on it again
+/// tells a workspace `skills` as it starts.
+#[test]
+fn workspaces_hear_when_the_project_is_a_skills_project() {
+    let dir = scratch("skills-heard");
+    let heard = dir.join("heard.txt");
+    let hearer = hearer_program(&dir, &heard);
+    let told = |heard: &Path| std::fs::read_to_string(heard).unwrap_or_default().lines().map(|line| line.contains(r#""skills":true"#)).collect::<Vec<_>>();
+    let stand_in = StandIn::start(Vec::new());
+    let mut window = project_window(vec![spec("hearer", "Hearer", &hearer)], &stand_in, &dir);
+    let (_, folder, _) = window.here();
+    assert_eq!(told(&heard), [false], "a folder with no library/ or requests/ was told it is a Skills project");
+    std::fs::create_dir_all(folder.join("library")).unwrap();
+    std::fs::create_dir_all(folder.join("requests")).unwrap();
+    let start = Instant::now();
+    while told(&heard) != [false, true] {
+        assert!(start.elapsed() < Duration::from_secs(5), "the Skills project was never told: {:?}", told(&heard));
+        window.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(window);
+    std::fs::remove_file(&heard).unwrap();
+
+    let stand_in = StandIn::start(Vec::new());
+    let window = project_window(vec![spec("hearer", "Hearer", &hearer)], &stand_in, &dir);
+    assert_eq!(window.here().1, folder);
+    assert_eq!(told(&heard), [true], "a workspace started in a Skills project was told otherwise");
+    drop(window);
     let _ = std::fs::remove_dir_all(dir);
 }
 

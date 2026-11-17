@@ -5,23 +5,38 @@
 //! Inside a project, which the host names with `project`, every tab is
 //! written into the project's folder as a `.vgx` file by itself, a second
 //! after it changes, and before its tab closes, a `keep` is answered, or
-//! the host quits, as the Image Generator's images are. Save and Save As
-//! are offered only outside a project.
+//! the host quits, as the Image Generator's images are; in a Skills
+//! project, into its `work/` folder. Save and Save As are offered only
+//! outside a project.
+//!
+//! Each tab has cells, the Prompt page's, and the rounds the host says
+//! they made, with `takes`, shown on the filmstrip and never kept.
 
 use crate::decode::{Decoders, Key, even};
 use crate::declare;
 use crate::files::{self, ViewFile};
 use crate::gallery::{Gallery, Mode};
+use crate::rounds::{Rounds, With};
 use crate::view::{self, Look, Scene};
 use layers::link::Link;
 use protocol::{
-    AppMessage, Ask, AskButton, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, RasterCamera, RasterGesture,
-    RasterTool, RasterView, Thumbnail,
+    AppMessage, Ask, AskButton, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, PanelSide, RasterCamera,
+    RasterGesture, RasterTool, RasterView, Thumbnail,
 };
+pub use deliver::DELIVER;
+pub use mix::{OPEN_SOUND, Page};
+pub use notes::{Tool, Tools};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod animatic;
+mod deliver;
+mod mix;
+mod notes;
+mod play;
+mod requests;
 
 /// How long a change waits before it is written, so a burst of changes is
 /// written once.
@@ -36,6 +51,20 @@ pub const ITEM: &str = "Video";
 const FILM_SIZE: [u32; 2] = [176, 44];
 /// The image's size before the host says how large its area is.
 const FIRST_VIEWPORT: [f64; 2] = [1200.0, 800.0];
+/// This workspace's id, as its renders are filed under it.
+const OWNER: &str = "video-generator";
+/// How an item of a tab's file names a marked frame a next round sends:
+/// this, then its fingerprint.
+const MARKED_ITEM: &str = "marked ";
+/// The words a next round's prompt gives a take's notes, and the role of
+/// the marked frame it sends, as the Image Generator's.
+const NOTES_WORDS: &str = "Notes on the last round";
+/// How an item of a tab's file names a Start frame taken from the
+/// animatic: this, then its fingerprint.
+const ANIMATIC_ITEM: &str = "animatic ";
+/// The tip of the reference menu's row taking the animatic's frame while
+/// the cell has no Motion reference, pending the owner's word.
+pub const NO_ANIMATIC: &str = "Add the shot's animatic as a Motion reference first.";
 /// The video files a take can be.
 const VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "mkv", "webm", "avi"];
 
@@ -66,6 +95,30 @@ pub struct Tab {
     drawn: Option<Drawn>,
     /// The focus as the Move tool's drag began.
     drag: Option<[f64; 2]>,
+    /// The rounds its cells made, as the host last sent them, and the take
+    /// shown, if one is. Never kept in its file.
+    pub rounds: Rounds,
+    /// What the host was last told of its cells and of its file's items.
+    cells_sent: Option<(Vec<protocol::Cell>, Option<String>)>,
+    items_sent: Option<(String, Vec<protocol::Item>)>,
+    /// The artifact each cell's step publishes, by the cell's id, as the
+    /// host says it, while the program runs; never in the file.
+    pub artifacts: HashMap<String, String>,
+    /// The marked frames its next rounds sent, by item id, with their
+    /// fingerprints, while the program runs.
+    marked: Vec<(String, String)>,
+    /// The Start frames taken from the animatic, by item id, with their
+    /// fingerprints, while the program runs.
+    frames_taken: Vec<(String, String)>,
+    /// The pre-vis check: a round's take shown over its animatic. For the
+    /// tab while the program runs, never kept.
+    pub over_animatic: bool,
+    /// The Layers page's row chosen, the take's, 0, or a sound layer's id,
+    /// while the program runs.
+    pub sound: Option<u64>,
+    /// The take's sound and the sound layers as a held slider found them,
+    /// until it is let go and the drag becomes one step.
+    mix_before: Option<(crate::gallery::TakeSound, Vec<crate::gallery::SoundLayer>)>,
 }
 
 /// An image written for the host: what it shows, how many of its frames
@@ -83,7 +136,102 @@ impl Tab {
 
     /// The frame shown, within the shown take.
     pub fn frame_shown(&self) -> u32 {
-        self.frame.min(self.gallery.take().map_or(0, |take| take.last_frame()))
+        let shown = self.round_view();
+        self.frame.min(shown.as_ref().unwrap_or(&self.gallery).take().map_or(0, |take| take.last_frame()))
+    }
+
+    /// A take of a round shown in the working area, as a gallery for the
+    /// view to draw as any: that one take; or it beside another take, of a
+    /// round or of the gallery, side by side; or its round's takes as frame
+    /// strips. None while the gallery's own takes are shown. It is never
+    /// the tab's gallery, so nothing of it is a step or kept.
+    pub fn round_view(&self) -> Option<Gallery> {
+        let rounds = &self.rounds;
+        let tile = rounds.tiles.get(rounds.shown?)?;
+        let shown = self.round_take(tile)?;
+        let own = |uid: u64| self.gallery.takes.iter().find(|take| take.uid == uid).map(|take| (take.name.clone(), take.link.clone(), take.file.clone(), take.info));
+        let pair = match &rounds.with {
+            With::Alone => return Some(Gallery::new(vec![shown], 0)),
+            With::Strips => {
+                let tiles = rounds.round_tiles(tile);
+                let at = tiles.iter().position(|index| Some(*index) == rounds.shown).unwrap_or(0);
+                let mut gallery = Gallery::new(tiles.iter().filter_map(|index| self.round_take(&rounds.tiles[*index])).collect(), at);
+                gallery.mode = Mode::Strips;
+                return Some(gallery);
+            }
+            With::Tile(path) => [Some(shown), rounds.tile_of(path).and_then(|other| self.round_take(&rounds.tiles[other]))],
+            With::Own { uid, first: false } => [Some(shown), own(*uid)],
+            With::Own { uid, first: true } => [own(*uid), Some(shown)],
+        };
+        let takes: Vec<_> = pair.into_iter().flatten().collect();
+        let mut gallery = Gallery::new(takes, 0);
+        if let Some(other) = gallery.uid_at(1) {
+            gallery.mode = Mode::Side { other };
+        }
+        Some(gallery)
+    }
+
+    /// A round's take as the round view holds it: its caption, its link,
+    /// known by its sha256 as a gallery take's is, so its sound and notes
+    /// are found, its file, and what it is.
+    fn round_take(&self, tile: &crate::rounds::Tile) -> Option<(String, Link, PathBuf, Option<media::Info>)> {
+        let file = tile.file.as_ref()?;
+        let read = self.rounds.read(&file.path)?;
+        let link = Link { path: file.path.clone(), sha256: read.sha256.clone() };
+        Some((self.take_caption(tile), link, read.file.clone(), read.info))
+    }
+
+    /// A round's take's caption: a finishing round's label, "Take 1 · 60
+    /// fps · 4K, from Take 7", or else "Take N · <model name>".
+    pub fn take_caption(&self, tile: &crate::rounds::Tile) -> String {
+        if let Some(label) = self.finishing_label(tile) {
+            return label;
+        }
+        let model = self.rounds.round_of(tile).map_or("", crate::rounds::model_name);
+        if model.is_empty() { format!("Take {}", tile.take + 1) } else { format!("Take {} · {model}", tile.take + 1) }
+    }
+
+    /// A finishing round's take's label, when its round is a finishing
+    /// endpoint's and its one reference a take of this tab's rounds: from
+    /// its cell's settings while the cell still has them, or else the
+    /// request's, and from its source, whose own finishing part it keeps,
+    /// numbered by the take it was first made from.
+    pub fn finishing_label(&self, tile: &crate::rounds::Tile) -> Option<String> {
+        let rounds = &self.rounds;
+        let round = rounds.round_of(tile)?;
+        let source = crate::finishing::source(round)?;
+        let source_tile = &rounds.tiles[rounds.tile_of(source)?];
+        let settings_of = |cell: &str| self.gallery.cells.iter().find(|own| own.id == cell).and_then(|own| own.settings.as_ref());
+        let inherited = rounds
+            .round_of(source_tile)
+            .filter(|before| crate::finishing::source(before).is_some())
+            .map(|before| crate::finishing::own_part(before, None, settings_of(&source_tile.cell)))
+            .unwrap_or_default();
+        // A retimed take upscaled is still the take it was first made from.
+        let first = rounds
+            .round_of(source_tile)
+            .and_then(crate::finishing::source)
+            .and_then(|before| rounds.tile_of(before))
+            .map_or(source_tile.take, |before| rounds.tiles[before].take);
+        let width = rounds.read(source).and_then(|read| read.info).map(|info| info.width);
+        Some(crate::finishing::label(round, first, &inherited, width, settings_of(&tile.cell)))
+    }
+
+    /// The words over a round shown whole as frame strips: its line,
+    /// "Round N · <model name> · N takes", and each reference by its order
+    /// and role, as the Image Generator's round grid and references sheet
+    /// write them.
+    pub fn round_sheet(&self) -> Option<view::Sheet> {
+        if self.rounds.with != With::Strips {
+            return None;
+        }
+        let tile = self.rounds.tiles.get(self.rounds.shown?)?;
+        let round = self.rounds.round_of(tile)?;
+        let count = self.rounds.round_tiles(tile).len();
+        let title = format!("Round {} · {} · {}", round.number, crate::rounds::model_name(round), layers::words::takes_word(count));
+        let references =
+            round.references.iter().enumerate().map(|(index, reference)| layers::words::sheet_label(index, reference, &crate::rounds::ROLES)).collect();
+        Some(view::Sheet { title, references })
     }
 }
 
@@ -93,6 +241,8 @@ enum Purpose {
     Open,
     /// The filmstrip's open row: takes added to this tab.
     AddTake { tab: String },
+    /// Open sound as layer…: a sound layer added to this tab.
+    AddSound { tab: String },
     Save { tab: String, then_quit: bool },
 }
 
@@ -101,6 +251,11 @@ pub struct Session {
     pub active: usize,
     next_tab: u64,
     pub project: Option<PathBuf>,
+    /// The host says the project is a Skills project: videos are kept in
+    /// its `work/` folder.
+    pub skills: bool,
+    /// Whether the properties panel, with the Prompt page, is open.
+    pub panel_open: bool,
     /// Where images and thumbnails for the host are written, and whether it
     /// is a folder of this session's own in memory, which stays when a
     /// project is named.
@@ -119,6 +274,21 @@ pub struct Session {
     pub films: HashMap<PathBuf, Thumbnail>,
     films_failed: HashSet<PathBuf>,
     next_film: u64,
+    /// Playing the take shown with its sound: the Player, the sounds
+    /// decoded, and the waveforms drawn.
+    playback: play::Playback,
+    /// The toolbar's tool and the notes tool's settings, a pin's words
+    /// being typed, and a mark being drawn.
+    pub tools: Tools,
+    typing: Option<notes::Typing>,
+    marking: Option<notes::Marking>,
+    /// What each animatic's file is, read once.
+    animatics: HashMap<PathBuf, Option<media::Info>>,
+    /// The panel's page shown.
+    pub page: Page,
+    /// A Deliver under way: its sound layers being filed, its mix being
+    /// made, or the host's card asked.
+    delivery: Option<deliver::Delivery>,
     /// Tab ids still to ask about while quitting, after the one asked.
     quit_rest: Vec<String>,
     quitting: bool,
@@ -151,6 +321,8 @@ impl Session {
             active: 0,
             next_tab: 1,
             project: None,
+            skills: false,
+            panel_open: true,
             in_memory: memory.is_some(),
             cache: memory.unwrap_or_else(scratch_folder),
             viewport: FIRST_VIEWPORT,
@@ -161,6 +333,13 @@ impl Session {
             films: HashMap::new(),
             films_failed: HashSet::new(),
             next_film: 1,
+            playback: play::Playback::default(),
+            tools: Tools::default(),
+            typing: None,
+            animatics: HashMap::new(),
+            page: Page::default(),
+            delivery: None,
+            marking: None,
             quit_rest: Vec::new(),
             quitting: false,
             closing: false,
@@ -172,10 +351,13 @@ impl Session {
         if let Some(tab) = self.tabs.first() {
             messages.push(AppMessage::Tab { id: tab.id.clone(), label: tab.label.clone() });
             messages.push(AppMessage::Contents { tab: tab.id.clone(), kind: ContentsKind::Raster });
+            messages.push(AppMessage::Panel { tab: tab.id.clone(), side: PanelSide::Right });
         }
         messages.push(AppMessage::Tools { groups: crate::assist::tool_groups() });
         // The host asks for a video reference's preview here.
         messages.push(AppMessage::Edits { media_types: crate::preview::VIDEO_TYPES.iter().map(|kind| kind.to_string()).collect() });
+        // It previews sounds too, which it never edits.
+        messages.push(AppMessage::Previews { media_types: crate::preview::previewed_types() });
         messages.push(AppMessage::End);
         if !self.tabs.is_empty() {
             messages.extend(self.emit());
@@ -186,6 +368,30 @@ impl Session {
     /// One message from the host, and every reply.
     pub fn handle(&mut self, message: HostMessage) -> Vec<AppMessage> {
         let mut out = Vec::new();
+        // A pin's words being typed stay open through the keyboard, the
+        // notes tool's own clicks and settings, and the host's own
+        // messages; anything else ends the typing first, which makes its
+        // step.
+        let typing = match &message {
+            HostMessage::RasterText { .. }
+            | HostMessage::Camera { .. }
+            | HostMessage::Viewport { .. }
+            | HostMessage::Ping
+            | HostMessage::Keep { .. }
+            | HostMessage::Claim { .. }
+            | HostMessage::Render { .. }
+            | HostMessage::Preview { .. }
+            | HostMessage::Shown { .. }
+            | HostMessage::Answer { .. } => true,
+            HostMessage::RasterGesture { gesture: RasterGesture::Click { .. } | RasterGesture::Rect { .. } | RasterGesture::TextBox { .. }, .. } => {
+                self.tools.tool == Tool::Notes
+            }
+            HostMessage::Command { id, .. } => matches!(id.as_str(), "notes_colour" | "toggle_panel" | "panel_page"),
+            _ => false,
+        };
+        if !typing && self.end_typing() && !matches!(message, HostMessage::Shutdown) {
+            out.extend(self.raster());
+        }
         match message {
             HostMessage::Shutdown => {}
             HostMessage::Ping => out.push(AppMessage::Pong),
@@ -198,7 +404,8 @@ impl Session {
                 }
                 self.note_quit(&mut out);
             }
-            HostMessage::Project { folder, .. } => {
+            HostMessage::Project { folder, skills } => {
+                self.skills = skills;
                 let folder = PathBuf::from(folder);
                 let folder = folder.canonicalize().unwrap_or(folder);
                 if !self.in_memory {
@@ -214,6 +421,10 @@ impl Session {
                 }
                 self.project = Some(folder);
                 out.extend(self.emit());
+                for index in 0..self.tabs.len() {
+                    self.restore_items(index);
+                }
+                out.extend(self.items_due());
             }
             // A video's file from outside the project opens nothing.
             HostMessage::Open { path: Some(path) } if files::is_vgx(Path::new(&path)) && !self.in_project(Path::new(&path)) => {}
@@ -248,11 +459,50 @@ impl Session {
             }
             HostMessage::RasterGesture { tab, gesture: RasterGesture::StrokeCancel } => {
                 self.activate(&tab);
+                let mut redraw = self.mark_cancel();
                 if let Some(tab) = self.tabs.get_mut(self.active)
                     && let Some(start) = tab.drag.take()
                 {
                     tab.focus = start;
+                    redraw = true;
+                }
+                if redraw {
                     out.extend(self.raster());
+                }
+            }
+            // The notes tool: Pin's click and drag, its words typed, and
+            // Draw's mark, part by part.
+            HostMessage::RasterGesture { tab, gesture: RasterGesture::Click { at } } => {
+                self.activate(&tab);
+                if self.tools.tool == Tool::Notes && !self.tools.draw {
+                    self.note_click(at);
+                    out.extend(self.emit());
+                }
+            }
+            HostMessage::RasterGesture { tab, gesture: RasterGesture::Rect { from, to } } => {
+                self.activate(&tab);
+                if self.tools.tool == Tool::Notes && !self.tools.draw {
+                    self.note_drag(from, to);
+                    out.extend(self.emit());
+                }
+            }
+            HostMessage::RasterText { tab, input } => {
+                self.activate(&tab);
+                self.note_text(&input);
+                out.extend(self.emit());
+            }
+            HostMessage::RasterGesture { tab, gesture: RasterGesture::StrokePart { from, points } } => {
+                self.activate(&tab);
+                if self.tools.tool == Tool::Notes && self.tools.draw {
+                    self.mark_part(from, &points);
+                    out.extend(self.raster());
+                }
+            }
+            HostMessage::RasterGesture { tab, gesture: RasterGesture::Stroke { points } } => {
+                self.activate(&tab);
+                if self.tools.tool == Tool::Notes && self.tools.draw {
+                    self.mark_done(&points);
+                    out.extend(self.emit());
                 }
             }
             // The view is this workspace's own: the wheel, a pan, and the
@@ -271,12 +521,22 @@ impl Session {
                     out.extend(self.raster());
                 }
             }
-            // The host's transport row, when it comes, shows a frame.
+            // A frame asked for by the host.
             HostMessage::Seek { tab, frame, .. } => {
                 self.activate(&tab);
                 self.set_frame(|_, _| i64::from(frame));
                 out.extend(self.emit());
             }
+            // The transport row's scrub: a time, played as that frame's
+            // slice of sound.
+            HostMessage::TransportTime { tab, time } => {
+                self.activate(&tab);
+                self.transport_time(time);
+                out.extend(self.emit());
+            }
+            // The host drew a revision: while playing, it keeps the
+            // Player's lead and paces the frames.
+            HostMessage::Shown { revision, at, .. } => self.frame_shown(revision, at),
             HostMessage::Answer { id, button } => {
                 if id == "keep-video" {
                     self.answer(&button, &mut out);
@@ -295,16 +555,52 @@ impl Session {
                     Ok(path) => AppMessage::Kept { tab, path: path.map(|path| path.display().to_string()), error: None },
                     Err(error) => AppMessage::Kept { tab, path: None, error: Some(error) },
                 });
+                // A file written for the first time has items to declare.
+                out.extend(self.items_due());
             }
             HostMessage::Claim { id, path } => {
                 let path = Path::new(&path);
                 out.push(AppMessage::Claimed { id, yours: files::is_vgx(path) && self.in_project(path) });
             }
-            // Items come with the lifecycle's video work.
-            HostMessage::Render { id, .. } => out.push(protocol::no_items(id)),
+            HostMessage::Render { id, item, media_type, .. } => out.push(self.render(id, &item, &media_type)),
+            HostMessage::Takes { cell, rounds } => {
+                if let Some(id) = cell.item {
+                    self.takes(&id, rounds, &mut out);
+                }
+            }
+            HostMessage::EditCell { cell, input, settings, endpoint, model, .. } => {
+                self.edit_cell(&cell, input, settings, endpoint, model, &mut out);
+            }
+            HostMessage::InsertCell { tab, index, cell } => self.insert_cell(&tab, index, cell, &mut out),
+            HostMessage::SelectCell { tab, cell } => self.select_cell(&tab, cell, &mut out),
+            HostMessage::CellBecameStep { tab, cell, step, artifact } => self.cell_became_step(&tab, &cell, &step, artifact, &mut out),
+            HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
             HostMessage::Preview { id, path, media_type } => {
                 let root = self.project.clone().unwrap_or_default();
                 out.push(crate::preview::preview(id, &path, &media_type, &root, &self.cache, &mut self.next_revision));
+            }
+            // The Properties page's Gain and Starts at.
+            HostMessage::Property { prop, value, preview } => {
+                self.mix_property(&prop, &value, preview);
+                if !preview {
+                    out.extend(self.emit());
+                }
+            }
+            // Deliver: the sound layers filed, the mix made, and the host's
+            // card answered.
+            // Each also declares the filmstrip again, so Deliver… is off while
+            // a delivery is under way and on again after.
+            HostMessage::Filed { id, file, error } => {
+                self.filed(&id, &file, error, &mut out);
+                out.extend(self.raster());
+            }
+            HostMessage::SkillScriptRan { id, output, error } => {
+                self.mix_ran(&id, &output, error, &mut out);
+                out.extend(self.raster());
+            }
+            HostMessage::Delivered { tab, file, error } => {
+                self.delivered(&tab, &file, error, &mut out);
+                out.extend(self.raster());
             }
             _ => {}
         }
@@ -314,7 +610,11 @@ impl Session {
     /// Takes in the frames decoded since the last call, writes the
     /// thumbnails that came, and sends the view when anything came.
     pub fn poll(&mut self) -> Vec<AppMessage> {
-        if !self.decoders.poll() {
+        // While playing, the Player's clock names the frame: a new one is
+        // asked of the seekers, and drawn when it comes.
+        let heard = self.poll_sounds();
+        let ticked = self.play_tick();
+        if !self.decoders.poll() && !ticked && !heard {
             return Vec::new();
         }
         for (key, result) in std::mem::take(&mut self.decoders.thumbs) {
@@ -338,12 +638,17 @@ impl Session {
                 }
             }
         }
-        self.raster()
+        let mut out = self.raster();
+        // A sound layer's waveform, once decoded, is its row's thumbnail.
+        if heard {
+            out.extend(self.declared());
+        }
+        out
     }
 
     /// Whether frames asked for are still to come, so the loop wakes soon.
     pub fn waiting(&self) -> bool {
-        self.decoders.waiting()
+        self.decoders.waiting() || self.is_playing() || self.playback.sounds.waiting()
     }
 
     /// The loop's wake with no message: writes what is due inside a project,
@@ -369,7 +674,13 @@ impl Session {
             let _ = self.write_into_project(index);
             wrote = true;
         }
-        if wrote { self.declared() } else { Vec::new() }
+        if !wrote {
+            return Vec::new();
+        }
+        // A file written for the first time has items to declare.
+        let mut out = self.declared();
+        out.extend(self.items_due());
+        out
     }
 
     /// Inside a project, writes every tab not yet written, as when the host
@@ -396,6 +707,9 @@ impl Session {
 
     fn activate(&mut self, tab: &str) {
         if let Some(index) = self.tab_index(tab) {
+            if index != self.active {
+                self.stop_playing();
+            }
             self.active = index;
         }
     }
@@ -428,7 +742,16 @@ impl Session {
         protocol::free_name(&protocol::untitled(ITEM), |name| {
             self.tabs.iter().any(|tab| tab.label == name)
                 || self.project.as_ref().is_some_and(|folder| folder.join(format!("{name}.vgx")).exists())
+                || self.work_folder().is_some_and(|folder| folder.join(format!("{name}.vgx")).exists())
         })
+    }
+
+    /// Where a tab never written goes: the project's folder, or in a
+    /// Skills project its `work/` folder, as the contract with
+    /// Spumcake-Skills keeps workspace files.
+    fn work_folder(&self) -> Option<PathBuf> {
+        let project = self.project.as_ref()?;
+        Some(if self.skills { project.join("work") } else { project.clone() })
     }
 
     fn push_tab(&mut self, gallery: Gallery, path: Option<PathBuf>, label: Option<String>) -> usize {
@@ -449,6 +772,15 @@ impl Session {
             write_failed: None,
             drawn: None,
             drag: None,
+            rounds: Rounds::default(),
+            cells_sent: None,
+            items_sent: None,
+            artifacts: HashMap::new(),
+            marked: Vec::new(),
+            frames_taken: Vec::new(),
+            over_animatic: false,
+            sound: None,
+            mix_before: None,
         });
         self.active = self.tabs.len() - 1;
         self.active
@@ -458,15 +790,20 @@ impl Session {
     /// everything else.
     fn declare_new(&mut self, out: &mut Vec<AppMessage>) {
         let tab = self.tabs[self.active].id.clone();
-        out.push(AppMessage::Contents { tab, kind: ContentsKind::Raster });
+        out.push(AppMessage::Contents { tab: tab.clone(), kind: ContentsKind::Raster });
+        out.push(AppMessage::Panel { tab, side: PanelSide::Right });
         out.extend(self.emit());
     }
 
     /// Runs `change` on the active tab's gallery, and marks the tab changed
     /// when it was: by a step, or, inside a project, by the take shown.
     fn change<T>(&mut self, change: impl FnOnce(&mut Gallery) -> T) -> Option<T> {
+        // Any change to the gallery pauses first.
+        self.stop_playing();
         let in_project = self.project.is_some();
         let tab = self.tabs.get_mut(self.active)?;
+        // Whatever the gallery does shows a take of its own.
+        tab.rounds.show(None);
         let (edits, shown) = (tab.gallery.edits, tab.gallery.take().map(|take| take.uid));
         let result = change(&mut tab.gallery);
         if tab.gallery.edits != edits || (in_project && tab.gallery.take().map(|take| take.uid) != shown) {
@@ -475,15 +812,74 @@ impl Session {
         Some(result)
     }
 
+    /// A Ctrl- or Shift-click on the strip's tile `index`, counting the
+    /// rounds' tiles first, when a round's take is the one shown or the one
+    /// clicked: the take clicked beside the one shown, as vg-takes-compare
+    /// shows, a round's or the gallery's, from one time. Two of the
+    /// gallery's own takes are its own view, a step, as before. Returns
+    /// whether it was taken.
+    fn beside(&mut self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let tiles = tab.rounds.tiles.len();
+        let with = match (tab.rounds.shown, index < tiles) {
+            (Some(shown), true) if shown == index => return true,
+            (Some(_), true) => tab.rounds.tiles[index].path().map(|path| (None, With::Tile(path.to_string()))),
+            (Some(_), false) => tab.gallery.uid_at(index - tiles).map(|uid| (None, With::Own { uid, first: false })),
+            // A gallery take shown, and a round's take clicked: the
+            // gallery's on the left, as the one shown.
+            (None, true) => tab
+                .gallery
+                .take()
+                .filter(|_| tab.rounds.tiles[index].file.is_some())
+                .map(|take| (Some(index), With::Own { uid: take.uid, first: true })),
+            (None, false) => return false,
+        };
+        let Some((show, with)) = with else {
+            return true;
+        };
+        self.stop_playing();
+        let tab = &mut self.tabs[self.active];
+        if let Some(show) = show {
+            tab.rounds.shown = Some(show);
+        }
+        tab.rounds.with = with;
+        true
+    }
+
+    /// Undo, or redo with `redo`: a step of a take's notes keeps the take
+    /// shown, a round's take among them; any other shows a take of the
+    /// gallery's own, as `change` does.
+    fn step_history(&mut self, redo: bool) {
+        let notes = self.active_tab().is_some_and(|tab| tab.gallery.steps_notes(redo));
+        if !notes {
+            if redo {
+                self.change(Gallery::redo);
+            } else {
+                self.change(Gallery::undo);
+            }
+            return;
+        }
+        self.stop_playing();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            let stepped = if redo { tab.gallery.redo() } else { tab.gallery.undo() };
+            tab.dirty |= stepped;
+        }
+    }
+
     /// Sets the frame from the frame shown and the shown take's last frame
     /// and frames per second, within the take. Inside a project, the frame
     /// is kept in the file.
     fn set_frame(&mut self, to: impl FnOnce(u32, (u32, f64)) -> i64) {
+        // The keys, `seek`, a step, and a scrub pause first.
+        self.stop_playing();
         let in_project = self.project.is_some();
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
-        let take = tab.gallery.take();
+        let shown = tab.round_view();
+        let take = shown.as_ref().unwrap_or(&tab.gallery).take();
         let last = take.map_or(0, |take| take.last_frame());
         let fps = take.and_then(|take| take.info).map_or(24.0, |info| info.fps());
         let frame = to(tab.frame_shown(), (last, fps)).clamp(0, i64::from(last)) as u32;
@@ -503,7 +899,8 @@ impl Session {
         if tab.zoom.is_none() {
             return false;
         }
-        let scene = view::scene(&tab.gallery, size, tab.look());
+        let shown = tab.round_view();
+        let scene = view::scene(shown.as_ref().unwrap_or(&tab.gallery), size, tab.look());
         let Some(place) = scene.places.first() else {
             return false;
         };
@@ -531,19 +928,21 @@ impl Session {
         if !zoom_by.is_finite() || zoom_by <= 0.0 || !at.iter().chain(&pan_by).all(|value| value.is_finite()) {
             return false;
         }
-        if tab.gallery.view() == Mode::Strips || (tab.zoom.is_none() && zoom_by == 1.0) {
+        let shown = tab.round_view();
+        let gallery = shown.as_ref().unwrap_or(&tab.gallery);
+        if gallery.view() == Mode::Strips || (tab.zoom.is_none() && zoom_by == 1.0) {
             return false;
         }
-        let scene = view::scene(&tab.gallery, size, tab.look());
-        let (Some(place), Some(info)) = (scene.places.first(), tab.gallery.take().and_then(|take| take.info)) else {
+        let scene = view::scene(gallery, size, tab.look());
+        let (Some(place), Some(info)) = (scene.places.first(), gallery.take().and_then(|take| take.info)) else {
             return false;
         };
         let (rect, cell) = (place.rect, place.clip);
         let drawn = [f64::from(rect.w.max(1)), f64::from(rect.h.max(1))];
         // The zoom a fitted take is drawn at, in the zoom menu's terms: side
         // by side, the wider take's scale.
-        let widest = match tab.gallery.view() {
-            Mode::Side { .. } => [tab.gallery.take(), tab.gallery.other().map(|other| &tab.gallery.takes[other])]
+        let widest = match gallery.view() {
+            Mode::Side { .. } => [gallery.take(), gallery.other().map(|other| &gallery.takes[other])]
                 .into_iter()
                 .flatten()
                 .filter_map(|take| take.info.map(|info| info.width))
@@ -604,22 +1003,66 @@ impl Session {
                 }
                 return;
             }
-            "undo" => {
-                self.change(Gallery::undo);
+            "undo" => self.step_history(false),
+            "redo" => self.step_history(true),
+            // The toolbar's tools, and the notes tool's settings row: Pin
+            // or Draw, and the marks' colour.
+            "tool" => {
+                if let Some(tool) = arg.get("tool").and_then(Value::as_str).and_then(Tool::named) {
+                    self.choose_tool(tool);
+                }
             }
-            "redo" => {
-                self.change(Gallery::redo);
+            // The Start frame row's menu: the animatic's frame at the
+            // playhead, whichever reference's menu sent it.
+            "frame_from_animatic" => {
+                self.frame_from_animatic(out);
+                return;
+            }
+            // Open in the Image Generator, sent with the reference's place.
+            "frame_open_image" => {
+                if let Some(reference) = number("value") {
+                    self.frame_open_image(reference as usize, out);
+                }
+                return;
+            }
+            // The pre-vis check: the take shown over its animatic.
+            "previs_toggle" => self.previs_toggle(),
+            "notes_mode" => {
+                if let Some(index) = number("value") {
+                    self.tools.draw = index >= 1.0;
+                    self.marking = None;
+                }
+            }
+            "notes_colour" => {
+                if let Some(rgb) = arg.get("value").and_then(rgb_of) {
+                    self.tools.rgb = rgb;
+                }
             }
             // A press on the strip; the gallery has one history, so the
             // keyboard's Undo is the same either way.
             "film_focus" => return,
-            // A click shows that take alone; with `extend`, as a Ctrl- or
-            // Shift-click, beside the take shown.
+            // The strip holds the rounds' tiles first, then the gallery's
+            // takes. A click shows that take alone; with `extend`, as a
+            // Ctrl- or Shift-click, a take of the gallery beside the take
+            // shown.
             "film_select" => {
                 let Some(index) = position("value") else {
                     return;
                 };
+                let tiles = self.active_tab().map_or(0, |tab| tab.rounds.tiles.len());
                 let extend = arg.get("extend").and_then(Value::as_bool).unwrap_or(false);
+                // With `extend`, a take beside the one shown, when a round's
+                // take is either: a view only, never a step or kept.
+                if extend && self.beside(index) {
+                    out.extend(self.emit());
+                    return;
+                }
+                if index < tiles {
+                    self.select_take(index);
+                    out.extend(self.emit());
+                    return;
+                }
+                let index = index - tiles;
                 self.change(|gallery| match gallery.uid_at(index) {
                     Some(other) if extend && index != gallery.shown => gallery.set_view(Mode::Side { other }, gallery.shown),
                     Some(_) if extend => Ok(()),
@@ -627,9 +1070,81 @@ impl Session {
                     None => Ok(()),
                 });
             }
+            // A round's take keeps its round's place; a take moves among the
+            // gallery's.
             "film_reorder" => {
-                if let (Some(from), Some(to)) = (position("from"), position("to")) {
-                    self.change(|gallery| gallery.move_to(from, to));
+                let tiles = self.active_tab().map_or(0, |tab| tab.rounds.tiles.len());
+                if let (Some(from), Some(to)) = (position("from"), position("to"))
+                    && from >= tiles
+                {
+                    self.change(|gallery| gallery.move_to(from - tiles, to.saturating_sub(tiles)));
+                }
+            }
+            "toggle_panel" => self.panel_open = !self.panel_open,
+            // Layers, Properties, and Prompt; Adjustments waits.
+            "panel_page" => {
+                self.page = match number("value").or_else(|| number("page")).map(|page| page as i64) {
+                    Some(0) => Page::Layers,
+                    Some(1) => Page::Properties,
+                    Some(3) => Page::Prompt,
+                    _ => self.page,
+                };
+            }
+            // A held slider let go.
+            "finish_edit" => self.finish_mix(),
+            // Open sound as layer…, from the Layers page's + or the + tile.
+            "open_sound" => {
+                self.open_sound(out);
+                return;
+            }
+            "sound_click" | "sound_mute" | "sound_rename" | "sound_delete" | "sound_reorder" | "sound_lock" => {
+                self.mix_command(id, &arg);
+            }
+            // A finishing request, or a finished take beside its source.
+            "take_retime" | "take_upscale" | "take_compare" | "take_deliver" => {
+                let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
+                    return;
+                };
+                match id {
+                    "take_retime" => self.finish_take(&path, crate::finishing::Finish::Retime, out),
+                    "take_upscale" => self.finish_take(&path, crate::finishing::Finish::Upscale, out),
+                    "take_compare" => {
+                        self.compare_take(&path);
+                        out.extend(self.emit());
+                    }
+                    _ => {
+                        self.deliver(&path, out);
+                        out.extend(self.raster());
+                    }
+                }
+                return;
+            }
+            // A notice's close.
+            "notice_close" => {
+                if let Some(tab) = self.active_tab() {
+                    out.push(deliver::notices(&tab.id, None));
+                }
+                return;
+            }
+            // A take's menu.
+            "take_next_round" | "take_ask" | "take_edit" | "take_report" => {
+                let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
+                    return;
+                };
+                match id {
+                    "take_next_round" => {
+                        self.next_round(&path, out);
+                        return;
+                    }
+                    "take_ask" => {
+                        self.ask_about(&path, out);
+                        return;
+                    }
+                    "take_report" => {
+                        self.open_report(&path, out);
+                        return;
+                    }
+                    _ => self.edit_take(&path, out),
                 }
             }
             "film_open" => {
@@ -673,10 +1188,32 @@ impl Session {
             // The grid button: every take as frame strips, or the shown
             // take alone again.
             "view_strips" => {
+                // A round's take shown: its round whole, or the take again,
+                // a view only, never a step.
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && tab.rounds.shown.is_some()
+                {
+                    tab.rounds.with = if tab.rounds.with == With::Strips { With::Alone } else { With::Strips };
+                    self.stop_playing();
+                    out.extend(self.emit());
+                    return;
+                }
                 self.change(|gallery| {
                     let mode = if gallery.view() == Mode::Strips { Mode::Single } else { Mode::Strips };
                     gallery.set_view(mode, gallery.shown)
                 });
+            }
+            // The transport row: play or pause, with `value` saying which,
+            // and a step of a frame back or forward. Neither changes the
+            // gallery.
+            "transport_play" => {
+                let playing = arg.get("value").and_then(Value::as_bool).unwrap_or(!self.is_playing());
+                self.transport_play(playing);
+            }
+            "transport_step" => {
+                if let Some(by) = number("value") {
+                    self.transport_step(by.round() as i64);
+                }
             }
             "view_zoom" => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -750,6 +1287,15 @@ impl Session {
                     Err(reason) => out.push(notice("This video could not be opened", &reason)),
                 }
             }
+            Purpose::AddSound { tab } => {
+                if let Some(index) = self.tab_index(&tab) {
+                    self.active = index;
+                }
+                match self.add_sound(&tab, &path) {
+                    Ok(()) => out.extend(self.emit()),
+                    Err(reason) => out.push(notice("This sound could not be opened", &reason)),
+                }
+            }
             Purpose::Save { tab, then_quit } => {
                 if let Some(index) = self.tab_index(&tab) {
                     self.write_at(index, &path, then_quit, out);
@@ -803,9 +1349,30 @@ impl Session {
                         ViewFile::Strips => Mode::Strips,
                         ViewFile::Side { with } => gallery.uid_at(with).map_or(Mode::Single, |other| Mode::Side { other }),
                     };
+                    gallery.cells = read.cells;
+                    gallery.cell = read.cell;
+                    gallery.notes = read.take_notes;
+                    gallery.take_sound = read.take_sound;
+                    gallery.sounds = read
+                        .sounds
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, sound)| crate::gallery::SoundLayer {
+                            id: index as u64 + 1,
+                            name: sound.name,
+                            file: files::resolve(&sound.link.path, self.project.as_deref(), beside.as_deref()),
+                            link: sound.link,
+                            gain_db: sound.gain_db,
+                            start: sound.start,
+                            muted: sound.muted,
+                        })
+                        .collect();
                     let index = self.push_tab(gallery, Some(path), None);
                     self.tabs[index].frame = read.frame;
                     self.declare_new(out);
+                    // What its drafts name of its own items, declared again.
+                    self.restore_items(index);
+                    out.extend(self.items_due());
                 }
                 Err(reason) => out.push(notice("This video could not be opened", &reason)),
             }
@@ -856,7 +1423,7 @@ impl Session {
     /// or, for one never written, to a new file named after it that
     /// replaces nothing. Returns the file, or none for an untouched tab.
     fn write_into_project(&mut self, index: usize) -> Result<Option<PathBuf>, String> {
-        let Some(folder) = self.project.clone() else {
+        let (Some(project), Some(folder)) = (self.project.clone(), self.work_folder()) else {
             return Err("No project folder.".into());
         };
         let Some(tab) = self.tabs.get(index) else {
@@ -873,7 +1440,7 @@ impl Session {
             },
         };
         let tab = &mut self.tabs[index];
-        match files::write_vgx(&path, &tab.gallery, tab.frame_shown(), Some(&folder)) {
+        match files::write_vgx(&path, &tab.gallery, tab.frame_shown(), Some(&project)) {
             Ok(()) => {
                 tab.label = file_title(&path);
                 tab.path = Some(path.clone());
@@ -1018,6 +1585,8 @@ impl Session {
     /// The active tab's view and every declaration.
     pub fn emit(&mut self) -> Vec<AppMessage> {
         let mut out = self.raster();
+        // The cells come before the panel that names one.
+        out.extend(self.cells_due());
         out.extend(self.declared());
         out
     }
@@ -1026,12 +1595,28 @@ impl Session {
     /// is drawn again once they have all come, so stepping never shows a
     /// half-made image. Frame strips are drawn as their frames come.
     fn raster(&mut self) -> Vec<AppMessage> {
+        // The sound of the take that plays, decoded once off the loop, and
+        // its waveform for the transport's row.
+        self.want_sound();
+        let width = self.wave_width();
+        self.prepare_wave(width);
         let index = self.active;
         let size = self.image_size();
         let Some(tab) = self.tabs.get(index) else {
             return Vec::new();
         };
-        let scene = view::scene(&tab.gallery, size, tab.look());
+        let shown = tab.round_view();
+        // A round shown whole has its line and references over its strips.
+        let sheet = tab.round_sheet();
+        let mut scene = view::scene_with(shown.as_ref().unwrap_or(&tab.gallery), size, tab.look(), sheet.as_ref());
+        // The notes at the time shown, drawn over the take's frame.
+        scene.notes = self.notes_over();
+        // The pre-vis check's animatic frame at the same time, asked for
+        // with the take's.
+        scene.animatic = self.animatic_over(&scene);
+        if let Some(caption) = self.animatic_caption(&scene) {
+            scene.captions.push(caption);
+        }
         let keys = scene.keys();
         if scene.live {
             self.decoders.want(&keys, &[]);
@@ -1057,6 +1642,7 @@ impl Session {
                     tab.focus = focus;
                 }
                 tab.drawn = Some(Drawn { scene, held, revision: self.next_revision });
+                self.playback.sent(self.next_revision);
                 if settled {
                     self.decoders.keep_only(&keys);
                 }
@@ -1075,15 +1661,15 @@ impl Session {
             height,
             revision,
             patch: None,
-            tool: RasterTool::Move,
+            tool: self.raster_tool(),
             selection: Vec::new(),
             crop: None,
             bounds: None,
             camera,
             camera_owner: RasterCamera::Workspace,
-            transport: None,
             film: Some(declare::film(self, &self.tabs[index])),
-            text: None,
+            transport: declare::transport(self, &self.tabs[index]),
+            text: self.text_editing(),
         };
         vec![AppMessage::Raster(view)]
     }
@@ -1092,12 +1678,14 @@ impl Session {
     fn want_thumbnails(&mut self) {
         let mut wanted = Vec::new();
         for tab in &self.tabs {
-            for take in &tab.gallery.takes {
-                if let Some(info) = take.info
-                    && !self.films.contains_key(&take.file)
-                    && !self.films_failed.contains(&take.file)
+            let own = tab.gallery.takes.iter().map(|take| (&take.file, take.info));
+            let rounds = tab.rounds.reads().map(|read| (&read.file, read.info));
+            for (file, info) in own.chain(rounds) {
+                if let Some(info) = info
+                    && !self.films.contains_key(file)
+                    && !self.films_failed.contains(file)
                 {
-                    wanted.push(Key::new(take.file.clone(), 0, film_size(info.width, info.height)));
+                    wanted.push(Key::new(file.clone(), 0, film_size(info.width, info.height)));
                 }
             }
         }
@@ -1106,13 +1694,16 @@ impl Session {
         }
     }
 
-    /// The toolbar, menu, keys, and tab list.
+    /// The toolbar, menu, keys, panel, and tab list.
     pub fn declared(&self) -> Vec<AppMessage> {
         let mut messages = vec![
             AppMessage::Toolbar(declare::toolbar(self)),
             AppMessage::Menu { rows: declare::menu(self) },
             AppMessage::Keys(declare::keys()),
         ];
+        if let Some(properties) = declare::properties(self) {
+            messages.push(AppMessage::Properties(properties));
+        }
         if let Some(tabs) = declare::tabs(self) {
             messages.push(AppMessage::Tabs(tabs));
         }
@@ -1225,6 +1816,19 @@ fn open_filter() -> FileFilter {
 
 fn vgx_filter() -> FileFilter {
     FileFilter { name: "Video".into(), extensions: vec!["vgx".into()] }
+}
+
+/// A colour as the settings row's swatches send it, `[r, g, b]`.
+fn rgb_of(value: &Value) -> Option<[u8; 3]> {
+    let list = value.as_array()?;
+    if list.len() != 3 {
+        return None;
+    }
+    let mut rgb = [0u8; 3];
+    for (slot, item) in rgb.iter_mut().zip(list) {
+        *slot = u8::try_from(item.as_u64()?).ok()?;
+    }
+    Some(rgb)
 }
 
 fn notice(title: &str, line: &str) -> AppMessage {

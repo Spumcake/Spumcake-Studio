@@ -16,12 +16,17 @@
 //!   that made it, through the same card.
 //! - History is `pipeline.py history <n> "<artifact>" --json`, newest
 //!   first; a checkout without it answers "history unavailable".
+//! - A workspace's `deliver` of a mixed film is checked as a publish is,
+//!   from the film's own record, before the Deliver card; on its yes the
+//!   film is published, the chain pages written, the film copied into
+//!   `output/` with `pipeline.py deliver`, and what that wrote committed by
+//!   path when the project is in git. The answer is `delivered`.
 //! - A workspace's `run_step`, such as Storyboard's export, is the
 //!   runner's `pipeline.py rerun <n> --step <chain> <step>`, through the plan
 //!   card, answered `step_ran` with the take it made. It needs no assistant.
 
 use super::HostWindow;
-use super::publishing::{Asked, Asker, Card};
+use super::publishing::{Asked, Asker, Card, Delivery};
 use crate::publish_card::PublishCardView;
 use crate::runner::ScriptEnv;
 use protocol::{CanonVersion, HostMessage};
@@ -36,15 +41,24 @@ const NOT_CANON: &str = "Its inputs aren't canon.";
 
 /// What one job came to.
 enum Done {
+    /// A delivery checked, ready for the Deliver card, or refused before it.
+    Checked(Delivery, Result<(), String>),
+    /// A delivery carried out: the file in `output/`, or why not.
+    Delivered(Delivery, Result<String, String>),
     Card(Asked, Result<PublishCardView, String>),
     History(Asked, Result<Vec<CanonVersion>, String>),
     Published(Asked, Result<(String, Option<u32>), String>),
 }
 
-/// The publishing job running, if any.
+/// The publishing job running, if any, and the delivery the Deliver card
+/// shows.
 #[derive(Default)]
 pub(crate) struct Runs {
     working: Option<Receiver<Done>>,
+    /// Checked, and waiting for the user's answer on the Deliver card.
+    pub deliver_card: Option<Delivery>,
+    /// Confirmed on the Deliver card, to carry out.
+    delivering: std::collections::VecDeque<Delivery>,
 }
 
 /// What a job runs with: the project, Skills' scripts, their environment,
@@ -130,9 +144,11 @@ fn git(folder: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Whether the project is kept in git, so a publish can be committed.
+/// Whether the project is kept in git, so a publish can be committed: it
+/// is inside a repository's work tree, and that repository does not ignore
+/// it, as one holding the project only by chance would.
 fn in_git(folder: &Path) -> bool {
-    git(folder, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
+    git(folder, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true") && git(folder, &["check-ignore", "-q", "."]).is_err()
 }
 
 /// The run log's lines not yet committed, which a commit takes along, each
@@ -194,6 +210,68 @@ fn prepare(place: &Place, asked: &Asked) -> Result<PublishCardView, String> {
         commit,
         revert,
     })
+}
+
+/// The files a file made without a model was made from, as its own record
+/// names them, outside `work/`; None when it has no record.
+fn record_inputs(place: &Place, file: &str) -> Option<Vec<String>> {
+    let record: Value = serde_json::from_str(&place.script("request.py", &["show", file]).ok()?).ok()?;
+    let lines = match record {
+        Value::Array(lines) => lines,
+        line => vec![line],
+    };
+    Some(
+        lines
+            .iter()
+            .flat_map(|line| line.get("inputs").and_then(Value::as_array).cloned().unwrap_or_default())
+            .filter_map(|input| input.get("file").and_then(Value::as_str).map(String::from))
+            .filter(|input| !input.starts_with("work/"))
+            .collect(),
+    )
+}
+
+/// Whether a delivery may be shown on its card: its film's record names
+/// what it was mixed from, and each of those is published canon.
+fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
+    let inputs = record_inputs(place, &delivery.file).ok_or_else(|| String::from("This film has no record of what it was mixed from, so it cannot be delivered."))?;
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+    if inputs.iter().any(|input| !canon.published.contains(input)) {
+        return Err(String::from(NOT_CANON));
+    }
+    Ok(())
+}
+
+/// Carries out a delivery the user said yes to: the film published as its
+/// artifact with what it was made from, the chain pages written, the film
+/// copied into `output/`, and, in git, what that wrote committed by path.
+/// Returns the file in `output/`.
+fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
+    let (artifact, file) = (delivery.artifact.as_str(), delivery.file.as_str());
+    let made_from = sources_of(place, artifact, None, file, &[])?;
+    let chain = chain_of(place, artifact)?;
+    let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact, "--file", file];
+    if let Some(chain) = &chain {
+        args.extend(["--chain", chain.as_str()]);
+    }
+    for (source, role) in &made_from {
+        args.extend(["--from", source.as_str(), role.as_str()]);
+    }
+    place.script("pipeline.py", &args)?;
+    let _ = place.script("pipeline.py", &["render", &place.pipeline]);
+    let printed = place.script("pipeline.py", &["deliver", &place.pipeline, file])?;
+    let output = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or("The film was published, but where it was delivered was not given.")?;
+    if in_git(&place.folder) {
+        let paths = [format!("pipeline/{}", place.pipeline), file.to_string(), String::from("prompts/resources/records.jsonl"), output.clone()];
+        let existing: Vec<&str> = paths.iter().map(String::as_str).filter(|path| place.folder.join(path).exists()).collect();
+        let mut add = vec!["add", "--"];
+        add.extend(&existing);
+        git(&place.folder, &add).map_err(|error| format!("Delivered, but not committed: {error}"))?;
+        let message = format!("Deliver {artifact}: {output}.");
+        let mut committing = vec!["commit", "-m", message.as_str(), "--"];
+        committing.extend(&existing);
+        git(&place.folder, &committing).map_err(|error| format!("Delivered, but not committed: {error}"))?;
+    }
+    Ok(output)
 }
 
 /// The chain an artifact belongs to: its step's, or its own row's.
@@ -262,6 +340,38 @@ fn sources_of(place: &Place, artifact: &str, request: Option<&str>, file: &str, 
         }
     }
     Ok(sources)
+}
+
+/// The sources a file was published with before, from the run log's last
+/// publish of it as this artifact, with the roles canon gives them now or
+/// "input": a revert keeps what was named when it was first published.
+fn logged_sources(place: &Place, artifact: &str, file: &str) -> Vec<(String, String)> {
+    let log = std::fs::read_to_string(place.folder.join("pipeline").join(&place.pipeline).join("runs.jsonl")).unwrap_or_default();
+    let names: Vec<String> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("event").and_then(Value::as_str) == Some("publish") && event.get("artifact").and_then(Value::as_str) == Some(artifact) && event.get("file").and_then(Value::as_str) == Some(file))
+        .last()
+        .and_then(|event| event.get("made_from").and_then(Value::as_array).map(|names| names.iter().filter_map(Value::as_str).map(String::from).collect()))
+        .unwrap_or_default();
+    let query = format!("SELECT json_array(source, role) FROM made_from WHERE artifact={}", quoted(artifact));
+    let roles: Vec<(String, String)> = place
+        .script("pipeline.py", &["sql", &place.pipeline, &query, "--read-only"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Vec<String>>(line).ok())
+        .filter_map(|pair| match pair.as_slice() {
+            [source, role] => Some((source.clone(), role.clone())),
+            _ => None,
+        })
+        .collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let role = roles.iter().find(|(source, _)| *source == name).map(|(_, role)| role.clone()).unwrap_or_else(|| String::from("input"));
+            (name, role)
+        })
+        .collect()
 }
 
 /// The files of the takes published together with this one, each
@@ -340,7 +450,8 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
         }
         Asked::Revert { artifact, file, .. } => {
             let request = versions(place, artifact)?.into_iter().find(|version| &version.file == file).and_then(|version| version.request);
-            let made_from = sources_of(place, artifact, request.as_deref(), file, &[])?;
+            let named = logged_sources(place, artifact, file);
+            let made_from = sources_of(place, artifact, request.as_deref(), file, &named)?;
             (artifact.clone(), file.clone(), request, made_from, Vec::new())
         }
         Asked::History { .. } => return Err(String::from("Nothing to publish.")),
@@ -421,6 +532,17 @@ impl HostWindow {
         None
     }
 
+    /// The user's answer on the Deliver card: a yes carries it out, a
+    /// Cancel answers the workspace with no file and no error.
+    pub(crate) fn answer_delivery(&mut self, yes: bool) {
+        let Some(delivery) = self.publish_runs.deliver_card.take() else { return };
+        if yes {
+            self.publish_runs.delivering.push_back(delivery);
+        } else {
+            self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error: None });
+        }
+    }
+
     /// Workspaces' step runs, each a rerun of that one step through the
     /// plan card.
     fn take_step_runs(&mut self) {
@@ -477,7 +599,9 @@ impl HostWindow {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.publish_runs.working = None,
             }
         }
-        if self.publishing.card.is_some() || self.publishing.confirmed.is_empty() && self.publishing.asked.is_empty() {
+        let card_open = self.publishing.card.is_some() || self.publish_runs.deliver_card.is_some();
+        let nothing = self.publishing.confirmed.is_empty() && self.publishing.asked.is_empty() && self.publishing.delivering.is_empty() && self.publish_runs.delivering.is_empty();
+        if card_open || nothing {
             return;
         }
         let Some(place) = self.publish_place() else {
@@ -494,9 +618,23 @@ impl HostWindow {
                 };
                 self.publish_done(done);
             }
+            let deliveries: Vec<Delivery> = std::mem::take(&mut self.publishing.delivering).into_iter().chain(std::mem::take(&mut self.publish_runs.delivering)).collect();
+            for delivery in deliveries {
+                self.publish_done(Done::Delivered(delivery, Err(sentence.clone())));
+            }
             return;
         };
-        let job: Box<dyn FnOnce(&Place) -> Done + Send> = if let Some((card, commit)) = self.publishing.confirmed.pop_front() {
+        let job: Box<dyn FnOnce(&Place) -> Done + Send> = if let Some(delivery) = self.publish_runs.delivering.pop_front() {
+            Box::new(move |place| {
+                let outcome = deliver(place, &delivery);
+                Done::Delivered(delivery, outcome)
+            })
+        } else if let Some(delivery) = self.publishing.delivering.pop_front() {
+            Box::new(move |place| {
+                let checked = check_delivery(place, &delivery);
+                Done::Checked(delivery, checked)
+            })
+        } else if let Some((card, commit)) = self.publishing.confirmed.pop_front() {
             Box::new(move |place| {
                 let outcome = carry(place, &card, commit);
                 Done::Published(card.asked, outcome)
@@ -528,6 +666,15 @@ impl HostWindow {
     /// published.
     fn publish_done(&mut self, done: Done) {
         match done {
+            Done::Checked(delivery, Ok(())) => self.publish_runs.deliver_card = Some(delivery),
+            Done::Checked(delivery, Err(sentence)) | Done::Delivered(delivery, Err(sentence)) => {
+                self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error: Some(sentence) });
+            }
+            Done::Delivered(delivery, Ok(output)) => {
+                // Canon changed: the Prompt page reads it again.
+                self.prompt_page.forget();
+                self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: output, error: None });
+            }
             Done::Card(asked, Ok(view)) => self.publishing.card = Some(Card { asked, view }),
             Done::Card(asked, Err(sentence)) | Done::Published(asked, Err(sentence)) => {
                 if let Asked::Publish { asker, artifact, source: file, .. } | Asked::Revert { asker, artifact, file } = asked {
@@ -559,6 +706,52 @@ impl HostWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a mixed film delivered past an input that is no longer canon,
+    /// and a delivery that leaves no file in output/ or does not make the
+    /// film canon, with the real scripts. Runs when SPUMCAKE_SKILLS_SCRIPTS
+    /// names the checkout's scripts folder.
+    #[test]
+    fn a_film_is_checked_published_and_delivered_with_the_real_scripts() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("deliver-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests", "agent"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let skills = |script: &str, args: &[&str]| {
+            let out = Command::new("python3").arg(scripts.join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let last = |printed: String| printed.lines().last().unwrap().trim().to_string();
+        skills("pipeline.py", &["new", "001"]);
+        skills("pipeline.py", &["element", "001", "the line", "--kind", "story"]);
+        skills("pipeline.py", &["chain", "001", "the line", "--order", "01"]);
+        skills("pipeline.py", &["step", "001", "the line", "take", "--order", "1", "--skill", "generate-shot", "--artifact", "the line: take"]);
+        skills("pipeline.py", &["step", "001", "the line", "final", "--order", "2", "--skill", "mix", "--refs", r#"[{"artifact": "the line: take", "role": "the shot"}]"#, "--artifact", "the line: final shot"]);
+        std::fs::write(folder.join("agent/take.wav"), b"RIFF take").unwrap();
+        let take = last(skills("request.py", &["resource", "agent/take.wav", "--name", "take"]));
+        skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take, "--chain", "the line"]);
+        std::fs::write(folder.join("agent/mix.wav"), b"RIFF mix").unwrap();
+        let mix = last(skills("request.py", &["resource", "agent/mix.wav", "--name", "mix", "--from", &take]));
+        let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
+        let delivery = |file: &str| Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: final shot"), file: file.into(), uses: String::from("Take 1 · with Voice"), size: String::from("1280 × 720"), frame_rate: String::from("24 fps"), format: String::from("H.264 with AAC sound") };
+        check_delivery(&place, &delivery(&mix)).unwrap();
+        let output = deliver(&place, &delivery(&mix)).unwrap();
+        assert!(output.starts_with("output/") && folder.join(&output).is_file(), "{output}");
+        let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
+        assert!(canon.published.contains(&mix), "the film is not canon");
+        // A mix of a take published again since is refused before its card.
+        std::fs::write(folder.join("agent/take2.wav"), b"RIFF take again").unwrap();
+        let take2 = last(skills("request.py", &["resource", "agent/take2.wav", "--name", "take-again"]));
+        skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take2, "--chain", "the line"]);
+        std::fs::write(folder.join("agent/old-mix.wav"), b"RIFF old mix").unwrap();
+        let old_mix = last(skills("request.py", &["resource", "agent/old-mix.wav", "--name", "old-mix", "--from", &take]));
+        assert_eq!(check_delivery(&place, &delivery(&old_mix)), Err(String::from(NOT_CANON)));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     /// Catches a step run answered with the wrong file, or with none when a
     /// request still waits at its endpoint.
@@ -657,6 +850,12 @@ mod tests {
         carry(&place, &Card { asked: bed_asked, view }, false).unwrap();
         let named = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
         assert_eq!(named.trim(), "the beat it scores", "a source the assistant named was lost");
+        // A revert to the bed keeps the source named when it was published.
+        let revert = Asked::Revert { asker: Asker::Assistant { call: String::from("c3") }, artifact: String::from("the diner: sound bed"), file: skills("pipeline.py", &["sql", "001", "SELECT file FROM artifact WHERE id='the diner: sound bed'", "--read-only"]).trim().to_string() };
+        let view = prepare(&place, &revert).unwrap();
+        carry(&place, &Card { asked: revert, view }, false).unwrap();
+        let kept = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
+        assert_eq!(kept.trim(), "the beat it scores", "a revert dropped a source named at its publish");
 
         // A built take whose input has been published again since is
         // refused, as the method refuses it.

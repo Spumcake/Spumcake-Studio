@@ -691,6 +691,7 @@ fn row(
         mark: None,
         detail: None,
         toggle_icon: None,
+        toggle_tip: None,
         value,
     }
 }
