@@ -491,6 +491,7 @@ pub fn properties(session: &Session) -> Option<Properties> {
                 reorder: Action::new("reorder"),
                 sort_color: Action::new("sort_color"),
                 nest: true,
+                plain: false,
                 flags: FlagIcons {
                     eye_open: "eye".into(),
                     eye_closed: "eye-closed".into(),

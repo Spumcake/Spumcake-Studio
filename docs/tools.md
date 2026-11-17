@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-110 tools.
+113 tools.
 
 ## The host
 
@@ -31,6 +31,16 @@ Read the project and the skills, look at its images, write by hand where the age
 - **`inpainter__project__web_search`**: Search the web, or its images, with Brave Search, for research such as a skill's references. All the searches one research request needs are asked for together: the user approves them with their cost first. Answers each search's results, with each one's title, address, and the page it is on. Takes `searches` (array, required), `why` (string, required).
 - **`inpainter__project__fetch_page`**: Read a web page's text, to learn what an image found is, who made it, and the use its licence allows. Costs nothing and needs no approval. Takes `url` (string, required).
 - **`inpainter__project__download_file`**: Download one file found in research, after the user approves it: the file, the page it is on, and its licence are shown. It waits in Studio's own folder until you file it into sources/ with send_request and a spec of request.py's research kind, whose outputs are the files and whose sources give each file's address, page, and the use allowed. Takes `licence` (string, required), `page` (string, required), `url` (string, required).
+
+## 3D Viewport
+
+### 3D Viewport (`view`)
+
+Look at a place's pre-vis in 3D: through its builder's cameras, or with a camera's published pre-vis render beside or over it.
+
+- **`3d-viewport__view__list_views`**: Every view of the open place, and which is chosen. Takes nothing.
+- **`3d-viewport__view__look_through`**: Choose a view of the camera list by its name, as list_views gives it. Takes `view` (string, required).
+- **`3d-viewport__view__set_look`**: Draw the scene grey, colour-coded by kind, or simple (white faces and grey edges). Takes `look` (string, required).
 
 ## Image Generator
 

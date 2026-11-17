@@ -2519,6 +2519,7 @@ impl Session {
             bounds: bounds.map(|rect| [f64::from(rect.x), f64::from(rect.y), f64::from(rect.w), f64::from(rect.h)]),
             camera,
             camera_owner: protocol::RasterCamera::Host,
+            transport: None,
             film: Some(film),
             text,
         })

@@ -121,6 +121,8 @@ struct HostWindow {
     live: Live,
     /// The pointer on a raster tab, and the previews of what it sent.
     raster: crate::raster::Pointer,
+    /// The 3D tabs' views: their cameras, frames, and names.
+    views3d: crate::view3d::Views,
     /// The tab drawn last frame, so a switch ends what was dragged on it.
     shown: Option<(usize, String)>,
     /// The panel of a tab that declares the panel but no properties.
@@ -222,6 +224,9 @@ struct HostWindow {
     /// Paths that frame tests give in place of file dialogs.
     #[cfg(test)]
     scripted_paths: std::collections::VecDeque<PathBuf>,
+    /// The window's GPU device and queue, which the 3D view draws with. None
+    /// in frame tests, which draw no 3D view.
+    render_state: Option<eframe::egui_wgpu::RenderState>,
 }
 
 impl HostWindow {
@@ -230,6 +235,7 @@ impl HostWindow {
         let tablet = unsafe { Tablet::connect(creation) };
         let mut window = Self::with_apps(&creation.egui_ctx, Vec::new(), tablet);
         window.launch = specs;
+        window.render_state = creation.wgpu_render_state.clone();
         window.native_dialogs = true;
         window.data = workspace::data_folder();
         window.projects_root = workspace::default_projects_dir();
@@ -271,6 +277,8 @@ impl HostWindow {
             surface: Surface::new(tablet),
             live: Live::default(),
             raster: crate::raster::Pointer::default(),
+            views3d: crate::view3d::Views::default(),
+            render_state: None,
             shown: None,
             panel_open: false,
             viewport: [0.0, 0.0],
@@ -2492,13 +2500,7 @@ impl HostWindow {
             Some(ContentsKind::Canvas) => self.show_canvas(ui, app, &tab, rect, dismissing),
             Some(ContentsKind::Cells) => self.show_cells(ui, app, &tab, rect),
             Some(ContentsKind::Raster) => self.show_raster(ui, app, &tab, rect, dismissing),
-            // 3D Viewport Work's view draws the scene; until it lands, the
-            // area is empty.
-            Some(ContentsKind::View3d) => {
-                ui.painter()
-                    .with_clip_rect(rect)
-                    .rect_filled(rect, 0.0, CANVAS);
-            }
+            Some(ContentsKind::View3d) => self.show_view3d(ui, app, &tab, rect),
             Some(ContentsKind::Grid) => {
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.rect_filled(rect, 0.0, CANVAS);
@@ -2936,6 +2938,32 @@ impl HostWindow {
         }
     }
 
+    /// A 3D tab: the scene its sub-application names, drawn by the host on
+    /// the window's GPU, and the user's turns and points sent back.
+    fn show_view3d(&mut self, ui: &mut egui::Ui, app: usize, tab: &str, rect: Rect) {
+        let declared = self.apps.get(app).and_then(|started| started.running.declared.views3d.get(tab)).cloned();
+        let (Some(declared), Some(folder)) = (declared, self.project.as_ref().map(|project| project.folder.clone())) else {
+            ui.painter().with_clip_rect(rect).rect_filled(rect, 0.0, CANVAS);
+            return;
+        };
+        let shown = crate::view3d::Shown::from_declared(&declared, &folder);
+        let gpu = self.render_state.as_ref().map(crate::view3d::Gpu::of);
+        for out in self.views3d.show(ui, gpu, tab, &shown, rect) {
+            match out.message(tab) {
+                Some(message) => self.send(app, message),
+                // Show file opens the scene file's folder with the system's
+                // own opener, as a report's page opens.
+                None => {
+                    if let crate::view3d::Out::ShowFile(path) = out
+                        && let Some(parent) = path.parent()
+                    {
+                        self.ctx.open_url(egui::OpenUrl::new_tab(parent.display().to_string()));
+                    }
+                }
+            }
+        }
+    }
+
     /// A raster tab: its image through the host's camera, its filmstrip
     /// when it has one, and the pointer's gestures and the strip's actions
     /// sent to the sub-application.
@@ -2967,6 +2995,10 @@ impl HostWindow {
                 crate::raster::Out::PaintLetGo => protocol::RasterGesture::StrokeCancel,
                 crate::raster::Out::Text(input) => {
                     self.send(app, HostMessage::RasterText { tab: tab.to_string(), input });
+                    continue;
+                }
+                crate::raster::Out::Time(time) => {
+                    self.send(app, HostMessage::TransportTime { tab: tab.to_string(), time });
                     continue;
                 }
                 crate::raster::Out::Action(action) => {

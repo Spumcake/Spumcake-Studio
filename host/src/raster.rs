@@ -87,6 +87,9 @@ pub(crate) enum Out {
     /// The keyboard or the pointer, for the text being typed in.
     Text(TextInput),
     Action(protocol::Action),
+    /// The transport was scrubbed to a time, or the host's clock stopped
+    /// there.
+    Time(f64),
 }
 
 /// What a drag shows while it is open, and after it is sent until the
@@ -151,6 +154,8 @@ pub(crate) struct Pointer {
     /// filmstrip, when it has one.
     pub(crate) shown: Rect,
     film: crate::film::Strip,
+    /// The transport row's clock, when the view declares one.
+    transport: crate::transport::Clock,
     /// When the text typed in last had a key or a press, in input time,
     /// so the caret shows at once and then blinks.
     typed_at: f64,
@@ -165,6 +170,7 @@ impl Default for Pointer {
             held: Vec::new(),
             shown: Rect::NOTHING,
             film: crate::film::Strip::default(),
+            transport: crate::transport::Clock::default(),
             typed_at: 0.0,
         }
     }
@@ -191,6 +197,23 @@ impl Pointer {
         out: &mut Vec<Out>,
     ) -> bool {
         let (rect, strip) = crate::film::split(rect, display.view.film.as_ref());
+        // A transport sits above the filmstrip, under the image.
+        let (rect, band) = match &display.view.transport {
+            Some(transport) => {
+                let height = crate::transport::height(transport).min(rect.height());
+                (Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - height)), Some(Rect::from_min_max(pos2(rect.min.x, rect.max.y - height), rect.max)))
+            }
+            None => (rect, None),
+        };
+        if let (Some(transport), Some(band)) = (&display.view.transport, band) {
+            ui.painter().rect_filled(band, 0.0, Color32::WHITE);
+            let mut events = Vec::new();
+            crate::transport::row(ui, &mut self.transport, transport, band, &mut events);
+            out.extend(events.into_iter().map(|event| match event {
+                crate::transport::Event::Time(time) => Out::Time(time),
+                crate::transport::Event::Command(action) => Out::Action(action),
+            }));
+        }
         self.shown = rect;
         let viewport = [f64::from(rect.width()), f64::from(rect.height())];
         let mut moved = false;
