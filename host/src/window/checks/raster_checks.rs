@@ -212,6 +212,7 @@ fn properties(rows: Vec<LayerRow>) -> Properties {
             reorder: Action::new("reorder"),
             sort_color: Action::new("sort_color"),
             nest: true,
+            plain: false,
             flags: FlagIcons {
                 eye_open: String::from("eye"),
                 eye_closed: String::from("eye-closed"),

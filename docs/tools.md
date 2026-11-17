@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-91 tools.
+94 tools.
 
 ## The host
 
@@ -28,6 +28,16 @@ Read the project and the skills, look at its images, and write by hand where the
 - **`inpainter__project__run_command`**: Run a command in the project, such as a Spumcake-Skills script (request.py and pipeline.py may be named by their file name alone), a builder, or a script of the agent's own, after the person approves it. Its output is answered when it ends. A command that spends is refused: send it with send_request or rerun_step. Takes `command` (array, required), `why` (string, required).
 - **`inpainter__project__send_request`**: Send one request to a model with request.py, from its spec: its plan, worked out offline, is shown to the person with its cost, its prompt as sent, and every reference in order, and it runs only on their yes, exactly as approved. Answers with what request.py tell says. Takes `spec` (string, required), `stand_in` (boolean).
 - **`inpainter__project__rerun_step`**: Make a take of the first step of a pipeline that is out of date, or the first a change reaches, with pipeline.py rerun: its plan is shown to the person and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `fact` (string), `stand_in` (boolean).
+
+## 3D Viewport
+
+### 3D Viewport (`view`)
+
+Look at a place's pre-vis in 3D: through its builder's cameras, or with a camera's published pre-vis render beside or over it.
+
+- **`3d-viewport__view__list_views`**: Every view of the open place, and which is chosen. Takes nothing.
+- **`3d-viewport__view__look_through`**: Choose a view of the camera list by its name, as list_views gives it. Takes `view` (string, required).
+- **`3d-viewport__view__set_look`**: Draw the scene grey, colour-coded by kind, or simple (white faces and grey edges). Takes `look` (string, required).
 
 ## Image Generator
 

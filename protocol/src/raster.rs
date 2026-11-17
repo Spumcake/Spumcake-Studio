@@ -188,12 +188,17 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// A timed mark in a sound, such as a beat, in seconds from its start.
+/// A timed mark, such as a beat in a sound or a cue on a transport's
+/// scrubber, in seconds from its start.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cue {
     pub at: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// The mark's colour, such as the door cue's orange or a note's red.
+    /// The host's own colour when none is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<[u8; 3]>,
 }
 
 /// What the host's pointer does on a raster tab.

@@ -471,6 +471,10 @@ pub struct Layers {
     /// the top level.
     #[serde(default, skip_serializing_if = "is_false")]
     pub nest: bool,
+    /// A plain list, such as a 3D view's cameras: no eye, lock, renaming, or
+    /// dragging, and group rows drawn as grey headings over their rows.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plain: bool,
     /// A "Layers" heading with these icon buttons at its right, such as
     /// add, group, and delete. With none, no heading is drawn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

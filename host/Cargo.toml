@@ -15,6 +15,11 @@ kurbo = "=0.13.1"
 libc = "=0.2.190"
 octotablet = { version = "=0.1.0", default-features = false, features = ["wayland-tablet-unstable-v2"] }
 protocol = { path = "../protocol" }
+# Graphics Engine Work's renderer, which also brings the scene reader. On
+# work/3d-viewport only, read from Spumcake-Render's dev worktree until its
+# dev is pushed and Studio depends on it by its git URL, as the Studio
+# session manager set on 2026-11-16.
+spumcake-render = { path = "../../../../spumcake-render/worktrees/dev/spumcake-render" }
 keyring = "=4.2.0"
 rfd = "=0.15.4"
 serde = { version = "=1.0.229", features = ["derive"] }

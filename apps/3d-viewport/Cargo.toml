@@ -1,0 +1,26 @@
+# The package cannot be named 3d-viewport, since Cargo refuses a package name
+# that starts with a digit; its folder, program, and manifest id are
+# 3d-viewport, as the Studio session manager set on 2026-11-16.
+[package]
+name = "viewport-3d"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[[bin]]
+name = "3d-viewport"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { path = "../../protocol" }
+serde_json = "=1.0.152"
+# The reader of scene files, from Spumcake-Render. On work/3d-viewport only,
+# read from Spumcake-Render's dev worktree until its dev is pushed and
+# Studio depends on it by its git URL, as the Studio session manager set on
+# 2026-11-16.
+scene = { path = "../../../../../spumcake-render/worktrees/dev/scene" }
+# A published pre-vis render is a PNG; the door swing's is a video, decoded a
+# frame at a time. Both already in the lockfile through the Video Generator.
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+media = { path = "../../media" }

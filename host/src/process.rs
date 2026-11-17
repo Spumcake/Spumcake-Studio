@@ -72,6 +72,8 @@ pub struct View3dShown {
     pub time: f64,
     pub names: bool,
     pub tool: protocol::View3dTool,
+    pub transport: Option<protocol::Transport>,
+    pub status: Option<String>,
 }
 
 /// A file dialog a sub-application asked for.
@@ -625,8 +627,8 @@ impl Running {
                     declared.notices.insert(tab, notices);
                 }
             }
-            AppMessage::View3d { tab, scene, look, camera, reference, time, names, tool } => {
-                declared.views3d.insert(tab, View3dShown { scene, look, camera, reference, time, names, tool });
+            AppMessage::View3d { tab, scene, look, camera, reference, time, names, tool, transport, status } => {
+                declared.views3d.insert(tab, View3dShown { scene, look, camera, reference, time, names, tool, transport, status });
             }
             AppMessage::OpenReport { request } => declared.reports.push_back(request),
             AppMessage::FileResource { tab, path, from } => declared.resources.push_back((tab, path, from)),

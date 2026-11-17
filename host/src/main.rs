@@ -31,6 +31,7 @@ mod timeline;
 mod tool_catalogue;
 mod toolbar;
 mod typescale;
+mod view3d;
 mod widgets;
 mod window;
 mod workspace;
