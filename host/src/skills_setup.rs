@@ -177,12 +177,14 @@ In this project, request.py is the one renderer: a model is called only through 
 Read a skill with read_skill before following it, and read what it links to with read_file, relative to the skill's folder or its repository. \
 Read the project with list_files and read_file, and look at every image you judge with look_at_file. \
 Write by hand only a page of brief/, or a new file in the agent's folder with its line in its index; every other folder is written by the skills' own scripts. \
-Run a script or any other command with run_command, which the person approves first. Send a request to a model only with send_request, from a spec the skill built and you wrote into the agent's folder, or a pipeline's step with rerun_step: the person approves its plan and cost first. Tell the person, word for word, what request.py tell prints for each request. \
+Run a script or any other command with run_command, which the user approves first. Send a request to a model only with send_request, from a spec the skill built and you wrote into the agent's folder, or a pipeline's step with rerun_step: the user approves its plan and cost first. Tell the user, word for word, what request.py tell prints for each request. \
 A prompt for a language model is sent the same way, as a request of its own with send_request, never answered by you, so its answer has a report. \
-A request still at its endpoint has a pending record in requests/; finish it with run_command and request.py collect <id>, or cancel it with request.py cancel <id>, neither of which spends.",
+A request still at its endpoint has a pending record in requests/; finish it with run_command and request.py collect <id>, or cancel it with request.py cancel <id>, neither of which spends. \
+Before a request or a script that can take minutes, say in one line what runs and roughly how long it will take; the user sees its output as it runs and can stop it. \
+Research, such as a skill's references, is done here: ask for all the searches one research needs with one web_search, which the user approves with its cost; read a page with fetch_page, which is free; and download each file you would keep with download_file, which the user approves, naming its page and licence. Look at each download, then file what you keep into sources/ with send_request and a spec of request.py's research kind: its outputs are the downloaded files, and its sources give each one's address, page, and the use allowed.",
         folder.display()
     );
-    // Requests still at their endpoint, which the person can have
+    // Requests still at their endpoint, which the user can have
     // collected or cancelled.
     let mut pending: Vec<String> = std::fs::read_dir(folder.join("requests"))
         .into_iter()
@@ -193,7 +195,7 @@ A request still at its endpoint has a pending record in requests/; finish it wit
     pending.sort();
     if !pending.is_empty() {
         instructions.push_str(&format!(
-            "\n\nPending at their endpoint now, already paid for: {}. Tell the person, and offer to collect or cancel each.",
+            "\n\nPending at their endpoint now, already paid for: {}. Tell the user, and offer to collect or cancel each.",
             pending.join(", ")
         ));
     }
@@ -211,7 +213,7 @@ A request still at its endpoint has a pending record in requests/; finish it wit
     ToolGroup {
         id: PROJECT_TOOLS.into(),
         name: "Project".into(),
-        description: "Read the project and the skills, look at its images, and write by hand where the agent may.".into(),
+        description: "Read the project and the skills, look at its images, write by hand where the agent may, run Skills' scripts and requests on the user's yes, and research.".into(),
         instructions,
         tools: vec![
             Tool {
@@ -240,7 +242,7 @@ A request still at its endpoint has a pending record in requests/; finish it wit
             },
             Tool {
                 name: LOOK.into(),
-                description: "Look at an image of the project, or of a skill's repository: PNG, JPEG, WebP, or GIF. The image is shown to you, and the person sees it with its full path.".into(),
+                description: "Look at an image of the project, or of a skill's repository: PNG, JPEG, WebP, or GIF. The image is shown to you, and the user sees it with its full path.".into(),
                 input: json!({
                     "type": "object",
                     "properties": { "path": path("The image, relative to the project, or absolute inside a skill's repository.") },
@@ -314,8 +316,12 @@ fn readable(folder: &Path, skills: &[Skill], asked: &str) -> Result<PathBuf, Str
     let real = path.canonicalize().map_err(|_| format!("Not found: {}", path.display()))?;
     let project = folder.canonicalize().map_err(|_| "The project's folder is gone.".to_string())?;
     if let Ok(inside) = real.strip_prefix(&project) {
+        // Downloads waiting to be filed are the one part of Studio's own
+        // folder the assistant looks at.
+        let staged = Path::new(protocol::PROJECT_DIR).join("cache").join("research");
         if let Some(Component::Normal(first)) = inside.components().next()
             && OWN_FOLDERS.iter().any(|own| first == *own)
+            && !inside.starts_with(&staged)
         {
             return Err("That is Studio's own folder, which no step needs.".into());
         }

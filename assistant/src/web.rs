@@ -1,6 +1,6 @@
 //! The web, for the assistant's research: a search on Brave Search, a
 //! page's text, and a file downloaded. The host calls these only for what
-//! the person approved, except a page's text, which costs nothing.
+//! the user approved, except a page's text, which costs nothing.
 
 use serde_json::{Value, json};
 use std::io::Read;
@@ -28,9 +28,13 @@ fn agent(timeout: Duration) -> ureq::Agent {
 /// One search, of pages or of images, with each result's title, address,
 /// and the page it is on.
 pub fn brave_search(key: &str, query: &str, images: bool) -> Result<Vec<Value>, String> {
+    search_at(&brave_root(), key, query, images)
+}
+
+fn search_at(root: &str, key: &str, query: &str, images: bool) -> Result<Vec<Value>, String> {
     let kind = if images { "images" } else { "web" };
     let mut response = agent(Duration::from_secs(30))
-        .get(&format!("{}/{kind}/search", brave_root()))
+        .get(&format!("{root}/{kind}/search"))
         .query("q", query)
         .header("Accept", "application/json")
         .header("X-Subscription-Token", key)
@@ -66,6 +70,22 @@ pub fn brave_search(key: &str, query: &str, images: bool) -> Result<Vec<Value>, 
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// A JSON reply to a GET, with the headers given, such as a service's
+/// public price list.
+pub fn get_json(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
+    let mut request = agent(Duration::from_secs(20)).get(url).header("Accept", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut response = request.call().map_err(|error| format!("Could not reach {url}: {error}."))?;
+    let status = response.status();
+    let text = response.body_mut().read_to_string().map_err(|error| format!("{url}'s reply could not be read: {error}."))?;
+    if !status.is_success() {
+        return Err(format!("{url} answered {}.", status.as_u16()));
+    }
+    serde_json::from_str(&text).map_err(|error| format!("{url}'s reply was not JSON: {error}."))
 }
 
 /// A page's readable text: markup, scripts, and styles taken out, and runs
@@ -147,5 +167,39 @@ mod tests {
     fn a_page_reads_as_its_text() {
         let html = "<html><head><style>p{color:red}</style><script>var x = 1;</script></head><body><h1>The 1939 diner</h1><p>Stools &amp; a counter.</p></body></html>";
         assert_eq!(super::readable(html), "The 1939 diner Stools & a counter.");
+    }
+
+    /// Catches a search sent without its key, or its results read from the
+    /// wrong fields, against a stand-in: tests never call Brave.
+    #[test]
+    fn a_search_reads_brave_searchs_results() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = format!("http://{}/res/v1", listener.local_addr().unwrap());
+        let serve = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for body in [
+                r#"{"web": {"results": [{"title": "A 1939 diner", "url": "https://example.org/diner", "description": "Stools."}]}}"#,
+                r#"{"results": [{"title": "Counter", "url": "https://example.org/page", "source": "example.org", "properties": {"url": "https://example.org/counter.jpg"}}]}"#,
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+                    request.push(byte[0]);
+                }
+                asked.push(String::from_utf8_lossy(&request).to_lowercase());
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            asked
+        });
+        let pages = super::search_at(&root, "stand-in-key", "1939 diner", false).unwrap();
+        assert_eq!(pages[0]["page"], "https://example.org/diner");
+        let images = super::search_at(&root, "stand-in-key", "diner counter", true).unwrap();
+        assert_eq!(images[0]["image"], "https://example.org/counter.jpg");
+        assert_eq!(images[0]["page"], "https://example.org/page");
+        let asked = serve.join().unwrap();
+        assert!(asked[0].starts_with("get /res/v1/web/search?q=1939") && asked[0].contains("x-subscription-token: stand-in-key"), "{}", asked[0]);
+        assert!(asked[1].starts_with("get /res/v1/images/search"), "{}", asked[1]);
     }
 }

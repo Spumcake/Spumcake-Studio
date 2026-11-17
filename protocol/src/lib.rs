@@ -221,12 +221,15 @@ pub enum AppMessage {
     /// path in the project, and `from` lists the workspace's file in `work/`
     /// it came from, recorded as where it came from, then every linked file
     /// beneath it, recorded as inputs so `touches` follows the edit back.
+    /// With an `id`, the host answers `filed` with the path it was filed as.
     FileResource {
         tab: String,
         #[serde(default)]
         path: String,
         #[serde(default)]
         from: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     /// Asks the host's runner to file `source`, a plain file the workspace
     /// wrote in the project, with `request.py resource <source>` and one
@@ -263,6 +266,48 @@ pub enum AppMessage {
         artifact: String,
         #[serde(default)]
         file: String,
+    },
+    /// Asks the host to read the project's canon with `pipeline.py sql
+    /// <living pipeline> <query> --read-only`, in a Skills project. The
+    /// answer is `canon_rows`, under the same `id`.
+    ReadCanon {
+        id: String,
+        #[serde(default)]
+        query: String,
+    },
+    /// Asks the host's runner to edit a chain step with `pipeline.py step`,
+    /// giving only `script` and `refs` (a JSON list, as the step holds it)
+    /// when they are set. The user approves the command on the runner's
+    /// card first. The answer is `step_edited`.
+    EditStep {
+        id: String,
+        tab: String,
+        step: StepRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refs: Option<String>,
+    },
+    /// Asks the host's runner to run a chain step again, as a take, on the
+    /// user's yes on the plan card. The answer is `step_ran`.
+    RunStep {
+        id: String,
+        tab: String,
+        step: StepRef,
+    },
+    /// Asks the host to run one of a skill's own scripts from the user's
+    /// Spumcake-Skills checkout, `skills/<skill>/scripts/<script>`, inside
+    /// the project with `args`, given no key, such as `build-animatic`'s
+    /// `write-assembly.py`, which writes and files a Skills format so the
+    /// workspace never writes it. The answer is `skill_script_ran`.
+    RunSkillScript {
+        id: String,
+        #[serde(default)]
+        skill: String,
+        #[serde(default)]
+        script: String,
+        #[serde(default)]
+        args: Vec<String>,
     },
 }
 
@@ -551,6 +596,51 @@ pub enum HostMessage {
         #[serde(default)]
         versions: Vec<CanonVersion>,
     },
+    /// The answer to `read_canon`: each line the query printed. A line
+    /// holding a JSON object or list, as SQLite's `json_object` makes, is
+    /// that JSON; any other line is the whole line as a string, never split,
+    /// since a script or a reference can hold `pipeline.py`'s " | ".
+    CanonRows {
+        id: String,
+        #[serde(default)]
+        rows: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to a `file_resource` with an `id`: the path, relative to
+    /// the project, the file was filed as, or why it was not.
+    Filed {
+        id: String,
+        #[serde(default)]
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `edit_step`: the step was edited, or why not, the
+    /// user's no included.
+    StepEdited {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `run_skill_script`: what the script printed, or why
+    /// it failed.
+    SkillScriptRan {
+        id: String,
+        #[serde(default)]
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `run_step`: the take it made, relative to the
+    /// project, or why there is none.
+    StepRan {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        take: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 /// What a selection message does, as the drawing surface's select tool does it.
@@ -750,6 +840,10 @@ impl Declaration {
             | AppMessage::Publish { .. }
             | AppMessage::CanonHistory { .. }
             | AppMessage::Revert { .. }
+            | AppMessage::ReadCanon { .. }
+            | AppMessage::EditStep { .. }
+            | AppMessage::RunStep { .. }
+            | AppMessage::RunSkillScript { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -1470,6 +1564,7 @@ mod tests {
                     request: "r-14".into(),
                     number: 14,
                     model: "openai/gpt-image-2.5".into(),
+                    model_name: "GPT Image 2.5".into(),
                     prompt: "The keeper at the door.".into(),
                     references: vec![sent.clone()],
                     left_out: vec![SentReference { path: "library/hat.png".into(), role: None }],
@@ -1485,6 +1580,7 @@ mod tests {
                     request: "r-15".into(),
                     number: 15,
                     model: "openai/gpt-image-2.5".into(),
+                    model_name: String::new(),
                     prompt: String::new(),
                     references: Vec::new(),
                     left_out: Vec::new(),
@@ -1634,6 +1730,7 @@ mod tests {
             tab: "1".into(),
             path: "library/layers/door-glow.png".into(),
             from: vec!["work/door.ipx".into(), "library/2026-11-14_19-02-door-take.png".into()],
+            id: None,
         });
         round_trip_host(HostMessage::CellBecameStep {
             tab: "1".into(),
@@ -1730,5 +1827,51 @@ mod tests {
                 versions: vec![CanonVersion { file: String::new(), published: 0, note: String::new(), canon: false, request: None }],
             }
         );
+    }
+
+    /// Reading canon, a file filed under an id, a step edited, and a step
+    /// run again survive a round trip, failures included, and each reads
+    /// with only its id and what it must name.
+    #[test]
+    fn canon_reads_filing_and_step_messages_round_trip() {
+        let animatic = StepRef { chain: "Last order".into(), step: "the animatic".into() };
+        round_trip_app(AppMessage::ReadCanon { id: "r1".into(), query: "SELECT json_object('script', script) FROM step WHERE skill = 'build-animatic'".into() });
+        round_trip_app(AppMessage::FileResource {
+            tab: "1".into(),
+            path: "work/assembly.json".into(),
+            from: vec!["work/last-order.smx".into()],
+            id: Some("f1".into()),
+        });
+        round_trip_app(AppMessage::EditStep {
+            id: "e1".into(),
+            tab: "1".into(),
+            step: animatic.clone(),
+            script: Some("python3 assemble.py prompts/resources/2026-11-17_10-00-animatic-assembly.json".into()),
+            refs: Some(r#"[{"artifact":"shot 1: keyframe","role":"frame, 0.0 to 3.0 s"}]"#.into()),
+        });
+        round_trip_app(AppMessage::RunStep { id: "s1".into(), tab: "1".into(), step: animatic.clone() });
+        round_trip_app(AppMessage::RunSkillScript {
+            id: "w1".into(),
+            skill: "build-animatic".into(),
+            script: "write-assembly.py".into(),
+            args: vec!["--length".into(), "8.0".into(), "--json".into()],
+        });
+        round_trip_host(HostMessage::SkillScriptRan { id: "w1".into(), output: r#"{"path": "prompts/resources/a.json"}"#.into(), error: None });
+        round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: vec![serde_json::json!({"script": "python3 assemble.py"}), serde_json::json!(["8.0"])], error: None });
+        round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: Vec::new(), error: Some("refused: --read-only, and this query writes".into()) });
+        round_trip_host(HostMessage::Filed { id: "f1".into(), file: "prompts/resources/2026-11-17_10-00-assembly.json".into(), error: None });
+        round_trip_host(HostMessage::StepEdited { id: "e1".into(), error: Some("Not run.".into()) });
+        round_trip_host(HostMessage::StepRan { id: "s1".into(), take: Some("library/2026-11-17_10-01-animatic.mp4".into()), error: None });
+        assert_eq!(
+            parse_app_message(r#"{"type":"file_resource","tab":"1"}"#).unwrap(),
+            AppMessage::FileResource { tab: "1".into(), path: String::new(), from: Vec::new(), id: None }
+        );
+        assert_eq!(parse_app_message(r#"{"type":"read_canon","id":"r1"}"#).unwrap(), AppMessage::ReadCanon { id: "r1".into(), query: String::new() });
+        assert_eq!(
+            parse_app_message(r#"{"type":"edit_step","id":"e1","tab":"1","step":{"chain":"Last order","step":"the animatic"}}"#).unwrap(),
+            AppMessage::EditStep { id: "e1".into(), tab: "1".into(), step: animatic, script: None, refs: None }
+        );
+        assert_eq!(parse_host_message(r#"{"type":"filed","id":"f1"}"#).unwrap(), HostMessage::Filed { id: "f1".into(), file: String::new(), error: None });
+        assert_eq!(parse_host_message(r#"{"type":"step_ran","id":"s1"}"#).unwrap(), HostMessage::StepRan { id: "s1".into(), take: None, error: None });
     }
 }

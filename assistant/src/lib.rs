@@ -28,8 +28,11 @@ pub fn image_base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests;
 
-/// The most tool calls one request may make before it stops itself.
-pub const MAX_CALLS: usize = 40;
+/// The most tool calls one request may make before it stops itself: a
+/// budget generous enough for a Skills chain, whose longest steps ran to
+/// about 60 calls each, with Stop always there. A call that waits on a
+/// command counts once, however long it runs.
+pub const MAX_CALLS: usize = 400;
 
 /// Shown when a run is asked for and no key was in the environment at start.
 /// The note a stopped request ends with.

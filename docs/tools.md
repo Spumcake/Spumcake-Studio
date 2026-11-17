@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-107 tools.
+110 tools.
 
 ## The host
 
@@ -18,16 +18,19 @@ Write a prompt and run it as a cell in the conversation, and find the project's 
 
 ### Project (`project`)
 
-Read the project and the skills, look at its images, and write by hand where the agent may.
+Read the project and the skills, look at its images, write by hand where the agent may, run Skills' scripts and requests on the user's yes, and research.
 
 - **`inpainter__project__list_files`**: List a folder of the project, or of a skill's repository: each entry's name, whether it is a folder, and its size. Takes `path` (string).
 - **`inpainter__project__read_file`**: Read a text file of the project, or of a skill's repository. A request's report gives its record as JSON. A long file is read in parts, from a line. Takes `path` (string, required), `from_line` (integer).
-- **`inpainter__project__look_at_file`**: Look at an image of the project, or of a skill's repository: PNG, JPEG, WebP, or GIF. The image is shown to you, and the person sees it with its full path. Takes `path` (string, required).
+- **`inpainter__project__look_at_file`**: Look at an image of the project, or of a skill's repository: PNG, JPEG, WebP, or GIF. The image is shown to you, and the user sees it with its full path. Takes `path` (string, required).
 - **`inpainter__project__write_file`**: Write a page of brief/, or add a new file to the agent's folder, named by the local time and what it is, with its line in the folder's index. Never anything else. Takes `folder` (string, required), `name` (string, required), `text` (string, required), `about` (string).
 - **`inpainter__project__read_skill`**: Read a skill, unchanged, with its folder and its repository, which its relative links resolve in. Takes `name` (string, required).
-- **`inpainter__project__run_command`**: Run a command in the project, such as a Spumcake-Skills script (request.py and pipeline.py may be named by their file name alone), a builder, or a script of the agent's own, after the person approves it. Its output is answered when it ends. A command that spends is refused: send it with send_request or rerun_step. Takes `command` (array, required), `why` (string, required).
-- **`inpainter__project__send_request`**: Send one request to a model with request.py, from its spec: its plan, worked out offline, is shown to the person with its cost, its prompt as sent, and every reference in order, and it runs only on their yes, exactly as approved. Answers with what request.py tell says. Takes `spec` (string, required), `stand_in` (boolean).
-- **`inpainter__project__rerun_step`**: Make a take of the first step of a pipeline that is out of date, or the first a change reaches, with pipeline.py rerun: its plan is shown to the person and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `fact` (string), `stand_in` (boolean).
+- **`inpainter__project__run_command`**: Run a command in the project, such as a Spumcake-Skills script (request.py and pipeline.py may be named by their file name alone), a builder, or a script of the agent's own, after the user approves it. Its output is answered when it ends. A command that spends is refused: send it with send_request or rerun_step. Takes `command` (array, required), `why` (string, required).
+- **`inpainter__project__send_request`**: Send one request to a model with request.py, from its spec: its plan, worked out offline, is shown to the user with its cost, its prompt as sent, and every reference in order, and it runs only on their yes, exactly as approved. Answers with what request.py tell says. Takes `spec` (string, required), `stand_in` (boolean).
+- **`inpainter__project__rerun_step`**: Make a take of the first step of a pipeline that is out of date, or the first a change reaches, with pipeline.py rerun: its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `fact` (string), `stand_in` (boolean).
+- **`inpainter__project__web_search`**: Search the web, or its images, with Brave Search, for research such as a skill's references. All the searches one research request needs are asked for together: the user approves them with their cost first. Answers each search's results, with each one's title, address, and the page it is on. Takes `searches` (array, required), `why` (string, required).
+- **`inpainter__project__fetch_page`**: Read a web page's text, to learn what an image found is, who made it, and the use its licence allows. Costs nothing and needs no approval. Takes `url` (string, required).
+- **`inpainter__project__download_file`**: Download one file found in research, after the user approves it: the file, the page it is on, and its licence are shown. It waits in Studio's own folder until you file it into sources/ with send_request and a spec of request.py's research kind, whose outputs are the files and whose sources give each file's address, page, and the use allowed. Takes `licence` (string, required), `page` (string, required), `url` (string, required).
 
 ## Image Generator
 

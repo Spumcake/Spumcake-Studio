@@ -50,7 +50,7 @@ pub(crate) fn living_pipeline(folder: &Path) -> Option<String> {
 
 /// Runs one of Skills' scripts that reads, in the project, and returns
 /// what it printed.
-fn script(scripts: &Path, folder: &Path, setup: &[(String, String)], name: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn script(scripts: &Path, folder: &Path, setup: &[(String, String)], name: &str, args: &[&str]) -> Result<String, String> {
     let out = Command::new("python3")
         .arg(scripts.join(name))
         .args(args)
@@ -249,6 +249,18 @@ pub(crate) fn write_spec(folder: &Path, cell: &str, spec: &Value) -> Result<Stri
     Ok(format!("{}/cache/specs/{name}", protocol::PROJECT_DIR))
 }
 
+/// Writes a step's template into Studio's scratch files, for a template
+/// `pipeline.py` would otherwise read as a file's name. Returns its path,
+/// relative to the project.
+fn write_template(folder: &Path, template: &str) -> Result<String, String> {
+    let dir = folder.join(protocol::PROJECT_DIR).join("cache").join("templates");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("Could not make {}: {error}", dir.display()))?;
+    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|elapsed| elapsed.as_millis()).unwrap_or(0);
+    let name = format!("template-{stamp}.txt");
+    std::fs::write(dir.join(&name), template).map_err(|error| format!("Could not write the template: {error}"))?;
+    Ok(format!("{}/cache/templates/{name}", protocol::PROJECT_DIR))
+}
+
 /// The cost line under the card, from a plan's estimate and the service.
 pub(crate) fn cost_line(plan: &Value, service: &str) -> String {
     let estimate = plan.get("estimate").and_then(Value::as_str).unwrap_or("");
@@ -377,6 +389,7 @@ fn round_of(id: &str, record: &Value, state: RoundState, started: u64, outputs: 
         request: id.to_string(),
         number: 0,
         model,
+        model_name: String::new(),
         prompt: record.get("prompt").and_then(Value::as_str).unwrap_or("").to_string(),
         references,
         left_out: Vec::new(),
@@ -444,11 +457,6 @@ impl Costs {
     }
 }
 
-/// The step a cell points to, the living pipeline's.
-pub(crate) fn step_of(cell: &Cell) -> Option<&StepRef> {
-    cell.step.as_ref()
-}
-
 /// Where a `pipeline.py step` command recorded a step that a request ran:
 /// the chain, the step, and the request, from its arguments.
 pub(crate) fn recorded_step(argv: &[String]) -> Option<(StepRef, String)> {
@@ -503,8 +511,20 @@ pub(crate) fn step_edits(read: &Value, canon: &Canon, input: &[CellPart], settin
         .collect();
     let refs = (edited != shown).then(|| {
         let mut used = vec![false; old.len()];
+        // A reference with no file to show stays as it was, in its place:
+        // after as many shown references as came before it.
+        let mut hidden: Vec<(usize, &Value)> = Vec::new();
+        let mut before = 0;
+        for reference in &old {
+            if file_of(reference).is_none() {
+                hidden.push((before, reference));
+            } else {
+                before += 1;
+            }
+        }
         let mut refs: Vec<Value> = Vec::new();
-        for (path, role, field) in &edited {
+        for (at, (path, role, field)) in edited.iter().enumerate() {
+            refs.extend(hidden.iter().filter(|(place, _)| *place == at).map(|(_, reference)| (*reference).clone()));
             let kept = old.iter().enumerate().find(|(index, reference)| !used[*index] && file_of(reference).as_deref() == Some(path.as_str()));
             let mut reference = match kept {
                 Some((index, reference)) => {
@@ -521,17 +541,17 @@ pub(crate) fn step_edits(read: &Value, canon: &Canon, input: &[CellPart], settin
                     }
                 }
             }
-            if let Some(field) = field {
-                reference["field"] = json!(field);
+            match field {
+                Some(field) => reference["field"] = json!(field),
+                None => {
+                    if let Some(fields) = reference.as_object_mut() {
+                        fields.remove("field");
+                    }
+                }
             }
             refs.push(reference);
         }
-        // A reference with no file to show stays as it was.
-        for (index, reference) in old.iter().enumerate() {
-            if !used[index] && file_of(reference).is_none() {
-                refs.push(reference.clone());
-            }
-        }
+        refs.extend(hidden.iter().filter(|(place, _)| *place >= edited.len()).map(|(_, reference)| (*reference).clone()));
         serde_json::to_string(&refs).unwrap_or_default()
     });
     let endpoint = settings.and_then(|settings| {
@@ -561,6 +581,9 @@ pub(crate) struct CardView {
 pub(crate) struct PromptPage {
     /// `canon.sql`'s time when canon and the steps were read.
     read_at: Option<SystemTime>,
+    /// Canon was read at `read_at`; a pipeline with no `canon.sql` yet is
+    /// read once, not every frame.
+    read: bool,
     canon: Canon,
     /// Each step's read, or None when it could not be read, so a failing
     /// read is not tried again every frame.
@@ -582,10 +605,11 @@ impl PromptPage {
     fn refresh(&mut self, folder: &Path, scripts: &Path, setup: &[(String, String)]) {
         let Some(pipeline) = living_pipeline(folder) else { return };
         let now = modified(&folder.join("pipeline").join(&pipeline).join("canon.sql"));
-        if now.is_some() && now == self.read_at {
+        if self.read && now == self.read_at {
             return;
         }
         self.read_at = now;
+        self.read = true;
         self.steps.clear();
         self.canon = read_canon(scripts, folder, setup, &pipeline).unwrap_or_default();
     }
@@ -608,7 +632,7 @@ impl PromptPage {
 
     /// Reads canon and the step again now, before a spec is made from them.
     pub(crate) fn forget(&mut self) {
-        self.read_at = None;
+        self.read = false;
     }
 
     /// What the card shows of a declared cell.
@@ -635,10 +659,18 @@ impl PromptPage {
                 (None, Some(step)) => step_spec(&scripts, &folder, &setup, &pipeline, &step, &ItemRef { path: String::new(), item: Some(id.clone()) }).ok()?,
                 (None, None) => return None,
             };
+            // The model's price, read from its service at most once a day,
+            // goes into the setup file before the plan is made.
+            if let Some(data) = crate::prices::data_of(&setup)
+                && crate::prices::ensure(&data, &spec, &setup)
+            {
+                crate::runner::write_setup(&data);
+            }
             let file = write_spec(&folder, &format!("{id}-cost"), &spec).ok()?;
             let plan = script(&scripts, &folder, &setup, "request.py", &["plan", &file, "--json"]).ok();
             let _ = std::fs::remove_file(folder.join(&file));
-            let plan: Value = serde_json::from_str(&plan?).ok()?;
+            let mut plan: Value = serde_json::from_str(&plan?).ok()?;
+            crate::prices::fill_from_history(&folder, &mut plan);
             Some(cost_line(&plan, &service))
         });
         CardView { cell: shown, not_canon, cost }
@@ -682,6 +714,12 @@ impl PromptPage {
         if template.is_none() && refs.is_none() && endpoint.is_none() {
             return Ok(());
         }
+        // pipeline.py reads a template that starts with "@" as a file's name,
+        // so such a prompt is given as a file holding it.
+        let template = match template {
+            Some(template) if template.starts_with('@') => Some(format!("@{}", write_template(folder, &template)?)),
+            template => template,
+        };
         // Only what changed is sent: pipeline.py step keeps every other field.
         let mut args: Vec<&str> = vec!["step", pipeline.as_str(), step.chain.as_str(), step.step.as_str()];
         if let Some(template) = &template {
@@ -785,8 +823,17 @@ mod tests {
         let (_, refs, _) = step_edits(&read, &canon, &moved, None);
         let refs: Vec<Value> = serde_json::from_str(&refs.unwrap()).unwrap();
         assert_eq!(refs[0]["artifact"], "the diner: layout", "a published reference lost its artifact");
-        assert_eq!(refs[1]["file"], "library/new.png");
-        assert_eq!(refs[2]["artifact"], "the cook: take not made yet", "a reference with no file yet was dropped");
+        assert_eq!(refs[1]["artifact"], "the cook: take not made yet", "a reference with no file yet was dropped or moved");
+        assert_eq!(refs[2]["file"], "library/new.png");
+        // A field the person cleared is cleared, not kept.
+        let read = json!({ "template": "t", "refs": r#"[{"file": "library/a.png", "role": "image 1", "field": "start_image"}]"# });
+        let cleared = vec![
+            CellPart::Text { text: String::from("t") },
+            CellPart::Path { path: String::from("library/a.png"), media_type: String::from("image/png"), role: Some(String::from("image 1")), field: None },
+        ];
+        let (_, refs, _) = step_edits(&read, &Canon::default(), &cleared, None);
+        let refs: Vec<Value> = serde_json::from_str(&refs.unwrap()).unwrap();
+        assert!(refs[0].get("field").is_none(), "a cleared field kept its value: {refs:?}");
     }
 
     #[test]
