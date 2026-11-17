@@ -62,6 +62,7 @@ fn view(dir: &Path, tool: RasterTool) -> RasterView {
         bounds: Some([0.0, 0.0, 40.0, 20.0]),
         camera: Some(DocumentCamera { origin: ORIGIN, zoom: ZOOM, rotation: 0.0, flip: false }),
         camera_owner: protocol::RasterCamera::Host,
+        transport: None,
         film: None,
         text: None,
     }
@@ -212,6 +213,7 @@ fn properties(rows: Vec<LayerRow>) -> Properties {
             reorder: Action::new("reorder"),
             sort_color: Action::new("sort_color"),
             nest: true,
+            plain: false,
             flags: FlagIcons {
                 eye_open: String::from("eye"),
                 eye_closed: String::from("eye-closed"),
@@ -345,6 +347,7 @@ const IMAGES: [(&str, u32, u32); 3] = [("Harbor", 32, 18), ("Tower", 18, 32), ("
 /// host, so the host frames the image above the strip.
 fn film(dir: &Path) -> Film {
     let row = |label: &str, id: &str, arg: Option<Value>| MenuEntry {
+        tip: None,
         label: label.to_string(),
         icon: None,
         enabled: true,

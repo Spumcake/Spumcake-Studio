@@ -790,7 +790,7 @@ fn more(ui: &mut egui::Ui, row: Rect, id: &str) -> egui::Response {
 }
 
 fn menu_item(label: &str, enabled: bool) -> widgets::MenuItem<'_> {
-    widgets::MenuItem { label, icon: None, enabled, submenu: false, divider: false }
+    widgets::MenuItem { tip: None, label, icon: None, enabled, submenu: false, divider: false }
 }
 
 fn notice(ui: &mut egui::Ui, panel: &SettingsPanel) {

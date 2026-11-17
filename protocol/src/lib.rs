@@ -12,6 +12,7 @@ mod items;
 mod raster;
 mod timeline;
 mod tools;
+mod transport;
 mod view3d;
 pub use cell::*;
 pub use declare::*;
@@ -19,6 +20,7 @@ pub use items::*;
 pub use raster::*;
 pub use timeline::*;
 pub use tools::*;
+pub use transport::*;
 pub use view3d::*;
 
 /// The version this crate speaks. A sub-application's first message says
@@ -211,6 +213,12 @@ pub enum AppMessage {
         names: bool,
         #[serde(default, skip_serializing_if = "View3dTool::is_default")]
         tool: View3dTool,
+        /// The scene's animation, played under the view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<Transport>,
+        /// A line under the view, such as which builder the scene came from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     /// Asks the host to show that request's report, `requests/<request>.html`
     /// in the project.
@@ -308,6 +316,14 @@ pub enum AppMessage {
         script: String,
         #[serde(default)]
         args: Vec<String>,
+    },
+    /// Asks the host to open `path`, a file in the project, in the
+    /// workspace whose `edits` names `media_type`, which hears it as
+    /// `open_as_new`, as an Image cell's Edit opens its image.
+    OpenIn {
+        path: String,
+        #[serde(default)]
+        media_type: String,
     },
 }
 
@@ -559,6 +575,13 @@ pub enum HostMessage {
         object: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         label: String,
+    },
+    /// The user scrubbed a tab's transport to `time`, in seconds, or the
+    /// host's clock stopped there.
+    TransportTime {
+        tab: String,
+        #[serde(default)]
+        time: f64,
     },
     /// A draft cell is now that chain step: keep only the pointer, as a
     /// step's cell does, with empty `input`, `versions`, and `output`.
@@ -844,6 +867,7 @@ impl Declaration {
             | AppMessage::EditStep { .. }
             | AppMessage::RunStep { .. }
             | AppMessage::RunSkillScript { .. }
+            | AppMessage::OpenIn { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -1526,7 +1550,7 @@ mod tests {
                     ReferenceRole { label: "Start frame".into(), field: Some("image_url".into()), slot: true },
                 ],
                 reference_types: vec!["image/png".into(), "video/mp4".into()],
-                reference_menu: vec![MenuEntry { label: "Open".into(), icon: None, enabled: true, divider: false, action: Some(Action::new("open_reference")), submenu: Vec::new(), rename: false }],
+                reference_menu: vec![MenuEntry { tip: None, label: "Open".into(), icon: None, enabled: true, divider: false, action: Some(Action::new("open_reference")), submenu: Vec::new(), rename: false }],
                 settings: vec![
                     CellSetting { key: "seconds".into(), label: "Duration".into(), kind: RowKind::Number { min: 1.0, max: 10.0, percent: false, places: 1, centered: false } },
                     CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Choice { options: vec!["1024".into()], segmented: true, preview: ChoicePreview::Label } },
@@ -1603,7 +1627,7 @@ mod tests {
             id: "v1".into(),
             thumbnail: Some(Thumbnail { path: "/run/w.rgba".into(), width: 120, height: 40, revision: 1 }),
             badge: "8.0 s".into(),
-            cues: vec![Cue { at: 3.25, label: "Door".into() }],
+            cues: vec![Cue { at: 3.25, label: "Door".into(), colour: None }],
             error: None,
         });
         round_trip_app(AppMessage::Previewed { id: "v2".into(), thumbnail: None, badge: String::new(), cues: Vec::new(), error: Some("This file could not be read.".into()) });
@@ -1689,6 +1713,8 @@ mod tests {
             time: 3.5,
             names: true,
             tool: View3dTool::Pan,
+            transport: None,
+            status: Some("far-end-wall · Scene from build-previs 4195103 · 105 objects".into()),
         });
         round_trip_app(AppMessage::View3d {
             tab: "1".into(),
@@ -1699,6 +1725,21 @@ mod tests {
             time: 0.0,
             names: false,
             tool: View3dTool::Orbit,
+            transport: Some(Transport {
+                length: 8.0,
+                fps: 24.0,
+                time: 3.4,
+                playing: true,
+                clock: TransportClock::Host,
+                cues: vec![Cue { at: 3.0, label: "door".into(), colour: Some([234, 88, 12]) }],
+                rows: vec![TransportRow {
+                    label: "Door".into(),
+                    image: Thumbnail { path: "/run/door.rgba".into(), width: 600, height: 20, revision: 2 },
+                }],
+                play: Action::new("transport.play"),
+                step: Action::new("transport.step"),
+            }),
+            status: None,
         });
         assert_eq!(
             parse_app_message(r#"{"type":"view3d","tab":"1"}"#).unwrap(),
@@ -1711,8 +1752,15 @@ mod tests {
                 time: 0.0,
                 names: false,
                 tool: View3dTool::Orbit,
+                transport: None,
+                status: None,
             }
         );
+        let transport: Transport = serde_json::from_str(r#"{"length":8,"play":{"id":"p"},"step":{"id":"s"}}"#).unwrap();
+        assert_eq!((transport.fps, transport.clock, transport.playing), (24.0, TransportClock::Host, false));
+        let cue: Cue = serde_json::from_str(r#"{"at":3}"#).unwrap();
+        assert_eq!(cue.colour, None);
+        round_trip_host(HostMessage::TransportTime { tab: "1".into(), time: 3.375 });
         let over: View3dReference = serde_json::from_str(r#"{"image":"r.rgba","width":2,"height":1,"show":{"kind":"over"}}"#).unwrap();
         assert_eq!(over.show, ReferenceShow::Over { opacity: 0.5 });
         round_trip_app(AppMessage::Contents { tab: "1".into(), kind: ContentsKind::View3d });
@@ -1857,6 +1905,7 @@ mod tests {
             args: vec!["--length".into(), "8.0".into(), "--json".into()],
         });
         round_trip_host(HostMessage::SkillScriptRan { id: "w1".into(), output: r#"{"path": "prompts/resources/a.json"}"#.into(), error: None });
+        round_trip_app(AppMessage::OpenIn { path: "work/start-frame.png".into(), media_type: "image/png".into() });
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: vec![serde_json::json!({"script": "python3 assemble.py"}), serde_json::json!(["8.0"])], error: None });
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: Vec::new(), error: Some("refused: --read-only, and this query writes".into()) });
         round_trip_host(HostMessage::Filed { id: "f1".into(), file: "prompts/resources/2026-11-17_10-00-assembly.json".into(), error: None });
@@ -1870,6 +1919,14 @@ mod tests {
         assert_eq!(
             parse_app_message(r#"{"type":"edit_step","id":"e1","tab":"1","step":{"chain":"Last order","step":"the animatic"}}"#).unwrap(),
             AppMessage::EditStep { id: "e1".into(), tab: "1".into(), step: animatic, script: None, refs: None }
+        );
+        let off: MenuEntry = serde_json::from_str(r#"{"label":"The animatic's frame at the playhead","enabled":false,"tip":"Add the shot's animatic as a Motion reference first."}"#).unwrap();
+        assert_eq!(off.tip.as_deref(), Some("Add the shot's animatic as a Motion reference first."));
+        assert_eq!(serde_json::from_str::<MenuEntry>(&serde_json::to_string(&off).unwrap()).unwrap(), off);
+        assert_eq!(serde_json::from_str::<MenuEntry>(r#"{"label":"Open"}"#).unwrap().tip, None);
+        assert_eq!(
+            parse_app_message(r#"{"type":"open_in","path":"a.png"}"#).unwrap(),
+            AppMessage::OpenIn { path: "a.png".into(), media_type: String::new() }
         );
         assert_eq!(parse_host_message(r#"{"type":"filed","id":"f1"}"#).unwrap(), HostMessage::Filed { id: "f1".into(), file: String::new(), error: None });
         assert_eq!(parse_host_message(r#"{"type":"step_ran","id":"s1"}"#).unwrap(), HostMessage::StepRan { id: "s1".into(), take: None, error: None });

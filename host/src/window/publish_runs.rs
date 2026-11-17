@@ -271,12 +271,22 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
     let (artifact, file, request, made_from, with) = match &card.asked {
         Asked::Publish { artifact, source, from, with, .. } => {
             if source.starts_with("work/") {
-                let name = Path::new(source).file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_else(|| String::from("published"));
-                let mut args: Vec<&str> = vec!["resource", source.as_str(), "--name", name.as_str()];
-                for input in from {
-                    args.extend(["--from", input.as_str()]);
+                let stem = Path::new(source).file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_else(|| String::from("published"));
+                // request.py names a resource by the minute and its name, so
+                // a second publish within the minute takes the next name.
+                let mut printed = Err(String::new());
+                for n in 1..10 {
+                    let name = if n == 1 { stem.clone() } else { format!("{stem}-{n}") };
+                    let mut args: Vec<&str> = vec!["resource", source.as_str(), "--name", name.as_str()];
+                    for input in from {
+                        args.extend(["--from", input.as_str()]);
+                    }
+                    printed = place.script("request.py", &args);
+                    if !printed.as_ref().is_err_and(|error| error.contains("refusing to overwrite")) {
+                        break;
+                    }
                 }
-                let printed = place.script("request.py", &args).map_err(|error| format!("The file could not be filed: {error}"))?;
+                let printed = printed.map_err(|error| format!("The file could not be filed: {error}"))?;
                 let filed = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or("The file was filed, but its new name was not given.")?;
                 paths.extend([filed.clone(), String::from("prompts/resources/records.jsonl")]);
                 // A workspace's file was made from the canon files it links,
