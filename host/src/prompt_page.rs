@@ -155,9 +155,34 @@ pub(crate) fn not_canon(cell: &Cell, canon: &Canon) -> Vec<usize> {
     references(cell).iter().enumerate().filter(|(_, (path, _, _))| !canon.published.contains(path)).map(|(index, _)| index).collect()
 }
 
+/// The user's endpoint for a model whose cell names none, as a workspace
+/// cannot know the user's endpoints: the one whose kind is the service the
+/// model's workflow skill names for it in its `models.json`.
+pub(crate) fn endpoint_for(settings: &Settings, skills: &[crate::skills_setup::Skill], model: &str) -> Option<String> {
+    let service = crate::prices::local_service(skills, model)?.to_lowercase();
+    settings
+        .endpoints
+        .iter()
+        .find(|endpoint| match (service.as_str(), &endpoint.kind) {
+            ("fal", EndpointKind::Fal) | ("openrouter", EndpointKind::Openrouter) => true,
+            ("openai", EndpointKind::Openai) => endpoint.address.contains("openai.com"),
+            _ => false,
+        })
+        .map(|endpoint| endpoint.id.clone())
+}
+
+/// The endpoint a cell runs on: its own, or else the one its model's
+/// service names.
+pub(crate) fn cell_endpoint(settings: &Settings, cell: &Cell) -> Option<String> {
+    cell.endpoint.clone().or_else(|| {
+        let skills = crate::skills_setup::listed_skills(&settings.skill_folders);
+        endpoint_for(settings, &skills, cell.model.as_deref()?)
+    })
+}
+
 /// The kind of request `request.py` makes for a cell on this endpoint.
 fn request_kind(settings: &Settings, cell: &Cell) -> Result<&'static str, String> {
-    let endpoint = cell.endpoint.as_deref().and_then(|id| settings.endpoint(id)).ok_or("This cell has no endpoint. Choose one for it.")?;
+    let endpoint = cell_endpoint(settings, cell).and_then(|id| settings.endpoint(&id).cloned()).ok_or("This cell has no endpoint. Choose one for it.")?;
     let image = cell.kind == protocol::IMAGE_KIND;
     let video = cell.kind == protocol::VIDEO_KIND;
     let has_references = !references(cell).is_empty();
@@ -664,7 +689,7 @@ impl PromptPage {
             Some(_) => None,
             None => draft_spec(settings, &cell, at).ok(),
         };
-        let service = cell.endpoint.as_deref().and_then(|id| settings.endpoint(id)).map(|endpoint| endpoint.name.clone()).unwrap_or_default();
+        let service = cell_endpoint(settings, &cell).and_then(|id| settings.endpoint(&id).map(|endpoint| endpoint.name.clone())).unwrap_or_default();
         let (scripts, folder, setup, id) = (scripts.to_path_buf(), folder.to_path_buf(), setup.to_vec(), cell.id.clone());
         let step = declared.step.clone();
         let cost = self.costs.line(&cell, move || {
@@ -785,6 +810,25 @@ mod tests {
         let mut in_work = draft(vec![CellPart::Path { path: String::from("work/board.png"), media_type: String::from("image/png"), role: None, field: None }]);
         in_work.endpoint = Some(endpoint);
         assert!(draft_spec(&settings, &in_work, &at).is_err());
+    }
+
+    /// Catches a Retime or Upscale cell, which a workspace makes with no
+    /// endpoint, refused when its model's skill names fal and the user has
+    /// a fal endpoint.
+    #[test]
+    fn a_cell_with_no_endpoint_takes_its_models_service() {
+        let folder = std::env::temp_dir().join(format!("prompt-service-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("models.json"), json!([{ "service": "fal", "model": "topaz/upscale/video/precision", "name": "Topaz Video Upscale" }]).to_string()).unwrap();
+        let skill = crate::skills_setup::Skill { name: String::from("finish-shot"), description: String::new(), implements: Vec::new(), helps: Vec::new(), folder: folder.clone(), root: folder.clone() };
+        let mut settings = Settings::default();
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("fal-1"), name: String::from("fal.ai"), kind: EndpointKind::Fal, address: String::from("https://fal.ai") });
+        assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "topaz/upscale/video/precision").as_deref(), Some("fal-1"));
+        assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "other/model"), None, "a model no skill names took an endpoint");
+        settings.endpoints.clear();
+        assert_eq!(endpoint_for(&settings, &[skill], "topaz/upscale/video/precision"), None, "a service the user has no endpoint for took one");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// Catches a cell's rounds read from requests it did not make, out of
