@@ -757,6 +757,21 @@ const REQUEST_AFTER_CUT: usize = 150_000;
 const IMAGE_WEIGHT: usize = 6_000;
 /// The latest messages of a request, always kept whole.
 const KEEP_RECENT: usize = 12;
+/// The most image data one request carries, encoded: far below what model
+/// services accept in one request (about 20 MB for some), however few
+/// tokens the images come to.
+const IMAGE_BYTES: usize = 12_000_000;
+/// Once over it, older images are cut down to this.
+const IMAGE_BYTES_AFTER_CUT: usize = 8_000_000;
+
+/// The encoded bytes of a message's images.
+fn image_bytes(message: &Value) -> usize {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| parts.iter().filter_map(|part| part.pointer("/image_url/url").and_then(Value::as_str).map(str::len)).sum())
+        .unwrap_or(0)
+}
 
 /// What a message weighs: its text, with each image counted as
 /// `IMAGE_WEIGHT` rather than its encoded length.
@@ -769,14 +784,20 @@ fn weight(message: &Value) -> usize {
     message.to_string().len().saturating_sub(images.iter().sum()) + images.len() * IMAGE_WEIGHT
 }
 
-/// The ids of the calls that read a skill: the method the chain follows,
-/// cut only when nothing else is left to cut.
+/// The ids of the calls that read the method the chain follows: a skill,
+/// or a file read by its full path, as a skill's own linked files are,
+/// outside the project. They are cut only when nothing else is left.
 fn skill_reads(messages: &[Value]) -> std::collections::HashSet<String> {
+    let method = |call: &Value| {
+        let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+        let path = || call.pointer("/function/arguments").and_then(Value::as_str).and_then(|arguments| serde_json::from_str::<Value>(arguments).ok()).and_then(|arguments| arguments.get("path").and_then(Value::as_str).map(String::from));
+        name.ends_with("read_skill") || name.ends_with("read_file") && path().is_some_and(|path| path.starts_with('/'))
+    };
     messages
         .iter()
         .filter_map(|message| message.get("tool_calls").and_then(Value::as_array))
         .flatten()
-        .filter(|call| call.pointer("/function/name").and_then(Value::as_str).is_some_and(|name| name.ends_with("read_skill")))
+        .filter(|call| method(call))
         .filter_map(|call| call.get("id").and_then(Value::as_str).map(String::from))
         .collect()
 }
@@ -786,6 +807,21 @@ fn skill_reads(messages: &[Value]) -> std::collections::HashSet<String> {
 /// few, and a skill's body only last. The calls, and every word of the
 /// person and the assistant, stay.
 fn compact_request(messages: &mut [Value]) {
+    // Images are cut first by their bytes, which a service limits however
+    // few tokens they come to, oldest first, never the latest.
+    let mut bytes: usize = messages.iter().map(image_bytes).sum();
+    if bytes > IMAGE_BYTES {
+        let latest = messages.iter().rposition(|message| image_bytes(message) > 0).unwrap_or(0);
+        for message in &mut messages[..latest] {
+            let before = image_bytes(message);
+            if before > 0 && stub(message, EARLIER_IN_REQUEST, EARLIER_IN_REQUEST_IMAGES) {
+                bytes -= before;
+                if bytes <= IMAGE_BYTES_AFTER_CUT {
+                    break;
+                }
+            }
+        }
+    }
     let mut total: usize = messages.iter().map(weight).sum();
     if total <= REQUEST_BUDGET {
         return;
@@ -847,6 +883,26 @@ mod compaction {
         assert!(messages.last().unwrap().to_string().contains(&"A".repeat(1000)), "the latest image was cut");
         let total: usize = messages.iter().map(weight).sum();
         assert!(total <= REQUEST_BUDGET, "the request was left at {total}");
+    }
+
+    /// Catches a chain that looks at many keyframes sending a request too
+    /// large for a service to accept: twenty 2 MB images keep the request's
+    /// images under the byte limit, the latest whole, and the skill whole.
+    #[test]
+    fn many_keyframes_stay_within_what_a_service_accepts() {
+        let skill = "s".repeat(10_000);
+        let mut messages = vec![call("read", "inpainter__project__read_skill"), output("read", &skill)];
+        for n in 0..20 {
+            let id = format!("k{n}");
+            messages.push(call(&id, "inpainter__project__look_at_file"));
+            messages.push(output(&id, "looked"));
+            messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": format!("{IMAGES_LEAD}`look_at_file` returned:") }, image_part("image/png", &format!("{n:02}{}", "A".repeat(2_000_000)))] }));
+        }
+        compact_request(&mut messages);
+        let bytes: usize = messages.iter().map(image_bytes).sum();
+        assert!(bytes <= IMAGE_BYTES, "the request still carries {bytes} bytes of images");
+        assert!(messages.last().unwrap().to_string().contains("19AAAA"), "the latest image was cut");
+        assert!(messages[1]["content"].as_str().unwrap().contains(&skill), "the skill's body was cut");
     }
 }
 

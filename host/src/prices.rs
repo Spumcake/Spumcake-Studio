@@ -58,7 +58,9 @@ pub(crate) fn known(data: &Path) -> Value {
             }
             if let Some(price) = entry.get("price").filter(|price| price.is_object()) {
                 let mut price = price.clone();
-                price["fetched"] = entry.get("fetched").cloned().unwrap_or(Value::Null);
+                // The day the price was really read, which a failed read
+                // today does not change.
+                price["fetched"] = entry.get("read_on").or_else(|| entry.get("fetched")).cloned().unwrap_or(Value::Null);
                 prices[service.as_str()][model.as_str()] = price;
             }
         }
@@ -66,17 +68,34 @@ pub(crate) fn known(data: &Path) -> Value {
     prices
 }
 
-/// What a price for the model a plan names leaves out, such as "the image
-/// made only", for the card to show beside its cost.
+/// Where a plan's listed cost came from, for the card to show beside it:
+/// today's price list, with what that price leaves out, or, when the cost
+/// is not today's listed price, the spec's or step's own price.
 pub(crate) fn note_for(data: &Path, plan: &Value) -> Option<String> {
-    let kind = plan.pointer("/endpoint/kind").and_then(Value::as_str)?;
-    let service = match kind.split('-').next()? {
-        "openrouter" => "openrouter",
-        "fal" => "fal",
-        _ => return None,
+    let estimate = plan.get("estimate").and_then(Value::as_str)?;
+    if !estimate.starts_with("about $") || estimate.contains("earlier request") {
+        return None;
+    }
+    let spec_own = || Some(String::from("comes from the request's own endpoint, not today's price list"));
+    let kind = plan.pointer("/endpoint/kind").and_then(Value::as_str).unwrap_or("");
+    let service = match kind.split('-').next() {
+        Some("openrouter") => "openrouter",
+        Some("fal") => "fal",
+        _ => return spec_own(),
     };
-    let model = plan.pointer("/endpoint/model").and_then(Value::as_str)?;
-    known(data).get(service)?.get(model)?.get("note")?.as_str().map(String::from)
+    let model = plan.pointer("/endpoint/model").and_then(Value::as_str).unwrap_or("");
+    let prices = known(data);
+    let Some(price) = prices.get(service).and_then(|models| models.get(model)) else { return spec_own() };
+    // request.py prints a price per request with `money`, and a price per
+    // minute as Python prints the number, which is Rust's shortest form too.
+    let listed = price.get("per_request").and_then(Value::as_f64).is_some_and(|each| estimate == format!("about {} a request", money(each)))
+        || price.get("per_minute").and_then(Value::as_f64).is_some_and(|minute| estimate.contains(&format!("at ${minute} a minute")));
+    if !listed {
+        return spec_own();
+    }
+    let read = price.get("fetched").and_then(Value::as_str).unwrap_or("");
+    let leaves_out = price.get("note").and_then(Value::as_str).map(|note| format!("; it {note}")).unwrap_or_default();
+    Some(format!("is the price list's, read {read}{leaves_out}"))
 }
 
 /// Makes sure the price of the model a plan or spec names was read today.
@@ -116,23 +135,18 @@ fn ensure_at(data: &Path, plan: &Value, vars: &[(String, String)], openrouter: &
             None => return false,
         },
     };
-    let price = match fetched {
-        Ok(price) => price,
+    let last = cache.get(service).and_then(|models| models.get(model)).cloned().unwrap_or(Value::Null);
+    let (price, read_on) = match fetched {
+        Ok(price) => (price, today.clone()),
         // The service could not be reached: the last price read is kept,
-        // saying when it was read, rather than lost.
+        // with the day it was really read, rather than lost.
         Err(_) => {
-            let last = cache.get(service).and_then(|models| models.get(model)).cloned().unwrap_or(Value::Null);
-            last.get("price").filter(|price| price.is_object()).map(|price| {
-                let mut price = price.clone();
-                let read_on = last.get("fetched").and_then(Value::as_str).unwrap_or("an earlier day");
-                let note = price.get("note").and_then(Value::as_str).map(|note| format!("{note}; ")).unwrap_or_default();
-                price["note"] = json!(format!("{note}read on {read_on}, as today's read failed"));
-                price
-            })
+            let read_on = last.get("read_on").or_else(|| last.get("fetched")).and_then(Value::as_str).unwrap_or("an earlier day").to_string();
+            (last.get("price").filter(|price| price.is_object()).cloned(), read_on)
         }
     };
     // A price not found is kept too, so it is not asked for again today.
-    cache[service][model] = json!({ "fetched": today, "price": price });
+    cache[service][model] = json!({ "fetched": today, "read_on": read_on, "price": price });
     let _ = std::fs::write(data.join(CACHE), serde_json::to_string_pretty(&cache).unwrap_or_default());
     price.is_some()
 }
@@ -456,6 +470,12 @@ mod tests {
                 assert!(price["from"].is_string() && price["fetched"].is_string(), "{price}");
             }
         }
+        // The card says where a cost came from: today's list, or a price
+        // written into the spec or step, which is not taken for the list's.
+        let listed = json!({ "endpoint": { "kind": "openrouter-image", "model": "vendor/flat-image" }, "estimate": "about $0.05 a request" });
+        assert!(note_for(&data, &listed).unwrap().starts_with("is the price list's"));
+        let own = json!({ "endpoint": { "kind": "openrouter-image", "model": "vendor/flat-image" }, "estimate": "about $0.01 a request" });
+        assert!(note_for(&data, &own).unwrap().contains("own endpoint"), "a spec's own price was shown as the list's");
         let _ = std::fs::remove_dir_all(&data);
     }
 }

@@ -257,8 +257,10 @@ fn resolve(command: &[String], env: &ScriptEnv) -> Result<Vec<String>, String> {
 /// ends in a script's name, or another file named like one, such as one
 /// the agent wrote, never does.
 fn script_of(argv: &[String], scripts: Option<&Path>, cwd: &Path) -> Option<(&'static str, String)> {
+    // Python itself, by its own names, such as python3 or python3.12.
     let program = Path::new(argv.first()?).file_name()?.to_string_lossy().to_string();
-    if !program.starts_with("python") {
+    let version = program.strip_prefix("python").unwrap_or("x");
+    if !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
         return None;
     }
     let script = Path::new(argv.get(1)?);
@@ -475,8 +477,7 @@ fn planned(argv: &[String], cwd: &Path, vars: &[(String, String)], stand_in: boo
     // A listed price's note, what it leaves out, is shown beside it.
     if !stand_in {
         crate::prices::fill_from_history(cwd, &mut plan);
-        let listed = plan.get("estimate").and_then(Value::as_str).is_some_and(|estimate| estimate.starts_with("about $") && !estimate.contains("earlier request"));
-        if listed && let Some(note) = crate::prices::data_of(vars).and_then(|data| crate::prices::note_for(&data, &plan)) {
+        if let Some(note) = crate::prices::data_of(vars).and_then(|data| crate::prices::note_for(&data, &plan)) {
             plan["price_note"] = json!(note);
         }
     }
