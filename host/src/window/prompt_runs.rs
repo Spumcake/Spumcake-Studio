@@ -251,16 +251,28 @@ impl HostWindow {
     }
 
     /// Each round with its model's name, the one the card shows.
-    fn named(&self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
+    fn named(&mut self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
         rounds
             .into_iter()
             .map(|mut round| {
                 if !round.model.is_empty() {
-                    round.model_name = crate::cells::model_name(&self.ctx, &round.model);
+                    round.model_name = self.model_name(&round.model);
                 }
                 round
             })
             .collect()
+    }
+
+    /// A model's name as the card shows it, from an endpoint's own model
+    /// list, or else a skill's `models.json`; empty when neither names it,
+    /// so the workspace shows the model's id as it is.
+    fn model_name(&mut self, model: &str) -> String {
+        let shown = crate::cells::model_name(&self.ctx, model);
+        if shown != model.rsplit('/').next().unwrap_or(model) {
+            return shown;
+        }
+        let skills = crate::skills_setup::listed_skills(&self.settings.skill_folders);
+        crate::prices::local_name(&skills, model).unwrap_or_default()
     }
 
     /// When the agent records a step with the request a draft cell made,

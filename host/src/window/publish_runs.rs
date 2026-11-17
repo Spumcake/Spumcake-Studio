@@ -264,6 +264,38 @@ fn sources_of(place: &Place, artifact: &str, request: Option<&str>, file: &str, 
     Ok(sources)
 }
 
+/// The sources a file was published with before, from the run log's last
+/// publish of it as this artifact, with the roles canon gives them now or
+/// "input": a revert keeps what was named when it was first published.
+fn logged_sources(place: &Place, artifact: &str, file: &str) -> Vec<(String, String)> {
+    let log = std::fs::read_to_string(place.folder.join("pipeline").join(&place.pipeline).join("runs.jsonl")).unwrap_or_default();
+    let names: Vec<String> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("event").and_then(Value::as_str) == Some("publish") && event.get("artifact").and_then(Value::as_str) == Some(artifact) && event.get("file").and_then(Value::as_str) == Some(file))
+        .last()
+        .and_then(|event| event.get("made_from").and_then(Value::as_array).map(|names| names.iter().filter_map(Value::as_str).map(String::from).collect()))
+        .unwrap_or_default();
+    let query = format!("SELECT json_array(source, role) FROM made_from WHERE artifact={}", quoted(artifact));
+    let roles: Vec<(String, String)> = place
+        .script("pipeline.py", &["sql", &place.pipeline, &query, "--read-only"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Vec<String>>(line).ok())
+        .filter_map(|pair| match pair.as_slice() {
+            [source, role] => Some((source.clone(), role.clone())),
+            _ => None,
+        })
+        .collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let role = roles.iter().find(|(source, _)| *source == name).map(|(_, role)| role.clone()).unwrap_or_else(|| String::from("input"));
+            (name, role)
+        })
+        .collect()
+}
+
 /// The files of the takes published together with this one, each
 /// "<artifact>=<request id>": their outputs, reports, and prompts.
 fn with_paths(place: &Place, with: &[String]) -> Vec<String> {
@@ -340,7 +372,8 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
         }
         Asked::Revert { artifact, file, .. } => {
             let request = versions(place, artifact)?.into_iter().find(|version| &version.file == file).and_then(|version| version.request);
-            let made_from = sources_of(place, artifact, request.as_deref(), file, &[])?;
+            let named = logged_sources(place, artifact, file);
+            let made_from = sources_of(place, artifact, request.as_deref(), file, &named)?;
             (artifact.clone(), file.clone(), request, made_from, Vec::new())
         }
         Asked::History { .. } => return Err(String::from("Nothing to publish.")),
@@ -657,6 +690,12 @@ mod tests {
         carry(&place, &Card { asked: bed_asked, view }, false).unwrap();
         let named = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
         assert_eq!(named.trim(), "the beat it scores", "a source the assistant named was lost");
+        // A revert to the bed keeps the source named when it was published.
+        let revert = Asked::Revert { asker: Asker::Assistant { call: String::from("c3") }, artifact: String::from("the diner: sound bed"), file: skills("pipeline.py", &["sql", "001", "SELECT file FROM artifact WHERE id='the diner: sound bed'", "--read-only"]).trim().to_string() };
+        let view = prepare(&place, &revert).unwrap();
+        carry(&place, &Card { asked: revert, view }, false).unwrap();
+        let kept = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
+        assert_eq!(kept.trim(), "the beat it scores", "a revert dropped a source named at its publish");
 
         // A built take whose input has been published again since is
         // refused, as the method refuses it.
