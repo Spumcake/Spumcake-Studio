@@ -20,7 +20,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod assist;
 mod declare;
+mod export;
 pub mod film;
+mod play;
+pub mod sound;
 pub(crate) use declare::{action_named, command_named, session_value, tool_named};
 
 /// How long a dirty storyboard waits between recovery copies.
@@ -50,6 +53,8 @@ pub enum CommandEffect {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FileIntent {
     Open,
+    /// Import sound…: a sound or video file from anywhere.
+    ImportSound,
     Save {
         id: DrawingId,
         copy: bool,
@@ -331,6 +336,19 @@ pub struct Session {
     frames_clipboard: Option<crate::film::CopiedFrames>,
     /// The panel shows the active layer's page; choosing a tool ends it.
     layer_page: bool,
+    /// Every sound the open storyboards play, decoded.
+    sounds: crate::sounds::Library,
+    /// Sounds being imported by hand, decoded off the message loop.
+    imports: Vec<sound::Import>,
+    /// Notices that stay until closed: a failed import, a finished export.
+    kept_notices: Vec<protocol::Notice>,
+    next_notice: u64,
+    /// The animatic export under way.
+    export: Option<crate::export::Job>,
+    /// Playing and scrubbing the active storyboard.
+    playback: Option<crate::playback::Playback>,
+    /// The loop button inside a clip.
+    looping: bool,
 }
 
 impl Session {
@@ -381,6 +399,13 @@ impl Session {
             picked: HashMap::new(),
             frames_clipboard: None,
             layer_page: false,
+            sounds: crate::sounds::Library::default(),
+            imports: Vec::new(),
+            kept_notices: Vec::new(),
+            next_notice: 1,
+            export: None,
+            playback: None,
+            looping: false,
         };
         session.push_blank();
         session
@@ -6566,7 +6591,7 @@ mod tests {
 
         let text_file = std::fs::read_to_string(&path).unwrap();
         let stored: serde_json::Value = serde_json::from_str(&text_file).unwrap();
-        assert_eq!(stored["format_version"], 2);
+        assert_eq!(stored["format_version"], 3);
         assert_eq!(stored["id"], storyboard_id.get());
         assert_eq!(stored["name"], "Round");
         forbid_stored_keys(&stored);

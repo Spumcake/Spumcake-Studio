@@ -49,6 +49,58 @@ impl Which {
     }
 }
 
+/// The cut's item id: the order and timing of the shots, and their sound.
+pub const CUT: &str = "cut";
+/// The exported animatic's item id.
+pub const ANIMATIC: &str = "animatic";
+
+/// A clip's frames item's id: every frame it shows.
+pub fn frames_id(clip: u64) -> String {
+    format!("{clip}-frames")
+}
+
+/// The cut's fingerprint: each drawn clip's place and length, the Shots
+/// track's eye, and each Sound track's mute and each sound's place, trim,
+/// volume, and file. Nothing a person only looks at enters it.
+pub fn cut_fingerprint(film: &Film, sounds: &mut crate::sounds::Library, project: Option<&Path>) -> String {
+    let mut parts = vec![format!("shots {}", film.shots_visible)];
+    for clip in &film.clips {
+        parts.push(format!("clip {} {} {}", clip.id, clip.start, clip.length));
+    }
+    for track in &film.sound_tracks {
+        parts.push(format!("track {} {}", track.id, track.muted));
+        for clip in &track.clips {
+            let file = sounds.loaded(project, &clip.file).map_or_else(|| "missing".to_string(), |loaded| loaded.fingerprint.clone());
+            parts.push(format!("sound {} {} {} {} {} {file}", clip.id, clip.at, clip.from, clip.length, clip.volume));
+        }
+    }
+    protocol::fingerprint(parts.join("\n").as_bytes())
+}
+
+/// A clip's frames' fingerprint: its length and, from each frame where
+/// what it shows can change, that frame's description, as its first and
+/// last frames are described.
+pub fn frames_fingerprint(record: &Record, clip: &Clip) -> String {
+    let mut changes: Vec<u32> = vec![0];
+    for layer in &clip.layers {
+        changes.extend(layer.keys.iter().map(|key| key.frame).filter(|frame| *frame < clip.length));
+    }
+    changes.sort_unstable();
+    changes.dedup();
+    let mut parts = vec![format!("length {}", clip.length)];
+    for frame in changes {
+        parts.push(format!("{frame}|{}", description(record, record.film(), clip, frame)));
+    }
+    protocol::fingerprint(parts.join("\n").as_bytes())
+}
+
+/// The name a storyboard's items and export go by: its title, or its
+/// file's name when the title is empty.
+pub fn title_of(record: &Record) -> String {
+    let title = record.film().title.trim();
+    if title.is_empty() { record.name().to_string() } else { title.to_string() }
+}
+
 /// An item's id: the clip's id and which frame.
 pub fn item_id(clip: u64, which: Which) -> String {
     format!("{clip}-{}", which.word())
@@ -67,7 +119,7 @@ fn frame_of(clip: &Clip, which: Which) -> u32 {
 }
 
 /// Every mark the frame renders, bottom layer first, at its layers' opacity.
-fn marks(record: &Record, clip: &Clip, frame: u32) -> Vec<SceneMark> {
+pub(crate) fn marks(record: &Record, clip: &Clip, frame: u32) -> Vec<SceneMark> {
     let mut out = Vec::new();
     for layer in clip.layers.iter().rev() {
         if layer.folder || !clip.shows(layer) {
@@ -155,9 +207,55 @@ impl Boards {
         Some(fingerprint)
     }
 
-    /// Every item of a storyboard: each clip's first and last frames.
-    pub fn items(&mut self, looker: &mut Looker, record: &Record) -> Vec<Item> {
-        let mut items = Vec::new();
+    /// Every item of a storyboard: each clip's first and last frames and
+    /// its frames, the cut, and the animatic once it is exported. `path` is
+    /// the storyboard's file in the project, which the animatic's sources
+    /// name.
+    pub fn items(
+        &mut self,
+        looker: &mut Looker,
+        record: &Record,
+        sounds: &mut crate::sounds::Library,
+        project: Option<&Path>,
+        path: &str,
+    ) -> Vec<Item> {
+        let mut items = vec![Item {
+            id: CUT.to_string(),
+            name: format!("{} — cut", title_of(record)),
+            media_types: Vec::new(),
+            fingerprint: cut_fingerprint(record.film(), sounds, project),
+            made: None,
+        }];
+        for clip in &record.film().clips {
+            items.push(Item {
+                id: frames_id(clip.id),
+                name: format!("{} — frames", clip.name),
+                media_types: Vec::new(),
+                fingerprint: frames_fingerprint(record, clip),
+                made: None,
+            });
+        }
+        if let Some(exported) = record.exported() {
+            items.push(Item {
+                id: ANIMATIC.to_string(),
+                name: format!("{} — animatic", title_of(record)),
+                media_types: vec!["video/mp4".to_string()],
+                fingerprint: exported.fingerprint(),
+                made: Some(protocol::Made {
+                    cell: None,
+                    version: None,
+                    used: Vec::new(),
+                    sources: exported
+                        .sources
+                        .iter()
+                        .map(|(item, fingerprint)| protocol::UsedItem {
+                            item: protocol::ItemRef { path: path.to_string(), item: Some(item.clone()) },
+                            fingerprint: fingerprint.clone(),
+                        })
+                        .collect(),
+                }),
+            });
+        }
         for clip in &record.film().clips {
             for which in [Which::First, Which::Last] {
                 let Some(fingerprint) = self.fingerprint(looker, record, clip, which) else {

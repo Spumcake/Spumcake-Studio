@@ -45,7 +45,8 @@ const VIEW: &str = "zoom, fit, and the window";
 const PANEL: &str = "the panel: which page it shows";
 const TOOLS: &str = "the drawing tools' own settings";
 const LAYOUT: &str = "the host's text layout report, not a hand action";
-const PLAYBACK: &str = "playing the film, which comes with sound in a later slice and changes nothing";
+const PLAYBACK: &str = "playing the film, which changes nothing in the storyboard";
+const NOTICE: &str = "closing a card, which changes nothing in the storyboard";
 
 const TEXT_STYLE: Place = Place::Tool("style__set_object_properties", None);
 
@@ -127,7 +128,18 @@ fn action(id: &str) -> Option<Place> {
         "new_layer" | "new_folder" => Tool("clips__add_layer", None),
         "delete_layer" => Tool("clips__delete_layer", None),
         "layer_flag" => Tool("clips__set_layer", None),
-        "play" => Left(PLAYBACK),
+        // The film's sound, its tracks, and the animatic.
+        "import_sound" => Tool("clips__import_sound", None),
+        "new_sound_track" => Tool("clips__add_sound_track", None),
+        "rename_sound_track" => Tool("clips__rename_sound_track", None),
+        "delete_sound_track" => Tool("clips__delete_sound_track", None),
+        "delete_sound" => Tool("clips__delete_sound", None),
+        "track_flag" => Tool("clips__set_track", None),
+        "export_animatic" => Tool("clips__export_animatic", None),
+        "cancel_export" => Tool("clips__cancel_export", None),
+        "close_notice" => Left(NOTICE),
+        "play" | "toggle_loop" => Left(PLAYBACK),
+        "set_volume" | "finish_volume" => Tool("clips__set_listening_volume", None),
         "timeline_page" => Left(PANEL),
         _ => return None,
     })
@@ -189,35 +201,88 @@ fn gesture(kind: &GestureKind) -> Place {
     }
 }
 
-/// Every gesture on the timeline, by what it acts on: there is no catch-all,
-/// so a new kind of gesture does not compile until it is placed.
-fn timeline_gesture(gesture: &protocol::TimelineGesture, in_clip: bool) -> Place {
+/// The kinds of row a timeline gesture can land on: the film's Shots track,
+/// a Sound track, or a layer inside a clip.
+#[derive(Clone, Copy, Debug)]
+enum RowKind {
+    Shots,
+    Sound,
+    Layer,
+}
+
+impl RowKind {
+    /// The kind of a declared row, by its id: `Some(None)` for the clip's
+    /// read-only Film sound row, which takes no gesture, and `None` for a
+    /// row of a kind this check does not know yet.
+    fn of(id: &str) -> Option<Option<Self>> {
+        Some(match id {
+            "shots" => Some(RowKind::Shots),
+            "film-sound" => None,
+            _ if id.starts_with("sound-") => Some(RowKind::Sound),
+            _ if id.parse::<u64>().is_ok() => Some(RowKind::Layer),
+            _ => return None,
+        })
+    }
+
+    /// A row id of this kind, as the Storyboard Generator declares them.
+    fn row(self) -> &'static str {
+        match self {
+            RowKind::Shots => "shots",
+            RowKind::Sound => "sound-1",
+            RowKind::Layer => "1",
+        }
+    }
+}
+
+/// Every gesture on the timeline, by what it acts on and the kind of row it
+/// is on: there is no catch-all, so a new kind of gesture or row does not
+/// compile until it is placed.
+fn timeline_gesture(gesture: &protocol::TimelineGesture, row: RowKind) -> Place {
     use Place::{Tool, Tools};
     use protocol::TimelineGesture as G;
-    match (gesture, in_clip) {
-        (G::Select { .. }, false) => Tool("clips__select_clips", None),
-        (G::Select { .. }, true) => Tools(&["clips__select_layer", "clips__go_to_frame", "clips__select_frames"]),
+    match (gesture, row) {
+        (G::Select { .. }, RowKind::Shots) => Tool("clips__select_clips", None),
+        (G::Select { .. }, RowKind::Sound) => Tool("clips__select_sounds", None),
+        (G::Select { .. }, RowKind::Layer) => Tools(&["clips__select_layer", "clips__go_to_frame", "clips__select_frames"]),
         (G::SelectCells { .. }, _) => Tool("clips__select_frames", None),
-        (G::Move { push: false, .. }, false) | (G::Move { push: true, .. }, false) => Tool("clips__move_clips", None),
-        (G::Move { push: false, .. }, true) | (G::Move { push: true, .. }, true) => Tool("clips__move_frames", None),
-        (G::Resize { .. }, false) => Tool("clips__retime_clip", None),
-        (G::Resize { .. }, true) => Tool("clips__stretch_hold", None),
+        (G::Move { push: false, .. }, RowKind::Shots) | (G::Move { push: true, .. }, RowKind::Shots) => Tool("clips__move_clips", None),
+        (G::Move { push: false, .. }, RowKind::Sound) | (G::Move { push: true, .. }, RowKind::Sound) => Tool("clips__move_sound", None),
+        (G::Move { push: false, .. }, RowKind::Layer) | (G::Move { push: true, .. }, RowKind::Layer) => Tool("clips__move_frames", None),
+        (G::Resize { .. }, RowKind::Shots) => Tool("clips__retime_clip", None),
+        (G::Resize { .. }, RowKind::Sound) => Tool("clips__trim_sound", None),
+        (G::Resize { .. }, RowKind::Layer) => Tool("clips__stretch_hold", None),
         (G::Range { .. }, _) => Tool("clips__set_onion_skin", None),
     }
 }
 
-fn timeline_gestures() -> Vec<protocol::TimelineGesture> {
+/// One of each gesture on a row of `kind`: within it and onto another
+/// row, with and without Shift, and both edges.
+fn timeline_gestures(kind: RowKind) -> Vec<protocol::TimelineGesture> {
     use protocol::{Edge, TimelineGesture as G, TimelinePick};
-    let pick = TimelinePick { row: "1".into(), item: Some("1".into()), frame: Some(0) };
-    vec![
-        G::Select { picks: vec![pick.clone()], add: false, toggle: false },
-        G::SelectCells { rows: vec!["1".into()], start: 0, end: 1 },
-        G::Move { picks: vec![pick.clone()], frames: 1, row: None, push: false },
-        G::Move { picks: vec![pick.clone()], frames: 1, row: None, push: true },
-        G::Resize { pick: pick.clone(), edge: Edge::Start, frames: 1 },
-        G::Resize { pick, edge: Edge::End, frames: 1 },
-        G::Range { id: "onion".into(), start: 0, end: 1 },
-    ]
+    let row = kind.row();
+    let pick = TimelinePick { row: row.into(), item: Some("1".into()), frame: Some(0) };
+    let mut out = vec![G::Select { picks: vec![pick.clone()], add: false, toggle: false }];
+    for push in [false, true] {
+        out.push(G::Move { picks: vec![pick.clone()], frames: 1, row: None, push });
+        out.push(G::Move { picks: vec![pick.clone()], frames: 1, row: Some(row.into()), push });
+    }
+    out.push(G::Resize { pick: pick.clone(), edge: Edge::Start, frames: 1 });
+    out.push(G::Resize { pick, edge: Edge::End, frames: 1 });
+    if let RowKind::Layer = kind {
+        out.push(G::SelectCells { rows: vec![row.into()], start: 0, end: 1 });
+        out.push(G::Range { id: "onion".into(), start: 0, end: 1 });
+    }
+    out
+}
+
+/// That every timeline gesture on every kind of row has a tool.
+fn gestures_offered(tools: &BTreeMap<String, Value>) -> Result<(), String> {
+    for kind in [RowKind::Shots, RowKind::Sound, RowKind::Layer] {
+        for gesture in timeline_gestures(kind) {
+            offered(tools, &format!("the timeline gesture {gesture:?} on a {kind:?} row"), timeline_gesture(&gesture, kind))?;
+        }
+    }
+    Ok(())
 }
 
 /// Where each row of the film's pages and the onion skin's settings is set:
@@ -244,6 +309,10 @@ fn film_row(kind: &str, field: &str) -> Option<(&'static str, &'static str)> {
         ("onion", "opacity") => ("clips__set_onion_skin", "opacity"),
         ("onion", "fade") => ("clips__set_onion_skin", "fade"),
         ("onion", "keys_only") => ("clips__set_onion_skin", "keys_only"),
+        ("sound", "volume") => ("clips__set_sound_volume", "volume"),
+        ("sound", "at") => ("clips__trim_sound", "at"),
+        ("sound", "from") => ("clips__trim_sound", "from"),
+        ("track", "name") => ("clips__rename_sound_track", "name"),
         _ => return None,
     })
 }
@@ -366,6 +435,8 @@ struct Seen {
     film_rows: BTreeSet<(String, String)>,
     object_props: BTreeSet<String>,
     color_props: BTreeSet<String>,
+    /// The id of every timeline row declared.
+    rows: BTreeSet<String>,
 }
 
 struct Walk {
@@ -389,6 +460,9 @@ impl Walk {
             if let Ok(value) = serde_json::to_value(reply) {
                 actions_in(&value, &mut self.seen.actions);
                 film_rows_in(&value, &mut self.seen.film_rows);
+            }
+            if let AppMessage::Timeline(timeline) = reply {
+                self.seen.rows.extend(timeline.rows.iter().map(|row| row.id.clone()));
             }
             if let (AppMessage::Properties(properties), Some(page)) = (reply, page) {
                 let target = if page == "object" { &mut self.seen.object_props } else { &mut self.seen.color_props };
@@ -434,7 +508,7 @@ impl Walk {
 fn gather() -> Result<(Vec<ToolGroup>, Seen), String> {
     let mut walk = Walk {
         server: Server::new(None),
-        seen: Seen { actions: BTreeSet::new(), film_rows: BTreeSet::new(), object_props: BTreeSet::new(), color_props: BTreeSet::new() },
+        seen: Seen { actions: BTreeSet::new(), film_rows: BTreeSet::new(), object_props: BTreeSet::new(), color_props: BTreeSet::new(), rows: BTreeSet::new() },
         tab: String::new(),
         calls: 0,
     };
@@ -449,6 +523,12 @@ fn gather() -> Result<(Vec<ToolGroup>, Seen), String> {
         .ok_or("storyboard-generator declared no tools")?;
     walk.tab = crate::document_of(&greeting).ok_or("no document")?.0;
     walk.send(HostMessage::Viewport { viewport: crate::VIEWPORT }, None);
+    // A project of its own, so sound is imported into it and the animatic
+    // exported there.
+    let project = std::env::temp_dir().join(format!("storyboard-client-coverage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).map_err(|error| error.to_string())?;
+    walk.send(HostMessage::Project { folder: project.display().to_string(), skills: false }, None);
 
     // The film: its storyboard page, two clips, a clip's page and menus.
     walk.command("toggle_panel", None, None);
@@ -458,6 +538,28 @@ fn gather() -> Result<(Vec<ToolGroup>, Seen), String> {
     walk.command("select_tab", None, None);
     walk.invoke("clips__select_clips", json!({"clips": []}));
     walk.command("select_tab", None, None);
+    // The film's sound: two Sound tracks, a sound's page, a track's page,
+    // the workspace menu's rows, and the export's cards.
+    let sound_file = project.join("line.wav");
+    std::fs::write(&sound_file, storyboard_generator::sounds::wav_bytes(storyboard_generator::sounds::RATE, &storyboard_generator::sounds::clicks(48, &[6])))
+        .map_err(|error| error.to_string())?;
+    let imported = walk.invoke("clips__import_sound", json!({"path": sound_file.display().to_string(), "frame": 1}));
+    let sound = imported["made"]["sound"].as_u64().ok_or(format!("no sound was imported: {imported}"))?;
+    walk.invoke("clips__add_sound_track", json!({}));
+    walk.invoke("clips__select_sounds", json!({"sounds": [sound]}));
+    let track = walk.invoke("clips__read_film", json!({}))["sound_tracks"][0]["id"].as_u64().ok_or("no Sound track")?;
+    walk.command("rename_sound_track", Some(json!(track)), None);
+    walk.invoke("clips__select_clips", json!({"clips": []}));
+    // Its card while it runs holds Cancel; once done, a close.
+    walk.command("export_animatic", None, None);
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let replies = walk.server.tick();
+        walk.note(&replies, None);
+        if walk.seen.actions.contains("close_notice") {
+            break;
+        }
+    }
     // Inside the first clip, where drawing happens: a folder, a layer, keys,
     // a label, the onion skin, and the layer's page.
     walk.invoke("clips__edit_clip", json!({"clip": first}));
@@ -603,9 +705,17 @@ pub(crate) fn check() -> Result<(), String> {
             return Err(format!("the film's row {kind}.{field} is set by {tool}, which does not take {key}"));
         }
     }
-    for gesture in timeline_gestures() {
-        for in_clip in [false, true] {
-            offered(&tools, &format!("the timeline gesture {gesture:?}"), timeline_gesture(&gesture, in_clip))?;
+    gestures_offered(&tools)?;
+    // Every row the walk saw declared is of a kind the gestures above
+    // cover, and every kind was seen.
+    let mut kinds = BTreeSet::new();
+    for row in &seen.rows {
+        let kind = RowKind::of(row).ok_or_else(|| format!("the timeline row {row:?} is of a kind coverage does not place"))?;
+        kinds.insert(format!("{kind:?}"));
+    }
+    for kind in [Some(RowKind::Shots), Some(RowKind::Sound), Some(RowKind::Layer)] {
+        if !kinds.contains(&format!("{kind:?}")) {
+            return Err(format!("the walk never saw a {kind:?} row"));
         }
     }
     for kind in gesture_kinds() {
@@ -648,4 +758,22 @@ fn snake(name: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Coverage shown failing once: with no tool to move a sound, a move on
+    /// a Sound track fails it, though the Shots track's moves are covered.
+    #[test]
+    fn a_move_on_a_sound_track_needs_its_own_tool() {
+        let (skills, _) = gather().unwrap();
+        let mut tools = declared(&skills);
+        assert!(gestures_offered(&tools).is_ok());
+        tools.remove("clips__move_sound");
+        let error = gestures_offered(&tools).unwrap_err();
+        assert!(error.contains("Sound row") && error.contains("clips__move_sound"), "{error}");
+        assert!(tools.contains_key("clips__move_clips"));
+    }
 }

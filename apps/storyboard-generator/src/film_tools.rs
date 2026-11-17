@@ -7,6 +7,7 @@
 //! Frames are counted from 1, as people read them and the ruler shows them.
 
 use crate::film::{Film, NEW_CLIP_LENGTH};
+use crate::soundtrack::{TrackFlag, TrackRef};
 use crate::session::Session;
 use crate::session::film::{ClipText, LayerFlag};
 use crate::tools::Outcome;
@@ -34,8 +35,8 @@ pub fn group() -> ToolGroup {
     ToolGroup {
         id: "clips".into(),
         name: "Film and clips".into(),
-        description: "Make and time the film's clips, and inside a clip its layers, keyframes, holds, labels, and onion skin, as the timeline and its pages do.".into(),
-        instructions: "A storyboard holds a film: clips on the Shots track, each one shot, played in order. Inside a clip are layers, top to bottom, each with keyframes: a keyframe's drawing holds until the next keyframe, and a blank keyframe holds nothing. Frames count from 1, on the film from its start and in a clip from the clip's start. Drawing happens inside a clip, on the active layer at the playhead: open a clip with edit_clip, choose a frame with go_to_frame and a layer with select_layer, then use the Draw by hand tools; go back with leave_clip. read_film says where the person is, every clip with its layers and keys, and each clip's item, which other workspaces name its first and last frames by. Retiming a clip's end moves the clips after it; moving clips with push moves those they land on, and without it covers them. Moving frames with push moves the frames after them; without it, they replace the frames they land on. All the changes of one request are taken back by one undo.".into(),
+        description: "Make and time the film's clips and its sound, and inside a clip its layers, keyframes, holds, labels, and onion skin, as the timeline and its pages do; export the animatic.".into(),
+        instructions: "A storyboard holds a film: clips on the Shots track, each one shot, played in order. Inside a clip are layers, top to bottom, each with keyframes: a keyframe's drawing holds until the next keyframe, and a blank keyframe holds nothing. Frames count from 1, on the film from its start and in a clip from the clip's start. Drawing happens inside a clip, on the active layer at the playhead: open a clip with edit_clip, choose a frame with go_to_frame and a layer with select_layer, then use the Draw by hand tools; go back with leave_clip. read_film says where the person is, every clip with its layers and keys, and each clip's item, which other workspaces name its first and last frames by. Retiming a clip's end moves the clips after it; moving clips with push moves those they land on, and without it covers them. Moving frames with push moves the frames after them; without it, they replace the frames they land on. Under the Shots track are Sound tracks: import_sound copies a sound or video file into the project and places it, and read_sound gives how loud the film's sound is on each frame, so clips and a mouth's keys can be timed to it. A locked track refuses changes until set_track unlocks it; a muted Sound track and a hidden Shots track are left out of what plays and what is exported. export_animatic writes the film with its sound as a video into the project's exports folder; list_items says when it is done. All the changes of one request are taken back by one undo.".into(),
         tools: vec![
             tool("read_film", "The film as data: where the person is, the storyboard's settings, the onion skin, the selection, and every clip with its timing, notes, items, layers, keys, and marks.", json!({}), &[]),
             tool("add_clip", "Add a clip, with one blank layer. Clips it lands on move later.", json!({ "start": integer("The film's frame it starts on. Leave out for after the last clip."), "length": integer("Frames. Default 48, two seconds.") }), &[]),
@@ -67,6 +68,22 @@ pub fn group() -> ToolGroup {
             tool("remove_mark", "Remove a label or a comment.", json!({ "layer": integer("The layer's id."), "mark": integer("The mark's id.") }), &["layer", "mark"]),
             tool("set_onion_skin", "Turn onion skin on or off, and set how many keys before and after it shows, its starting opacity, how much it fades, and whether it counts keys only. A view aid: not an undo step.", json!({ "on": { "type": "boolean" }, "before": integer("0 to 9."), "after": integer("0 to 9."), "opacity": { "type": "number", "minimum": 0, "maximum": 1 }, "fade": { "type": "number", "minimum": 0, "maximum": 1 }, "keys_only": { "type": "boolean" } }), &[]),
             tool("set_storyboard", "Set the storyboard's title and scene, which the sheet's header shows, and the film's frame size and paper.", json!({ "title": { "type": "string" }, "scene": { "type": "string" }, "width": integer("Frame width."), "height": integer("Frame height."), "paper": integer("0: Japanese layout paper, 16:9.") }), &[]),
+            tool("import_sound", "Import a sound, or a video's sound, from a file: it is copied into the project's sounds folder and placed whole on a Sound track, a new one when none has room.", json!({ "path": { "type": "string", "description": "The file's path." }, "track": integer("The Sound track's id. Leave out for the first with room."), "frame": integer("The film's frame it starts on, from 1. Leave out for the playhead.") }), &["path"]),
+            tool("add_sound_track", "Add an empty Sound track under the others.", json!({}), &[]),
+            tool("rename_sound_track", "Rename a Sound track.", json!({ "track": integer("The Sound track's id."), "name": { "type": "string" } }), &["track", "name"]),
+            tool("delete_sound_track", "Delete a Sound track and the sounds on it.", json!({ "track": integer("The Sound track's id.") }), &["track"]),
+            tool("set_track", "Lock or unlock a track, show or hide the Shots track, or mute or unmute a Sound track, as its header's toggles do.", json!({ "track": { "description": "\"shots\", or a Sound track's id." }, "locked": { "type": "boolean" }, "visible": { "type": "boolean", "description": "The Shots track's eye." }, "muted": { "type": "boolean", "description": "A Sound track's speaker." } }), &["track"]),
+            tool("select_sounds", "Select sounds on the Sound tracks, as clicking them does.", json!({ "sounds": { "type": "array", "items": { "type": "integer" } } }), &["sounds"]),
+            tool("move_sound", "Move a sound to a frame of the film, and to another Sound track.", json!({ "sound": integer("The sound's id."), "frame": integer("The film's frame it starts on, from 1."), "track": integer("The Sound track it moves to. Leave out to stay."), "push": { "type": "boolean", "description": "Move the sounds it lands on later instead of covering them. Default true." } }), &["sound", "frame"]),
+            tool("trim_sound", "Set where a sound starts on the film, where it starts inside its own sound, and its length, as dragging its edges and its page do.", json!({ "sound": integer("The sound's id."), "at": integer("The film's frame it starts on, from 1."), "from": integer("The frame of its own sound it starts from, from 1."), "length": integer("Frames.") }), &["sound"]),
+            tool("set_sound_volume", "Set a sound's volume, as its page does.", json!({ "sound": integer("The sound's id."), "volume": { "type": "number", "minimum": 0, "maximum": 1 } }), &["sound", "volume"]),
+            tool("delete_sound", "Take a sound off its track. Its file stays in the sounds folder.", json!({ "sound": integer("The sound's id.") }), &["sound"]),
+            tool("set_listening_volume", "Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step.", json!({ "volume": { "type": "number", "minimum": 0, "maximum": 1 } }), &["volume"]),
+            tool("read_sound", "How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound.", json!({ "start": integer("The film's first frame, from 1."), "end": integer("The film's last frame, from 1.") }), &["start", "end"]),
+            tool("export_animatic", "Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done.", json!({}), &[]),
+            tool("cancel_export", "Cancel the export under way.", json!({}), &[]),
+            tool("list_items", "Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed.", json!({}), &[]),
+            tool("render_again", "Render an item again from what made it: the animatic is exported again.", json!({ "item": { "type": "string", "description": "The item's id, such as \"animatic\"." } }), &["item"]),
         ],
     }
 }
@@ -96,7 +113,53 @@ pub fn describe(session: &Session) -> Value {
         "selected_frames": picked.cells.map(|cells| json!({ "layers": cells.layers, "start": cells.start + 1, "end": cells.end + 1 })),
         "onion_skin": { "on": onion.on, "before": onion.before, "after": onion.after, "opacity": onion.opacity, "fade": onion.fade, "keys_only": onion.keys_only },
         "clips": film.clips.iter().map(|clip| clip_json(session, clip, path.as_deref())).collect::<Vec<_>>(),
+        "shots_track": { "locked": film.shots_locked, "visible": film.shots_visible },
+        "sound_tracks": film.sound_tracks.iter().map(|track| json!({
+            "id": track.id,
+            "name": track.name,
+            "locked": track.locked,
+            "muted": track.muted,
+            "sounds": track.clips.iter().map(|clip| json!({
+                "id": clip.id,
+                "name": clip.name,
+                "file": clip.file,
+                "start": clip.at + 1,
+                "from": clip.from + 1,
+                "length": clip.length,
+                "sound_length": clip.source,
+                "volume": clip.volume,
+                "missing": !matches!(session.peek_sound(&clip.file), None | Some(crate::sounds::State::Loaded(_))),
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "selected_sounds": picked.sounds,
+        "listening_volume": session.listening(),
+        "animatic": session.animatic_state(),
     })
+}
+
+/// A track named by the tools: "shots", or a Sound track's id.
+fn track_of(input: &Value) -> Result<TrackRef, String> {
+    match input.get("track") {
+        Some(Value::String(text)) if text == "shots" => Ok(TrackRef::Shots),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+            .map(TrackRef::Sound)
+            .ok_or_else(|| "track is \"shots\" or a Sound track's id".to_string()),
+        None => Err("track is missing".to_string()),
+    }
+}
+
+fn shots_unlocked(session: &Session) -> Result<(), String> {
+    if session.film().shots_locked { Err("The Shots track is locked.".to_string()) } else { Ok(()) }
+}
+
+fn sound_unlocked(session: &Session, sound: u64) -> Result<(), String> {
+    match session.film().sound(sound) {
+        None => Err("no such sound".to_string()),
+        Some((track, _)) if track.locked => Err(format!("The {} track is locked.", track.name)),
+        Some(_) => Ok(()),
+    }
 }
 
 fn clip_json(session: &Session, clip: &crate::film::Clip, path: Option<&str>) -> Value {
@@ -212,6 +275,7 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
         match tool {
             "read_film" => return Ok(describe(session)),
             "add_clip" => {
+                shots_unlocked(session)?;
                 let start = match input.get("start") {
                     Some(_) => Some(frame(input, "start")?),
                     None => None,
@@ -220,10 +284,15 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 made = json!(session.add_clip(start, length).ok_or("the clip could not be added")?);
             }
             "duplicate_clip" => {
+                shots_unlocked(session)?;
                 made = json!(session.duplicate_clip(id(input, "clip")?).ok_or("no such clip")?);
             }
-            "delete_clip" => changed(session.delete_clip(id(input, "clip")?), "no such clip")?,
+            "delete_clip" => {
+                shots_unlocked(session)?;
+                changed(session.delete_clip(id(input, "clip")?), "no such clip")?;
+            }
             "retime_clip" => {
+                shots_unlocked(session)?;
                 let end = match text(input, "edge") {
                     Some("end") => true,
                     Some("start") => false,
@@ -232,6 +301,7 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 changed(session.resize_clip(id(input, "clip")?, end, number(input, "frames")?), "the clip is already that length or the edge cannot move")?;
             }
             "move_clips" => {
+                shots_unlocked(session)?;
                 let clips = ids(input, "clips").ok_or("clips is missing")?;
                 changed(session.move_clips(&clips, number(input, "frames")?, flag(input, "push").unwrap_or(true)), "no clip moved")?;
             }
@@ -399,6 +469,102 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 }
                 let paper = input.get("paper").and_then(Value::as_u64).map(|paper| paper as u8);
                 session.set_film_settings(text(input, "title"), text(input, "scene"), Some(size), paper);
+            }
+            "import_sound" => {
+                let path = text(input, "path").ok_or("path is missing")?;
+                let track = input.get("track").and_then(Value::as_u64);
+                let at = match input.get("frame") {
+                    Some(_) => Some(frame(input, "frame")?),
+                    None => None,
+                };
+                let sound = session.import_sound(std::path::Path::new(path), track, at)?;
+                let length = session.film().sound(sound).map(|(_, clip)| clip.length);
+                made = json!({ "sound": sound, "length": length });
+            }
+            "add_sound_track" => made = json!(session.add_sound_track().ok_or("the track could not be added")?),
+            "rename_sound_track" => changed(session.rename_sound_track(id(input, "track")?, text(input, "name").unwrap_or_default()), "no such track, or it already has that name")?,
+            "delete_sound_track" => changed(session.delete_sound_track(id(input, "track")?), "no such track")?,
+            "set_track" => {
+                let track = track_of(input)?;
+                for (key, which) in [("locked", TrackFlag::Locked), ("visible", TrackFlag::Visible), ("muted", TrackFlag::Muted)] {
+                    if let Some(on) = flag(input, key) {
+                        let fits = matches!((track, which), (_, TrackFlag::Locked) | (TrackRef::Shots, TrackFlag::Visible) | (TrackRef::Sound(_), TrackFlag::Muted));
+                        if !fits {
+                            return Err(match which {
+                                TrackFlag::Visible => "a Sound track has no eye; mute it instead".to_string(),
+                                _ => "the Shots track has no speaker".to_string(),
+                            });
+                        }
+                        session.set_track_flag(track, which, on);
+                    }
+                }
+            }
+            "select_sounds" => session.select_sounds(ids(input, "sounds").ok_or("sounds is missing")?),
+            "move_sound" => {
+                let sound = id(input, "sound")?;
+                sound_unlocked(session, sound)?;
+                let at = session.film().sound(sound).map(|(_, clip)| clip.at).ok_or("no such sound")?;
+                let frames = i64::from(frame(input, "frame")?) - i64::from(at);
+                let track = input.get("track").and_then(Value::as_u64);
+                changed(session.move_sounds(&[sound], track, frames, flag(input, "push").unwrap_or(true)), "the sound is already there, or that track is locked")?;
+            }
+            "trim_sound" => {
+                let sound = id(input, "sound")?;
+                sound_unlocked(session, sound)?;
+                let at = if input.get("at").is_some() { Some(frame(input, "at")?) } else { None };
+                let from = if input.get("from").is_some() { Some(frame(input, "from")?) } else { None };
+                let length = input.get("length").and_then(Value::as_u64).map(|length| length.max(1) as u32);
+                changed(session.set_sound_span(sound, at, from, length), "nothing changed, or it would land on another sound")?;
+            }
+            "set_sound_volume" => {
+                let sound = id(input, "sound")?;
+                sound_unlocked(session, sound)?;
+                let volume = input.get("volume").and_then(Value::as_f64).ok_or("volume is missing")?;
+                changed(session.set_sound_volume(sound, volume), "the sound already has that volume")?;
+            }
+            "delete_sound" => {
+                let sound = id(input, "sound")?;
+                sound_unlocked(session, sound)?;
+                changed(session.delete_sound(sound), "no such sound")?;
+            }
+            "set_listening_volume" => {
+                session.set_listening(input.get("volume").and_then(Value::as_f64).ok_or("volume is missing")?);
+            }
+            "read_sound" => {
+                let (start, end) = (frame(input, "start")?, frame(input, "end")?);
+                let (start, end) = (start.min(end), start.max(end));
+                let frames = (end - start + 1).min(24 * 60 * 10);
+                let loudness: Vec<f64> = session.loudness(start, frames).iter().map(|value| (f64::from(*value) * 1000.0).round() / 1000.0).collect();
+                return Ok(json!({ "start": start + 1, "loudness": loudness }));
+            }
+            "export_animatic" => {
+                let file = session.start_export()?;
+                made = json!({ "file": file, "animatic": session.animatic_state()["item"] });
+            }
+            "cancel_export" => changed(session.cancel_export(), "no export is under way")?,
+            "list_items" => {
+                let path = session.animatic_state()["item"]["path"].as_str().map(str::to_string);
+                let Some(path) = path else {
+                    return Err("the storyboard is not saved in a project, so it has no items yet".to_string());
+                };
+                let items = session.items(&mut crate::board::Boards::default(), &mut crate::look::Looker::new(), &path);
+                let animatic = session.animatic_state();
+                return Ok(json!({
+                    "items": items.iter().map(|item| json!({
+                        "item": { "path": path, "item": item.id },
+                        "name": item.name,
+                        "media_types": item.media_types,
+                        "fingerprint": item.fingerprint,
+                    })).collect::<Vec<_>>(),
+                    "animatic": animatic,
+                }));
+            }
+            "render_again" => {
+                if text(input, "item") != Some(crate::board::ANIMATIC) {
+                    return Err("only the animatic is rendered again here; a clip's frames are drawn, not rendered".to_string());
+                }
+                let file = session.start_export()?;
+                made = json!({ "file": file });
             }
             _ => return Err(format!("Storyboard Generator has no tool clips__{tool}")),
         }
