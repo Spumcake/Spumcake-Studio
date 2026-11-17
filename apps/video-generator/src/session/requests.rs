@@ -177,6 +177,10 @@ impl Session {
     /// runner's plan card asks the person's yes with its cost. Nothing else
     /// is sent, and nothing is paid without that yes.
     pub(super) fn finish_take(&mut self, path: &str, finish: crate::finishing::Finish, out: &mut Vec<AppMessage>) {
+        // Only a Skills project's runner sends a finishing request.
+        if !self.skills {
+            return;
+        }
         let index = self.active;
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
@@ -199,7 +203,8 @@ impl Session {
 
     /// Compare with the source: a finished take beside the take it was made
     /// from, as a Ctrl-click shows two, the source on the left, both from
-    /// one time; at 100% the before/after crop. A view only.
+    /// one time, at 100%, so it is the before/after crop in one action. A
+    /// view only.
     pub(super) fn compare_take(&mut self, path: &str) {
         self.stop_playing();
         let Some(tab) = self.tabs.get_mut(self.active) else {
@@ -214,6 +219,7 @@ impl Session {
         if let Some(source) = source {
             tab.rounds.shown = Some(source);
             tab.rounds.with = crate::rounds::With::Tile(path.to_string());
+            tab.zoom = Some(1.0);
         }
     }
 

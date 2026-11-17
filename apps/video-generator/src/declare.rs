@@ -272,12 +272,19 @@ pub fn transport(session: &Session, tab: &Tab) -> Option<Transport> {
     })
 }
 
-/// A take's menu, as the Image Generator's and vg-take-chosen show it:
-/// after Edit, Retime… and Upscale…, each a finishing request; Deliver…,
-/// on only in a Skills project for a take whose round names its artifact;
-/// and, for a finished take, Compare with the source.
+/// A take's menu, in vg-take-chosen's order: Next round from this, Ask the
+/// assistant to use this take, Retime… and Upscale…, each a finishing
+/// request, on only in a Skills project, where the runner sends them; Edit;
+/// Deliver…, on only in a Skills project for a take whose round names its
+/// artifact while no delivery is under way; for a finished take, Compare
+/// with the source; and Open report.
 fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str) -> Vec<MenuEntry> {
     let target = json!({ "take": path });
+    let mut retime = row(crate::finishing::RETIME, Action::with_arg("take_retime", target.clone()));
+    retime.divider = true;
+    retime.enabled = session.skills;
+    let mut upscale = row(crate::finishing::UPSCALE, Action::with_arg("take_upscale", target.clone()));
+    upscale.enabled = session.skills;
     let mut edit = row("Edit", Action::with_arg("take_edit", target.clone()));
     edit.divider = true;
     let mut deliver = row(crate::session::DELIVER, Action::with_arg("take_deliver", target.clone()));
@@ -285,9 +292,9 @@ fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str) -> V
     let mut rows = vec![
         row("Next round from this", Action::with_arg("take_next_round", target.clone())),
         row("Ask the assistant to use this take", Action::with_arg("take_ask", target.clone())),
+        retime,
+        upscale,
         edit,
-        row(crate::finishing::RETIME, Action::with_arg("take_retime", target.clone())),
-        row(crate::finishing::UPSCALE, Action::with_arg("take_upscale", target.clone())),
         deliver,
     ];
     if tab.finishing_label(tile).is_some() {

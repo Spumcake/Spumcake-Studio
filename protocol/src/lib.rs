@@ -334,7 +334,10 @@ pub enum AppMessage {
     /// Deliver card, it is published as the canon artifact `artifact` and
     /// copied into `output/` with `pipeline.py deliver`. `uses` is the
     /// card's line saying what it holds, for the user to read, never
-    /// parsed. The answer is `delivered`.
+    /// parsed; `size`, `frame_rate`, and `format` are the card's lines of
+    /// the film as the workspace read it, such as "3840 × 2160", "60 fps",
+    /// and "H.264 with AAC sound", since the host never decodes it. The
+    /// answer is `delivered`.
     Deliver {
         tab: String,
         #[serde(default)]
@@ -343,6 +346,12 @@ pub enum AppMessage {
         file: String,
         #[serde(default)]
         uses: String,
+        #[serde(default)]
+        size: String,
+        #[serde(default)]
+        frame_rate: String,
+        #[serde(default)]
+        format: String,
     },
 }
 
@@ -1942,12 +1951,23 @@ mod tests {
             artifact: "Last order: final shot".into(),
             file: "library/2026-11-15_08-20-final-shot-mix.mp4".into(),
             uses: "Take 3 · 60 fps · 4K, with Voice, Bed and Door".into(),
+            size: "3840 × 2160".into(),
+            frame_rate: "60 fps".into(),
+            format: "H.264 with AAC sound".into(),
         });
         round_trip_host(HostMessage::Delivered { tab: "1".into(), file: "output/2026-11-15_08-25-002-last-order.mp4".into(), error: None });
         round_trip_host(HostMessage::Delivered { tab: "1".into(), file: String::new(), error: Some("Its inputs aren't canon.".into()) });
         assert_eq!(
             parse_app_message(r#"{"type":"deliver","tab":"1"}"#).unwrap(),
-            AppMessage::Deliver { tab: "1".into(), artifact: String::new(), file: String::new(), uses: String::new() }
+            AppMessage::Deliver {
+                tab: "1".into(),
+                artifact: String::new(),
+                file: String::new(),
+                uses: String::new(),
+                size: String::new(),
+                frame_rate: String::new(),
+                format: String::new(),
+            }
         );
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: vec![serde_json::json!({"script": "python3 assemble.py"}), serde_json::json!(["8.0"])], error: None });
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: Vec::new(), error: Some("refused: --read-only, and this query writes".into()) });

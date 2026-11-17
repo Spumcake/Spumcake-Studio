@@ -17,11 +17,16 @@ use protocol::{Action, Notice, NoticeCorner, NoticeState};
 
 /// A round take's menu row, the guide's Deliver.
 pub const DELIVER: &str = "Deliver…";
-/// The notices, pending the owner's word.
+/// The notices, pending the owner's word: "Delivering…" while the mix is
+/// made, then "Delivering <film file name>…" as vg-delivering shows it,
+/// until the host answers.
 pub const DELIVERING: &str = "Delivering…";
+pub const DELIVERING_FILM: &str = "Delivering {file}…";
 pub const DELIVERED: &str = "Delivered {file}.";
 pub const NOT_IN_PROJECT: &str = "{file} is not in the project.";
 pub const NO_FILM: &str = "The mix gave no film.";
+/// What mix.py always writes, the Deliver card's Format line.
+pub const FORMAT: &str = "H.264 with AAC sound";
 /// The skill and script that make the mix.
 const SKILL: &str = "build-animatic";
 const SCRIPT: &str = "mix.py";
@@ -34,7 +39,8 @@ pub(super) struct Delivery {
     /// The take's path in the project, and its caption.
     take: String,
     caption: String,
-    take_sound: crate::gallery::TakeSound,
+    /// The take's own sound, when it has one.
+    take_sound: Option<crate::gallery::TakeSound>,
     /// Each sound layer, top first: its path in the project once known,
     /// its gain, start, and mute, and its name.
     sounds: Vec<(Option<String>, f64, f64, bool, String)>,
@@ -54,7 +60,9 @@ pub(super) fn notices(tab: &str, notice: Option<(String, NoticeState)>) -> AppMe
             progress: None,
             state,
             actions: Vec::new(),
-            close: (state != NoticeState::Working).then(|| Action::new("notice_close")),
+            // Every notice can be dismissed; the host offers no Cancel or
+            // progress for a delivery.
+            close: Some(Action::new("notice_close")),
         })
         .into_iter()
         .collect();
@@ -63,6 +71,11 @@ pub(super) fn notices(tab: &str, notice: Option<(String, NoticeState)>) -> AppMe
 
 fn failed(tab: &str, text: String) -> AppMessage {
     notices(tab, Some((text, NoticeState::Failed)))
+}
+
+/// A path's file name, as the notices say it.
+fn file_name(path: &str) -> String {
+    Path::new(path).file_name().map_or_else(|| path.to_string(), |name| name.to_string_lossy().into_owned())
 }
 
 /// Names joined as a sentence says them: "Voice", "Voice and Bed", "Voice,
@@ -83,9 +96,11 @@ pub fn uses(caption: &str, heard: &[String]) -> String {
 
 impl Session {
     /// Whether a round's take at `path` can be delivered: in a Skills
-    /// project, its round naming its artifact.
+    /// project, its round naming its artifact, while no delivery is under
+    /// way.
     pub fn can_deliver(&self, tab: &Tab, path: &str) -> bool {
         self.skills
+            && self.delivery.is_none()
             && tab.rounds.tile_of(path).and_then(|tile| tab.rounds.round_of(&tab.rounds.tiles[tile])).is_some_and(|round| round.artifact.as_deref().is_some_and(|artifact| !artifact.is_empty()))
     }
 
@@ -103,6 +118,8 @@ impl Session {
             return;
         };
         let artifact = tab.rounds.round_of(tile).and_then(|round| round.artifact.clone()).unwrap_or_default();
+        // `mix.py` refuses `--take-sound` for a take with no sound.
+        let sounding = tab.rounds.read(path).and_then(|read| read.info).is_some_and(|info| info.sound);
         let caption = tab.take_caption(tile);
         let mut sounds = Vec::new();
         let mut filing = Vec::new();
@@ -126,7 +143,7 @@ impl Session {
             artifact,
             take: path.to_string(),
             caption,
-            take_sound: tab.gallery.take_sound,
+            take_sound: sounding.then_some(tab.gallery.take_sound),
             sounds,
             waiting: Vec::new(),
             script: None,
@@ -179,13 +196,16 @@ impl Session {
         let mut args = mix_args(&delivery.take, delivery.take_sound, &sounds);
         args.extend([String::from("--name"), delivery.artifact.clone(), String::from("--json")]);
         delivery.script = Some(id.clone());
+        let tab = delivery.tab.clone();
         self.next_file += 1;
         out.push(AppMessage::RunSkillScript { id, skill: SKILL.into(), script: SCRIPT.into(), args });
+        out.push(notices(&tab, Some((DELIVERING.into(), NoticeState::Working))));
     }
 
     /// The mix's answer: why it failed, or its film, the last line of its
     /// output as `{"path", "sha256"}`, sent to the host with `deliver` and
-    /// what it uses, while "Delivering…" shows.
+    /// what it uses, while "Delivering <film file name>…" shows until the
+    /// host answers.
     pub(super) fn mix_ran(&mut self, id: &str, output: &str, error: Option<String>, out: &mut Vec<AppMessage>) {
         if self.delivery.as_ref().and_then(|delivery| delivery.script.as_deref()) != Some(id) {
             return;
@@ -209,16 +229,31 @@ impl Session {
             return;
         };
         let heard: Vec<String> = delivery.sounds.iter().filter(|sound| !sound.3).map(|sound| sound.4.clone()).collect();
-        out.push(AppMessage::Deliver { tab: delivery.tab.clone(), artifact: delivery.artifact.clone(), file, uses: uses(&delivery.caption, &heard) });
-        out.push(notices(&delivery.tab, Some((DELIVERING.into(), NoticeState::Working))));
+        let name = file_name(&file);
+        // The card's lines of the film, read here as the host never decodes
+        // it: empty when it cannot be read, which the runner then refuses.
+        let read = self.project.as_ref().and_then(|project| media::Video::open(&project.join(&file)).ok()).map(|video| video.info());
+        let (size, frame_rate) = read.map_or((String::new(), String::new()), |info| film_lines(&info));
+        out.push(AppMessage::Deliver {
+            tab: delivery.tab.clone(),
+            artifact: delivery.artifact.clone(),
+            file,
+            uses: uses(&delivery.caption, &heard),
+            size,
+            frame_rate,
+            format: FORMAT.into(),
+        });
+        out.push(notices(&delivery.tab, Some((DELIVERING_FILM.replace("{file}", &name), NoticeState::Working))));
+        // Under way until the host answers, so Deliver… stays off.
+        self.delivery = Some(delivery);
     }
 
     /// The host's answer to `deliver`: the file delivered, done; why not,
     /// failed; or nothing, a Cancel, which takes the notice away.
     pub(super) fn delivered(&mut self, tab: &str, file: &str, error: Option<String>, out: &mut Vec<AppMessage>) {
+        self.delivery = None;
         let notice = if !file.is_empty() {
-            let name = Path::new(file).file_name().map_or_else(|| file.to_string(), |name| name.to_string_lossy().into_owned());
-            Some((DELIVERED.replace("{file}", &name), NoticeState::Done))
+            Some((DELIVERED.replace("{file}", &file_name(file)), NoticeState::Done))
         } else {
             error.filter(|error| !error.is_empty()).map(|error| (error, NoticeState::Failed))
         };
@@ -226,9 +261,27 @@ impl Session {
     }
 }
 
+/// A film's size and frame rate as the Deliver card writes them: "3840 ×
+/// 2160", and "60 fps", or "29.97 fps" for a rate that is no whole number.
+pub fn film_lines(info: &media::Info) -> (String, String) {
+    let fps = info.fps();
+    let rate = if (fps - fps.round()).abs() < 0.005 { format!("{} fps", fps.round()) } else { format!("{fps:.2} fps") };
+    (format!("{} × {}", info.width, info.height), rate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches the Deliver card's size or frame rate written otherwise: a
+    /// 4K film at 60 fps, and one at 30000/1001.
+    #[test]
+    fn a_films_lines_read_as_the_card_writes_them() {
+        let info = media::Info { width: 3840, height: 2160, rate: (60, 1), frames: 480, sound: true };
+        assert_eq!(film_lines(&info), (String::from("3840 × 2160"), String::from("60 fps")));
+        let ntsc = media::Info { rate: (30000, 1001), ..info };
+        assert_eq!(film_lines(&ntsc).1, "29.97 fps");
+    }
 
     /// Catches what a delivered film uses listed other than as a sentence:
     /// the take alone, then with one, two, and three heard layers.

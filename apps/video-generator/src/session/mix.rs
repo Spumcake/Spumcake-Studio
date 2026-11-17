@@ -45,15 +45,15 @@ pub fn volume(gain_db: f64) -> f32 {
     10f64.powf(gain_db / 20.0) as f32
 }
 
-/// A gain as a layer's row shows it at its right: "−6 dB", "+1.5 dB"; none
-/// at 0.
-fn gain_words(gain_db: f64) -> Option<String> {
+/// A gain as a layer's row shows it at its right, as vg-layers does: "0 dB",
+/// "−6 dB", "+1.5 dB".
+fn gain_words(gain_db: f64) -> String {
     let tenths = (gain_db * 10.0).round() / 10.0;
     if tenths == 0.0 {
-        return None;
+        return String::from("0 dB");
     }
     let sign = if tenths < 0.0 { "−" } else { "+" };
-    Some(format!("{sign}{} dB", tenths.abs()))
+    format!("{sign}{} dB", tenths.abs())
 }
 
 /// One sound as the mix's script takes it: its file in the project, its
@@ -67,14 +67,16 @@ pub struct MixSound {
 }
 
 /// The mix's arguments, as the build-animatic skill's `mix.py` takes them:
-/// `--take <take>`; `--take-sound <gain_db>` unless the take's own sound is
-/// muted; and for each sound layer `--sound <file> <gain_db> <start>`, then
-/// `muted` when its eye is off. Gains in decibels, starts in seconds.
-pub fn mix_args(take: &str, take_sound: TakeSound, sounds: &[MixSound]) -> Vec<String> {
+/// `--take <take>`; `--take-sound <gain_db>` when the take has its own
+/// sound, `take_sound`, and it is not muted, since `mix.py` refuses it for a
+/// take with none; and for each sound layer `--sound <file> <gain_db>
+/// <start>`, then `muted` when its eye is off. Gains in decibels, starts in
+/// seconds.
+pub fn mix_args(take: &str, take_sound: Option<TakeSound>, sounds: &[MixSound]) -> Vec<String> {
     let mut args = vec![String::from("--take"), take.to_string()];
-    if !take_sound.muted {
+    if let Some(own) = take_sound.filter(|own| !own.muted) {
         args.push(String::from("--take-sound"));
-        args.push(take_sound.gain_db.to_string());
+        args.push(own.gain_db.to_string());
     }
     for sound in sounds {
         args.extend([String::from("--sound"), sound.path.clone(), sound.gain_db.to_string(), sound.start.to_string()]);
@@ -90,6 +92,25 @@ fn row(label: &str, action: Action) -> MenuEntry {
 }
 
 impl Session {
+    /// What the take shown is, alone or first of two.
+    fn shown_info(&self) -> Option<media::Info> {
+        let tab = self.active_tab()?;
+        let shown = tab.round_view();
+        shown.as_ref().unwrap_or(&tab.gallery).take()?.info
+    }
+
+    /// Whether the take shown has a sound of its own.
+    pub fn take_has_sound(&self) -> bool {
+        self.shown_info().is_some_and(|info| info.sound)
+    }
+
+    /// The latest a sound layer can start: the take's last frame, since the
+    /// mix refuses a sound starting at or after the take's end.
+    fn latest_start(&self) -> Option<f64> {
+        let info = self.shown_info()?;
+        Some(f64::from(info.frames.saturating_sub(1)) / info.fps().max(f64::EPSILON))
+    }
+
     /// Open sound as layer…: the host's file dialog, for a WAV, MP3, or
     /// FLAC.
     pub(super) fn open_sound(&mut self, out: &mut Vec<AppMessage>) {
@@ -137,12 +158,15 @@ impl Session {
         };
         let (take_sound, mut sounds) = (self.tabs[index].gallery.take_sound, self.tabs[index].gallery.sounds.clone());
         let mut take = take_sound;
+        let has_sound = self.take_has_sound();
         match id {
             "sound_click" => {
                 self.tabs[index].sound = sound;
                 return true;
             }
             "sound_mute" => match sound {
+                // A take with no sound of its own has nothing to mute.
+                Some(0) if !has_sound => return true,
                 Some(0) => take.muted = !take.muted,
                 Some(own) => {
                     if let Some(layer) = sounds.iter_mut().find(|layer| layer.id == own) {
@@ -196,13 +220,15 @@ impl Session {
         else {
             return;
         };
+        let (latest, has_sound) = (self.latest_start(), self.take_has_sound());
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
         let before = tab.mix_before.clone().unwrap_or((tab.gallery.take_sound, tab.gallery.sounds.clone()));
         let (mut take, mut sounds) = (tab.gallery.take_sound, tab.gallery.sounds.clone());
         match (own, field) {
-            (0, "gain_db") => take.gain_db = number.clamp(GAIN_DB.0, GAIN_DB.1),
+            (0, "gain_db") if has_sound => take.gain_db = number.clamp(GAIN_DB.0, GAIN_DB.1),
+            (0, _) => return,
             (_, "gain_db") | (_, "start") => {
                 let Some(layer) = sounds.iter_mut().find(|layer| layer.id == own) else {
                     return;
@@ -210,7 +236,7 @@ impl Session {
                 if field == "gain_db" {
                     layer.gain_db = number.clamp(GAIN_DB.0, GAIN_DB.1);
                 } else {
-                    layer.start = number.max(0.0);
+                    layer.start = number.clamp(0.0, latest.unwrap_or(f64::MAX).max(0.0));
                 }
             }
             _ => return,
@@ -245,8 +271,10 @@ impl Session {
     }
 
     /// The Layers page's rows, as vg-layers shows them: the take shown, its
-    /// linked layer, at the top, its eye muting its own sound; then each
-    /// sound layer with its eye, its waveform, and its gain.
+    /// linked layer, at the top, with its filmstrip thumbnail, its file's
+    /// name under its name, and its eye muting its own sound, off with no
+    /// gain for a take with none; then each sound layer with its eye, its
+    /// waveform, and its gain.
     pub fn layer_rows(&self) -> Vec<LayerRow> {
         let Some(tab) = self.active_tab() else {
             return Vec::new();
@@ -275,29 +303,33 @@ impl Session {
             thumbnail: None,
             mark: None,
             detail: None,
-            toggle_icon: Some(String::from("sound-high")),
+            toggle_icon: None,
             // The eye mutes: its tip says what a click does now.
             toggle_tip: Some(String::from(if visible { "Mute" } else { "Unmute" })),
             value: None,
         };
         if let Some(take) = shown.as_ref().unwrap_or(&tab.gallery).take() {
-            let mut take_row = layer_row(0, "media-video", &take.name, !take_sound.muted);
+            let sounding = take.info.is_some_and(|info| info.sound);
+            let mut take_row = layer_row(0, "media-video", &take.name, sounding && !take_sound.muted);
             take_row.mark = Some(String::from("link"));
-            take_row.value = gain_words(take_sound.gain_db);
+            take_row.thumbnail = self.films.get(&take.file).cloned();
+            take_row.detail = take.file.file_name().map(|name| name.to_string_lossy().into_owned());
+            take_row.value = sounding.then(|| gain_words(take_sound.gain_db));
             rows.push(take_row);
         }
         for layer in &tab.gallery.sounds {
             let mut sound_row = layer_row(layer.id, "sound-high", &layer.name, !layer.muted);
             sound_row.thumbnail = self.playback.waves.get(&(format!("{} thumb", layer_key(layer)), THUMB.0)).cloned();
-            sound_row.value = gain_words(layer.gain_db);
+            sound_row.value = Some(gain_words(layer.gain_db));
             sound_row.menu = vec![row("Delete", Action::with_arg("sound_delete", target(layer.id)))];
             rows.push(sound_row);
         }
         rows
     }
 
-    /// The Properties page for the row chosen: the take's Gain, or a sound
-    /// layer's Gain and Starts at.
+    /// The Properties page for the row chosen: the take's Gain, when it has
+    /// a sound of its own, or a sound layer's Gain and Starts at, up to the
+    /// take's last frame.
     pub fn mix_section(&self) -> Option<Section> {
         let tab = self.active_tab()?;
         let own = tab.sound?;
@@ -309,13 +341,16 @@ impl Session {
             value: PropValue::Number(gain_db),
         };
         if own == 0 {
+            if !self.take_has_sound() {
+                return None;
+            }
             return Some(Section { title: String::from("Sound"), rows: vec![gain(tab.gallery.take_sound.gain_db)], icon: None });
         }
         let layer = tab.gallery.sounds.iter().find(|layer| layer.id == own)?;
         let start = Row {
             prop: prop("start"),
             label: STARTS_AT.into(),
-            kind: RowKind::Field { min: 0.0, max: 3600.0, places: 2 },
+            kind: RowKind::Field { min: 0.0, max: self.latest_start().unwrap_or(3600.0).max(0.0), places: 2 },
             value: PropValue::Number(layer.start),
         };
         Some(Section { title: layer.name.clone(), rows: vec![gain(layer.gain_db), start], icon: None })
@@ -375,11 +410,17 @@ impl Session {
             if !self.playback.waves.contains_key(&(thumb.clone(), THUMB.0)) {
                 wanted.push((thumb, THUMB.0, crate::waveform::draw_sized(peaks, THUMB.0, THUMB.1)));
             }
-            if let Some(length) = length.filter(|length| *length > 0.0 && !layer.muted) {
-                let row = row_key(&key, layer.start, length);
+            if let Some(length) = length.filter(|length| *length > 0.0) {
+                let row = row_key(&key, layer.start, length, layer.muted);
                 if !self.playback.waves.contains_key(&(row.clone(), width)) {
                     let seconds = pcm.len() as f64 / f64::from(pcm.rate.max(1));
-                    let image = crate::waveform::draw_span(peaks, width, crate::waveform::HEIGHT, layer.start / length, (layer.start + seconds) / length);
+                    let mut image = crate::waveform::draw_span(peaks, width, crate::waveform::HEIGHT, layer.start / length, (layer.start + seconds) / length);
+                    // A muted layer keeps its row, fainter.
+                    if layer.muted {
+                        for pixel in image.data.chunks_exact_mut(4) {
+                            pixel[3] /= 2;
+                        }
+                    }
                     wanted.push((row, width, image));
                 }
             }
@@ -396,8 +437,9 @@ impl Session {
         }
     }
 
-    /// The transport's rows after the take's own "Sound": each heard sound
-    /// layer's, labelled with its name, once written.
+    /// The transport's rows after the take's own "Sound": each sound
+    /// layer's, labelled with its name, once written, a muted one at half
+    /// its alpha, so every sound layer is a row.
     pub fn layer_rows_under(&self, width: u32, length: f64) -> Vec<TransportRow> {
         let Some(tab) = self.active_tab() else {
             return Vec::new();
@@ -405,9 +447,8 @@ impl Session {
         tab.gallery
             .sounds
             .iter()
-            .filter(|layer| !layer.muted)
             .filter_map(|layer| {
-                let image = self.playback.waves.get(&(row_key(&layer_key(layer), layer.start, length), width))?.clone();
+                let image = self.playback.waves.get(&(row_key(&layer_key(layer), layer.start, length, layer.muted), width))?.clone();
                 Some(TransportRow { label: layer.name.clone(), image })
             })
             .collect()
@@ -416,8 +457,8 @@ impl Session {
 
 /// A sound layer's row under the scrubber, known by its sound, its start,
 /// and the take's length, which place it.
-fn row_key(key: &str, start: f64, length: f64) -> String {
-    format!("{key} at {start:.3} of {length:.3}")
+fn row_key(key: &str, start: f64, length: f64, muted: bool) -> String {
+    format!("{key} at {start:.3} of {length:.3}{}", if muted { " muted" } else { "" })
 }
 
 #[cfg(test)]
@@ -529,25 +570,30 @@ mod tests {
         let half = loudest(&mix(&session), 0.1, 0.4);
         assert!((half / full - 0.501).abs() < 0.02, "the take's own sound at -6 dB is not at half: {half} of {full}");
 
-        // Undone back to the layer muted and heard again.
+        // Undone back to the take muted and the layer heard again, from its
+        // start at -6 dB.
         session.step_history(false);
         session.step_history(false);
         session.step_history(false);
         assert!(!session.tabs[0].gallery.sounds[0].muted && session.tabs[0].gallery.take_sound.muted);
+        let again = mix(&session);
+        assert!(loudest(&again, 0.05, 0.45) < 0.01, "after the undo, heard before its start, or the muted take was heard");
+        let level = loudest(&again, 0.6, 0.9);
+        assert!((level / level_at_0 - 0.501).abs() < 0.02, "after the undo, the layer is not heard at -6 dB: {level} of {level_at_0}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Catches a mix's arguments other than the script takes them: the
     /// take, its own sound at -3 dB, each layer's file, gain, and start,
     /// and `muted` after a muted one; and no `--take-sound` when the take's
-    /// own sound is muted.
+    /// own sound is muted, or the take has none.
     #[test]
     fn the_mix_takes_its_arguments_plainly() {
         let sounds = [
             MixSound { path: "sounds/voice.wav".into(), gain_db: 0.0, start: 0.0, muted: false },
             MixSound { path: "sounds/door.wav".into(), gain_db: -6.5, start: 3.0, muted: true },
         ];
-        let args = mix_args("library/take-60fps-4k.mp4", TakeSound { gain_db: -3.0, muted: false }, &sounds);
+        let args = mix_args("library/take-60fps-4k.mp4", Some(TakeSound { gain_db: -3.0, muted: false }), &sounds);
         assert_eq!(
             args,
             [
@@ -555,9 +601,12 @@ mod tests {
                 "muted",
             ]
         );
-        let quiet = mix_args("a.mp4", TakeSound { gain_db: 0.0, muted: true }, &[]);
+        let quiet = mix_args("a.mp4", Some(TakeSound { gain_db: 0.0, muted: true }), &[]);
         assert_eq!(quiet, ["--take", "a.mp4"]);
-        assert_eq!((gain_words(-6.0).as_deref(), gain_words(1.5).as_deref(), gain_words(0.0)), (Some("−6 dB"), Some("+1.5 dB"), None));
+        // A take with no sound of its own never asks for it, muted or not.
+        let silent = mix_args("a.mp4", None, &[]);
+        assert_eq!(silent, ["--take", "a.mp4"]);
+        assert_eq!((gain_words(-6.0), gain_words(1.5), gain_words(0.0)), ("−6 dB".to_string(), "+1.5 dB".to_string(), "0 dB".to_string()));
         assert!((volume(-6.0) - 0.501).abs() < 0.001);
     }
 }

@@ -194,7 +194,8 @@ impl Tab {
     /// A finishing round's take's label, when its round is a finishing
     /// endpoint's and its one reference a take of this tab's rounds: from
     /// its cell's settings while the cell still has them, or else the
-    /// request's, and from its source, whose own finishing part it keeps.
+    /// request's, and from its source, whose own finishing part it keeps,
+    /// numbered by the take it was first made from.
     pub fn finishing_label(&self, tile: &crate::rounds::Tile) -> Option<String> {
         let rounds = &self.rounds;
         let round = rounds.round_of(tile)?;
@@ -206,8 +207,14 @@ impl Tab {
             .filter(|before| crate::finishing::source(before).is_some())
             .map(|before| crate::finishing::own_part(before, None, settings_of(&source_tile.cell)))
             .unwrap_or_default();
+        // A retimed take upscaled is still the take it was first made from.
+        let first = rounds
+            .round_of(source_tile)
+            .and_then(crate::finishing::source)
+            .and_then(|before| rounds.tile_of(before))
+            .map_or(source_tile.take, |before| rounds.tiles[before].take);
         let width = rounds.read(source).and_then(|read| read.info).map(|info| info.width);
-        Some(crate::finishing::label(round, tile.take, source_tile.take, &inherited, width, settings_of(&tile.cell)))
+        Some(crate::finishing::label(round, first, &inherited, width, settings_of(&tile.cell)))
     }
 
     /// The words over a round shown whole as frame strips: its line,
@@ -581,9 +588,20 @@ impl Session {
             }
             // Deliver: the sound layers filed, the mix made, and the host's
             // card answered.
-            HostMessage::Filed { id, file, error } => self.filed(&id, &file, error, &mut out),
-            HostMessage::SkillScriptRan { id, output, error } => self.mix_ran(&id, &output, error, &mut out),
-            HostMessage::Delivered { tab, file, error } => self.delivered(&tab, &file, error, &mut out),
+            // Each also declares the filmstrip again, so Deliver… is off while
+            // a delivery is under way and on again after.
+            HostMessage::Filed { id, file, error } => {
+                self.filed(&id, &file, error, &mut out);
+                out.extend(self.raster());
+            }
+            HostMessage::SkillScriptRan { id, output, error } => {
+                self.mix_ran(&id, &output, error, &mut out);
+                out.extend(self.raster());
+            }
+            HostMessage::Delivered { tab, file, error } => {
+                self.delivered(&tab, &file, error, &mut out);
+                out.extend(self.raster());
+            }
             _ => {}
         }
         out
@@ -1094,7 +1112,10 @@ impl Session {
                         self.compare_take(&path);
                         out.extend(self.emit());
                     }
-                    _ => self.deliver(&path, out),
+                    _ => {
+                        self.deliver(&path, out);
+                        out.extend(self.raster());
+                    }
                 }
                 return;
             }

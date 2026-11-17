@@ -634,7 +634,7 @@ fn takes_fill_the_strip_by_round_and_are_never_kept() {
     assert!(matches!(film.items[2].pending, Some(protocol::FilmPending::Running { since: Some(1_793_146_000) })));
     assert!(is(middle(&film.items[0].thumbnail), dawn, DAWN_FRAMES, 0), "the thumbnail is not the take's first frame");
     let menu: Vec<&str> = film.items[0].menu.iter().map(|row| row.label.as_str()).collect();
-    assert_eq!(menu, ["Next round from this", "Ask the assistant to use this take", "Edit", "Retime…", "Upscale…", "Deliver…", "Open report"]);
+    assert_eq!(menu, ["Next round from this", "Ask the assistant to use this take", "Retime…", "Upscale…", "Edit", "Deliver…", "Open report"]);
     // No round names its artifact here, so Deliver… is off.
     assert!(!film.items[0].menu[5].enabled);
 
@@ -1608,7 +1608,10 @@ fn retime_and_upscale_make_drafts_the_host_runs() {
     program.command("take_retime", json!({ "take": "takes/Wide.mp4" }));
     let retime = new_cell(&program, "the retime's draft", |cell| cell.model.as_deref() == Some("topaz/interpolate/video"));
     assert_eq!(retime.kind, protocol::VIDEO_KIND);
-    assert_eq!(retime.settings, Some(json!({ "target_fps": 60, "model": "Apollo", "slowdown_factor": 1, "H264_output": true })));
+    assert_eq!(
+        retime.settings,
+        Some(json!({ "target_fps": 60, "model": "Apollo", "slowdown_factor": 1, "H264_output": true, "enable_safety_checker": true }))
+    );
     assert_eq!(
         retime.input,
         [protocol::CellPart::Path { path: "takes/Wide.mp4".into(), media_type: "video/mp4".into(), role: Some("Reference".into()), field: Some("video_url".into()) }]
@@ -1621,7 +1624,7 @@ fn retime_and_upscale_make_drafts_the_host_runs() {
 
     program.command("take_upscale", json!({ "take": "takes/Wide.mp4" }));
     let upscale = new_cell(&program, "the upscale's draft", |cell| cell.model.as_deref() == Some("topaz/upscale/video/precision"));
-    assert_eq!(upscale.settings, Some(json!({ "model": "Gaia CG", "upscale_factor": 3.0, "H264_output": true })));
+    assert_eq!(upscale.settings, Some(json!({ "model": "Gaia CG", "upscale_factor": 3.0, "H264_output": true, "enable_safety_checker": true })));
     assert_ne!(upscale.id, retime.id, "an upscale took the retime's draft");
     let run = program.wait("run_cell", |message| match message {
         AppMessage::RunCell { cell, .. } => Some(cell.clone()),
@@ -1712,46 +1715,73 @@ fn property(program: &mut Program, prop: Value, value: Value) {
     program.send(HostMessage::Property { prop, value, preview: false });
 }
 
+/// The most opaque pixel of the row under the scrubber labelled `label`,
+/// once it is declared.
+fn row_alpha(view: &RasterView, label: &str) -> Option<u8> {
+    let row = view.transport.as_ref()?.rows.iter().find(|row| row.label == label)?;
+    let bytes = std::fs::read(&row.image.path).ok()?;
+    bytes.chunks_exact(4).map(|pixel| pixel[3]).max()
+}
+
 /// Catches a sound layer that cannot be added, muted, set, or undone, or
-/// is lost: the Layers page shows the take as its linked layer and the
-/// sound added from a WAV under it; its eye mutes it; its gain shows at
-/// its right; its start is on the Properties page, and an undo takes it
-/// back; and a new program opening the `.vgx` finds the layer with its
-/// gain and mute, and the take's own sound muted at its gain, its rows'
-/// waveform under the scrubber gone while it is muted.
+/// is lost: the Layers page shows the take as its linked layer, with its
+/// thumbnail, its file's name, the plain eye, and its gain, and the sound
+/// added from a WAV under it at "0 dB"; the layer is a row under the
+/// scrubber, and stays one, fainter, while muted; its eye mutes it; its
+/// gain shows at its right; its start is on the Properties page, and an
+/// undo takes it back; and a new program opening the `.vgx` finds the layer
+/// with its gain and mute, and the take's own sound muted at its gain.
 #[test]
 fn a_sound_layer_is_added_set_undone_and_kept() {
-    let (dir, first, _) = project("sound-layer");
+    let (dir, _, _) = project("sound-layer");
+    let first = dir.join("takes/Tone.mp4");
+    write_sounding_video(&first);
     let rain = dir.join("sounds/rain.wav");
     write_steady_wav(&rain);
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
     program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
     program.open_take(&first);
-    program.view("the take", |view, _| names(view) == ["Dawn"]);
+    program.view("the take", |view, _| names(view) == ["Tone"]);
     program.command("panel_page", json!({ "page": 0 }));
     open_sound(&mut program, &rain);
-    let rows = layer_rows(&program, "the layer added", |rows| rows.len() == 2);
-    assert_eq!((rows[0].id, rows[0].name.as_str(), rows[0].mark.as_deref(), rows[0].visible), (0, "Dawn", Some("link"), true));
-    assert_eq!((rows[1].name.as_str(), rows[1].visible, rows[1].value.as_deref()), ("rain", true, None));
+    let rows = layer_rows(&program, "the layer added", |rows| rows.len() == 2 && rows[0].thumbnail.is_some());
+    assert_eq!((rows[0].id, rows[0].name.as_str(), rows[0].mark.as_deref(), rows[0].visible), (0, "Tone", Some("link"), true));
+    assert_eq!((rows[0].detail.as_deref(), rows[0].toggle_icon.as_deref(), rows[0].value.as_deref()), (Some("Tone.mp4"), None, Some("0 dB")));
+    assert_eq!((rows[1].name.as_str(), rows[1].visible, rows[1].value.as_deref(), rows[1].toggle_icon.as_deref()), ("rain", true, Some("0 dB"), None));
     let layer = rows[1].id;
-    let heard = program.view("the layer's row under the scrubber", |view, _| view.transport.as_ref().is_some_and(|transport| transport.rows.iter().any(|row| row.label == "rain")));
-    assert!(heard.0.transport.is_some());
+    // The sound may have been decoded, and its row drawn, before the panel
+    // above was read: a frame step of nothing draws the view again.
+    program.command("frame", json!({ "step": 0 }));
+    program.view("the layer's row under the scrubber", |view, _| row_alpha(view, "rain") == Some(255));
 
+    // The view comes before the panel the same change declares.
     program.command("sound_mute", json!({ "sound": layer }));
+    program.view("the muted layer's row, fainter", |view, _| row_alpha(view, "rain").is_some_and(|alpha| alpha > 0 && alpha <= 128));
     layer_rows(&program, "the layer muted", |rows| rows.get(1).is_some_and(|row| !row.visible));
     property(&mut program, json!({ "mix": layer, "field": "gain_db" }), json!(-6.0));
     layer_rows(&program, "the layer at -6 dB", |rows| rows.get(1).is_some_and(|row| row.value.as_deref() == Some("−6 dB")));
     program.command("sound_click", json!({ "sound": layer }));
     program.command("panel_page", json!({ "page": 1 }));
-    property(&mut program, json!({ "mix": layer, "field": "start" }), json!(1.5));
     let start = |properties: &protocol::Properties| {
         properties.sections.first().and_then(|section| section.rows.iter().find(|row| row.label == "Starts at")).map(|row| row.value.clone())
     };
-    program.wait("its start at 1.5 s", |message| match message {
-        AppMessage::Properties(properties) => (start(properties) == Some(protocol::PropValue::Number(1.5))).then_some(()),
+    // The take is one second long: a start past its last frame is held
+    // there, as mix.py refuses a sound starting at the take's end.
+    property(&mut program, json!({ "mix": layer, "field": "start" }), json!(1.5));
+    program.wait("its start held inside the take", |message| match message {
+        AppMessage::Properties(properties) => {
+            start(properties).is_some_and(|value| matches!(value, protocol::PropValue::Number(at) if at > 0.9 && at < 1.0)).then_some(())
+        }
         _ => None,
     });
+    property(&mut program, json!({ "mix": layer, "field": "start" }), json!(0.5));
+    program.wait("its start at 0.5 s", |message| match message {
+        AppMessage::Properties(properties) => (start(properties) == Some(protocol::PropValue::Number(0.5))).then_some(()),
+        _ => None,
+    });
+    // Both starts are steps: two undos take it back to the beginning.
+    program.command("undo", json!({}));
     program.command("undo", json!({}));
     program.wait("its start undone", |message| match message {
         AppMessage::Properties(properties) => (start(properties) == Some(protocol::PropValue::Number(0.0))).then_some(()),
@@ -1795,27 +1825,38 @@ fn notice_of(program: &Program, what: &str) -> Option<(String, protocol::NoticeS
 }
 
 /// A Skills project with a round whose step names its artifact, its take
-/// shown, and the program in it.
-fn delivering(label: &str) -> (PathBuf, Program) {
+/// shown, and the program in it: a take with its own sound, `Tone.mp4`, or
+/// one with none, `Dawn.mp4`. Returns the take's path too.
+fn delivering(label: &str, sounding: bool) -> (PathBuf, Program, &'static str) {
     let (dir, mut program, cell) = requests(label);
-    let mut final_shot = round("q1", 1, vec![take_file("takes/Dawn.mp4", false)]);
+    let take = if sounding { "takes/Tone.mp4" } else { "takes/Dawn.mp4" };
+    if sounding {
+        write_sounding_video(&dir.join(take));
+    }
+    let mut final_shot = round("q1", 1, vec![take_file(take, false)]);
     final_shot.artifact = Some("shot 12: final".into());
     send_takes(&mut program, &cell, vec![final_shot]);
     film_of(&program, "the round", |film| !film.groups.is_empty() && film.items[0].menu.iter().any(|row| row.label == "Deliver…" && row.enabled));
     program.command("film_select", json!({ "value": 0 }));
-    (dir, program)
+    (dir, program, take)
+}
+
+/// Whether the next filmstrip's first take's Deliver… is on.
+fn deliver_on(program: &Program, what: &str, on: bool) {
+    film_of(program, what, |film| film.items.first().is_some_and(|item| item.menu.iter().any(|row| row.label == "Deliver…" && row.enabled == on)));
 }
 
 /// Catches a Deliver that mixes the wrong sounds, sends a sound from
-/// `work/` unfiled, or shows the wrong notices: a sound in `work/` is filed
-/// first and its filed path mixed; the mix takes the take, its own sound at
-/// -3 dB, and each layer with its gain and start, a muted one marked; its
-/// film goes to the host with what it uses, while "Delivering…" shows; the
-/// host's answer shows "Delivered <file name>."; and a mix that fails
-/// shows why.
+/// `work/` unfiled, starts twice, or shows the wrong notices: a sound in
+/// `work/` is filed first and its filed path mixed; the mix takes the take,
+/// its own sound at -3 dB, and each layer with its gain and start, a muted
+/// one marked; "Delivering…" shows while it is made; its film goes to the
+/// host with what it uses, while "Delivering <film>…" shows; Deliver… is
+/// off until the host answers; and the host's answer, a film under
+/// `output/`, shows "Delivered <file name>.".
 #[test]
 fn a_take_is_delivered_with_its_mix() {
-    let (dir, mut program) = delivering("deliver");
+    let (dir, mut program, take) = delivering("deliver", true);
     write_steady_wav(&dir.join("sounds/bed.wav"));
     write_steady_wav(&dir.join("work/voice.wav"));
     open_sound(&mut program, &dir.join("sounds/bed.wav"));
@@ -1825,13 +1866,15 @@ fn a_take_is_delivered_with_its_mix() {
     let bed = rows.iter().find(|row| row.name == "bed").unwrap().id;
     program.command("sound_mute", json!({ "sound": bed }));
     property(&mut program, json!({ "mix": 0, "field": "gain_db" }), json!(-3.0));
+    layer_rows(&program, "the take's sound at -3 dB", |rows| rows.first().is_some_and(|row| row.value.as_deref() == Some("−3 dB")));
 
-    program.command("take_deliver", json!({ "take": "takes/Dawn.mp4" }));
+    program.command("take_deliver", json!({ "take": take }));
     let (filing, path) = program.wait("the sound in work/ filed", |message| match message {
         AppMessage::FileResource { path, id: Some(id), .. } => Some((id.clone(), path.clone())),
         _ => None,
     });
     assert_eq!(path, "work/voice.wav");
+    deliver_on(&program, "Deliver… off while under way", false);
     program.send(HostMessage::Filed { id: filing, file: "sounds/voice.wav".into(), error: None });
     let (script, skill, name, args) = program.wait("the mix", |message| match message {
         AppMessage::RunSkillScript { id, skill, script, args } => Some((id.clone(), skill.clone(), script.clone(), args.clone())),
@@ -1841,34 +1884,54 @@ fn a_take_is_delivered_with_its_mix() {
     assert_eq!(
         args,
         [
-            "--take", "takes/Dawn.mp4", "--take-sound", "-3", "--sound", "sounds/voice.wav", "0", "0", "--sound", "sounds/bed.wav", "0", "0", "muted",
-            "--name", "shot 12: final", "--json",
+            "--take", take, "--take-sound", "-3", "--sound", "sounds/voice.wav", "0", "0", "--sound", "sounds/bed.wav", "0", "0", "muted", "--name",
+            "shot 12: final", "--json",
         ]
     );
+    assert_eq!(notice_of(&program, "the mix being made"), Some(("Delivering…".to_string(), protocol::NoticeState::Working)));
+    // The film the stand-in mix made: the take itself, so it can be read.
+    std::fs::create_dir_all(dir.join("library")).unwrap();
+    std::fs::copy(dir.join(take), dir.join("library/shot-12-final.mp4")).unwrap();
     let output = String::from("Mixing…\n{\"path\": \"library/shot-12-final.mp4\", \"sha256\": \"ab\"}\n");
     program.send(HostMessage::SkillScriptRan { id: script, output, error: None });
-    let (artifact, file, uses) = program.wait("deliver", |message| match message {
-        AppMessage::Deliver { tab, artifact, file, uses } if tab == "1" => Some((artifact.clone(), file.clone(), uses.clone())),
+    let (artifact, file, uses, lines) = program.wait("deliver", |message| match message {
+        AppMessage::Deliver { tab, artifact, file, uses, size, frame_rate, format } if tab == "1" => {
+            Some((artifact.clone(), file.clone(), uses.clone(), (size.clone(), frame_rate.clone(), format.clone())))
+        }
         _ => None,
     });
     assert_eq!((artifact.as_str(), file.as_str(), uses.as_str()), ("shot 12: final", "library/shot-12-final.mp4", "Take 1 · Model A, with voice"));
-    assert_eq!(notice_of(&program, "delivering"), Some(("Delivering…".to_string(), protocol::NoticeState::Working)));
-    program.send(HostMessage::Delivered { tab: "1".into(), file: "library/shot-12-final.mp4".into(), error: None });
-    assert_eq!(notice_of(&program, "delivered"), Some(("Delivered shot-12-final.mp4.".to_string(), protocol::NoticeState::Done)));
+    assert_eq!(lines, (format!("{} × {}", SIZE.0, SIZE.1), String::from("24 fps"), String::from("H.264 with AAC sound")), "the card's lines of the film");
+    assert_eq!(notice_of(&program, "delivering the film"), Some(("Delivering shot-12-final.mp4…".to_string(), protocol::NoticeState::Working)));
+    deliver_on(&program, "Deliver… still off", false);
+    program.send(HostMessage::Delivered { tab: "1".into(), file: "output/2026-11-17_10-00-001-last-signal.mp4".into(), error: None });
+    assert_eq!(notice_of(&program, "delivered"), Some(("Delivered 2026-11-17_10-00-001-last-signal.mp4.".to_string(), protocol::NoticeState::Done)));
+    deliver_on(&program, "Deliver… on again", true);
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
-    // Again, and the mix fails.
-    program.command("take_deliver", json!({ "take": "takes/Dawn.mp4" }));
-    let filing = program.wait("filed again", |message| match message {
-        AppMessage::FileResource { id: Some(id), .. } => Some(id.clone()),
+/// Catches `--take-sound` sent for a take with no sound, which the mix
+/// refuses, or a mix's failure unsaid: a take with none shows its row with
+/// its eye off and no gain, takes no gain, and is mixed with no
+/// `--take-sound`; and a mix that fails shows why.
+#[test]
+fn a_silent_take_is_mixed_without_its_sound() {
+    let (dir, mut program, take) = delivering("deliver-silent", false);
+    program.command("panel_page", json!({ "page": 0 }));
+    let rows = layer_rows(&program, "the take's row", |rows| rows.len() == 1);
+    assert_eq!((rows[0].visible, rows[0].value.as_deref()), (false, None), "a take with no sound shows its own");
+    property(&mut program, json!({ "mix": 0, "field": "gain_db" }), json!(-3.0));
+    program.command("take_deliver", json!({ "take": take }));
+    let (script, args) = program.wait("the mix", |message| match message {
+        AppMessage::RunSkillScript { id, args, .. } => Some((id.clone(), args.clone())),
         _ => None,
     });
-    program.send(HostMessage::Filed { id: filing, file: "sounds/voice.wav".into(), error: None });
-    let script = program.wait("the mix again", |message| match message {
-        AppMessage::RunSkillScript { id, .. } => Some(id.clone()),
-        _ => None,
-    });
+    assert_eq!(args, ["--take", take, "--name", "shot 12: final", "--json"]);
+    assert_eq!(notice_of(&program, "the mix being made"), Some(("Delivering…".to_string(), protocol::NoticeState::Working)));
     program.send(HostMessage::SkillScriptRan { id: script, output: String::new(), error: Some("The take could not be read.".into()) });
     assert_eq!(notice_of(&program, "the mix's failure"), Some(("The take could not be read.".to_string(), protocol::NoticeState::Failed)));
+    deliver_on(&program, "Deliver… on again after a failure", true);
     drop(program);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1879,13 +1942,13 @@ fn a_take_is_delivered_with_its_mix() {
 /// the notice away.
 #[test]
 fn a_sound_outside_the_project_stops_a_deliver() {
-    let (dir, mut program) = delivering("deliver-outside");
+    let (dir, mut program, take) = delivering("deliver-outside", false);
     let outside = scratch("deliver-elsewhere").join("door.wav");
     write_steady_wav(&outside);
     open_sound(&mut program, &outside);
     program.command("panel_page", json!({ "page": 0 }));
     layer_rows(&program, "the layer", |rows| rows.len() == 2);
-    program.command("take_deliver", json!({ "take": "takes/Dawn.mp4" }));
+    program.command("take_deliver", json!({ "take": take }));
     assert_eq!(notice_of(&program, "refused"), Some(("door.wav is not in the project.".to_string(), protocol::NoticeState::Failed)));
     program.send(HostMessage::Delivered { tab: "1".into(), file: String::new(), error: None });
     assert_eq!(notice_of(&program, "cancelled"), None);
