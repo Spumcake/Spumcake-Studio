@@ -7,9 +7,6 @@
 //! The values come whole from whoever fills the card; the card makes no
 //! words of its own but its labels and buttons, and names no workspace.
 
-// Drawn once the window opens the card; until then only the tests do.
-#![allow(dead_code)]
-
 use crate::typescale as ts;
 use crate::widgets::{self, BORDER, MUTED, TEXT};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Stroke, pos2, vec2};

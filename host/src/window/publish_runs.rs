@@ -534,7 +534,6 @@ impl HostWindow {
 
     /// The user's answer on the Deliver card: a yes carries it out, a
     /// Cancel answers the workspace with no file and no error.
-    #[allow(dead_code)] // Called by the Deliver card's events, wired at Video Playback Work's merge.
     pub(crate) fn answer_delivery(&mut self, yes: bool) {
         let Some(delivery) = self.publish_runs.deliver_card.take() else { return };
         if yes {
