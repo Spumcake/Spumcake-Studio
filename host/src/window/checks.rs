@@ -1786,36 +1786,34 @@ fn any_application_is_told_the_project_and_saves_into_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Catches workspaces never told the project is a Skills project, as
-/// `project` once said `skills: false` always: a folder without `library/`
-/// and `requests/` is told no Skills; when they appear, every workspace is
-/// told `skills` within the second's poll; and a window opened on it again
-/// tells a workspace `skills` as it starts.
+/// Catches a project told apart by its folders: every project is
+/// organized the way Last order is, so a workspace in any project hears it
+/// is one, before and after `library/` and `requests/` appear, and a window
+/// opened on it again tells a workspace so as it starts.
 #[test]
-fn workspaces_hear_when_the_project_is_a_skills_project() {
-    let dir = scratch("skills-heard");
+fn every_project_is_told_it_is_one() {
+    let dir = scratch("project-heard");
     let heard = dir.join("heard.txt");
     let hearer = hearer_program(&dir, &heard);
     let told = |heard: &Path| std::fs::read_to_string(heard).unwrap_or_default().lines().map(|line| line.contains(r#""skills":true"#)).collect::<Vec<_>>();
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(vec![spec("hearer", "Hearer", &hearer)], &stand_in, &dir);
     let (_, folder, _) = window.here();
-    assert_eq!(told(&heard), [false], "a folder with no library/ or requests/ was told it is a Skills project");
+    assert_eq!(told(&heard), [true], "a workspace was told its project is another kind");
     std::fs::create_dir_all(folder.join("library")).unwrap();
     std::fs::create_dir_all(folder.join("requests")).unwrap();
-    let start = Instant::now();
-    while told(&heard) != [false, true] {
-        assert!(start.elapsed() < Duration::from_secs(5), "the Skills project was never told: {:?}", told(&heard));
+    for _ in 0..10 {
         window.step();
         std::thread::sleep(Duration::from_millis(20));
     }
+    assert_eq!(told(&heard), [true], "a workspace was told again when folders appeared");
     drop(window);
     std::fs::remove_file(&heard).unwrap();
 
     let stand_in = StandIn::start(Vec::new());
     let window = project_window(vec![spec("hearer", "Hearer", &hearer)], &stand_in, &dir);
     assert_eq!(window.here().1, folder);
-    assert_eq!(told(&heard), [true], "a workspace started in a Skills project was told otherwise");
+    assert_eq!(told(&heard), [true], "a workspace started in the project was told otherwise");
     drop(window);
     let _ = std::fs::remove_dir_all(dir);
 }

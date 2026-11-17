@@ -23,6 +23,7 @@ use std::time::Instant;
 
 mod flows;
 mod canon_steps;
+pub(crate) use canon_steps::StepFields;
 mod previews;
 mod prompt_runs;
 mod publish_runs;
@@ -163,13 +164,10 @@ struct HostWindow {
     keys: crate::keys::Keys,
     /// The script runner: what waits for the person's yes, and what runs.
     runner: crate::runner::Runner,
-    /// The Prompt page's runner duties in a Skills project.
+    /// The Prompt page's runner duties.
     prompt_page: crate::prompt_page::PromptPage,
     /// What workspaces asked to publish, and the cards for it.
     publishing: publishing::Publishing,
-    /// The open project's folder, whether it is a Skills project as the
-    /// workspaces were last told, and when that was last looked at.
-    project_skills: Option<(PathBuf, bool, std::time::Instant)>,
     /// The Prompt page's reference previews, asked of the workspaces.
     previews: previews::Previews,
     publish_runs: publish_runs::Runs,
@@ -309,7 +307,6 @@ impl HostWindow {
             runner: crate::runner::Runner::default(),
             prompt_page: crate::prompt_page::PromptPage::default(),
             publishing: publishing::Publishing::default(),
-            project_skills: None,
             previews: previews::Previews::default(),
             publish_runs: publish_runs::Runs::default(),
             canon_answers: canon_steps::Answers::default(),
@@ -757,7 +754,6 @@ impl eframe::App for HostWindow {
         self.take_items();
         self.take_reports();
         self.take_open_ins();
-        self.tell_skills_project();
         self.take_publishing();
         self.run_publishing();
         self.take_canon_steps();
@@ -1448,9 +1444,13 @@ impl HostWindow {
         prompt: String,
         image: bool,
     ) {
-        // In a Skills project nothing is sent to a model directly: every
+        // In a project nothing is sent to a model directly: every
         // generation is a request.py request, through the plan card.
-        if let Some(reason) = self.direct_runs_refused() {
+        if self.project.is_some() && self.run_prompt_cell(&id) {
+            return;
+        }
+        if self.project.is_some() {
+            let reason = String::from("Every generation in a project runs through Spumcake-Skills' request.py, so nothing is sent to a model directly.");
             self.board.failed.insert(id, reason.clone());
             if let Some(call) = call {
                 self.assistant.send(Command::Result(protocol::ToolResult { call, ok: false, output: serde_json::json!({ "error": reason }), images: Vec::new() }));
@@ -1662,7 +1662,7 @@ impl HostWindow {
     }
 
     fn start_recipe_run(&mut self, app: usize, tab: &str, id: &str) {
-        // In a Skills project a workspace's cell runs through the runner.
+        // In a project a workspace's cell runs through the runner.
         if self.run_prompt_cell(id) {
             return;
         }
@@ -2596,7 +2596,7 @@ impl HostWindow {
                 .and_then(|declared| self.panel_cell(app, &tab, &declared.cell));
             let edits = match &card_cell {
                 Some(cell) => {
-                    // In a Skills project, the runner fills what it knows:
+                    // The runner fills what it knows:
                     // a step's read, which references are not canon, and
                     // the cost.
                     let view = self.prompt_card_view(app, &tab, cell).unwrap_or_default();

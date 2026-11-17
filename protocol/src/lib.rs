@@ -287,10 +287,12 @@ pub enum AppMessage {
         #[serde(default)]
         query: String,
     },
-    /// Asks the host's runner to edit a chain step with `pipeline.py step`,
-    /// giving only `script` and `refs` (a JSON list, as the step holds it)
-    /// when they are set. The user approves the command on the runner's
-    /// card first. The answer is `step_edited`.
+    /// Asks the host's runner to record or edit a chain step with
+    /// `pipeline.py step`, giving only what is set: `script`, `refs` (a JSON
+    /// list, as the step holds it), and, for a new step, its `order` in the
+    /// chain, the `skill` it follows, and the `artifact` it makes. The user
+    /// approves the command on the runner's card first. The answer is
+    /// `step_edited`.
     EditStep {
         id: String,
         tab: String,
@@ -299,6 +301,12 @@ pub enum AppMessage {
         script: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refs: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
     },
     /// Asks the host's runner to run a chain step again, as a take, on the
     /// user's yes on the plan card. The answer is `step_ran`.
@@ -1936,6 +1944,19 @@ mod tests {
             step: animatic.clone(),
             script: Some("python3 assemble.py prompts/resources/2026-11-17_10-00-animatic-assembly.json".into()),
             refs: Some(r#"[{"artifact":"shot 1: keyframe","role":"frame, 0.0 to 3.0 s"}]"#.into()),
+            order: None,
+            skill: None,
+            artifact: None,
+        });
+        round_trip_app(AppMessage::EditStep {
+            id: "e2".into(),
+            tab: "1".into(),
+            step: StepRef { chain: "the animatic".into(), step: "animatic".into() },
+            script: Some("python3 assemble.py a.json".into()),
+            refs: Some("[]".into()),
+            order: Some(1),
+            skill: Some("build-animatic".into()),
+            artifact: Some("The Last Signal: animatic".into()),
         });
         round_trip_app(AppMessage::RunStep { id: "s1".into(), tab: "1".into(), step: animatic.clone() });
         round_trip_app(AppMessage::RunSkillScript {
@@ -1981,7 +2002,7 @@ mod tests {
         assert_eq!(parse_app_message(r#"{"type":"read_canon","id":"r1"}"#).unwrap(), AppMessage::ReadCanon { id: "r1".into(), query: String::new() });
         assert_eq!(
             parse_app_message(r#"{"type":"edit_step","id":"e1","tab":"1","step":{"chain":"Last order","step":"the animatic"}}"#).unwrap(),
-            AppMessage::EditStep { id: "e1".into(), tab: "1".into(), step: animatic, script: None, refs: None }
+            AppMessage::EditStep { id: "e1".into(), tab: "1".into(), step: animatic, script: None, refs: None, order: None, skill: None, artifact: None }
         );
         let off: MenuEntry = serde_json::from_str(r#"{"label":"The animatic's frame at the playhead","enabled":false,"tip":"Add the shot's animatic as a Motion reference first."}"#).unwrap();
         assert_eq!(off.tip.as_deref(), Some("Add the shot's animatic as a Motion reference first."));

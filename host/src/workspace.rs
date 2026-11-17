@@ -1247,9 +1247,22 @@ pub(crate) fn unusable_project_folder(folder: &Path) -> Option<String> {
 /// Makes a project in `folder`, which must not exist or must be empty, with
 /// its first session. The project is added to `projects.json` as current.
 pub(crate) fn create_project_at(data: &Path, folder: &Path, name: &str) -> Result<(ProjectRecord, SessionFile), String> {
+    create_laid_out_project(data, folder, name, |_| Ok(()))
+}
+
+/// Makes a project as `create_project_at` does, with its layout made first
+/// by `lay_out`, such as Spumcake-Skills' `request.py init`, so Studio
+/// writes only its own folder.
+pub(crate) fn create_laid_out_project(
+    data: &Path,
+    folder: &Path,
+    name: &str,
+    lay_out: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(ProjectRecord, SessionFile), String> {
     if let Some(reason) = unusable_project_folder(folder) {
         return Err(reason);
     }
+    lay_out(folder)?;
     std::fs::create_dir_all(project_meta_dir(folder)).map_err(|error| error.to_string())?;
     write_meta_ignore(folder)?;
     let record = ProjectRecord {

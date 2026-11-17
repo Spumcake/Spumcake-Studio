@@ -1,5 +1,5 @@
 //! The window's side of a workspace's own reads and edits of the chain, in
-//! a Skills project: canon read with `pipeline.py sql --read-only`, a step
+//! a project: canon read with `pipeline.py sql --read-only`, a step
 //! edited with `pipeline.py step` on the user's yes on the runner's card,
 //! and a skill's own script run, such as `build-animatic`'s writer, so a
 //! workspace never writes a Skills format itself. A step run again as a
@@ -63,19 +63,45 @@ fn plain_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
-/// The `pipeline.py step` command that sets only what is given.
-pub(crate) fn step_command(pipeline: &str, step: &StepRef, script: Option<&str>, refs: Option<&str>) -> Vec<String> {
+/// What a workspace's `edit_step` sets on a step, each only when given.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct StepFields {
+    pub script: Option<String>,
+    pub refs: Option<String>,
+    pub order: Option<u32>,
+    pub skill: Option<String>,
+    pub artifact: Option<String>,
+}
+
+/// The `pipeline.py step` command that sets only what is given, so it
+/// edits a step or, given its order, skill, and artifact, records a new one.
+pub(crate) fn step_command(pipeline: &str, step: &StepRef, fields: &StepFields) -> Vec<String> {
     let mut argv = vec![String::from("pipeline.py"), String::from("step"), pipeline.to_string(), step.chain.clone(), step.step.clone()];
-    if let Some(script) = script {
-        argv.extend([String::from("--script"), script.to_string()]);
+    if let Some(order) = fields.order {
+        argv.extend([String::from("--order"), order.to_string()]);
     }
-    if let Some(refs) = refs {
-        argv.extend([String::from("--refs"), refs.to_string()]);
+    if let Some(skill) = &fields.skill {
+        argv.extend([String::from("--skill"), skill.clone()]);
+    }
+    if let Some(artifact) = &fields.artifact {
+        argv.extend([String::from("--artifact"), artifact.clone()]);
+    }
+    if let Some(script) = &fields.script {
+        argv.extend([String::from("--script"), script.clone()]);
+    }
+    if let Some(refs) = &fields.refs {
+        argv.extend([String::from("--refs"), refs.clone()]);
     }
     argv
 }
 
 impl HostWindow {
+    /// Why the project's scripts cannot run: no project is open, or
+    /// Spumcake-Skills is not found.
+    pub(super) fn scripts_missing(&self) -> &'static str {
+        if self.project.is_none() { crate::skills_checkout::NO_PROJECT } else { crate::skills_checkout::MISSING }
+    }
+
     /// Takes the canon reads, step edits, and skill scripts workspaces
     /// asked for.
     pub(super) fn take_canon_steps(&mut self) {
@@ -91,9 +117,9 @@ impl HostWindow {
         if reads.is_empty() && edits.is_empty() && scripts.is_empty() {
             return;
         }
-        let project = self.skills_project();
+        let project = self.project_scripts();
         let pipeline = project.as_ref().and_then(|(folder, _)| crate::prompt_page::living_pipeline(folder));
-        let outside = String::from("Only a Skills project has canon.");
+        let outside = String::from(self.scripts_missing());
         for (app, (id, query)) in reads {
             let (Some((folder, env)), Some(pipeline)) = (&project, &pipeline) else {
                 self.send(app, HostMessage::CanonRows { id, rows: Vec::new(), error: Some(outside.clone()) });
@@ -126,12 +152,12 @@ impl HostWindow {
                 Err(error) => self.send(app, HostMessage::SkillScriptRan { id, output: String::new(), error: Some(error) }),
             }
         }
-        for (app, (id, _tab, step, script, refs)) in edits {
+        for (app, (id, _tab, step, fields)) in edits {
             let (Some((folder, env)), Some(pipeline)) = (project.clone(), pipeline.clone()) else {
                 self.send(app, HostMessage::StepEdited { id, error: Some(outside.clone()) });
                 continue;
             };
-            let command = step_command(&pipeline, &step, script.as_deref(), refs.as_deref());
+            let command = step_command(&pipeline, &step, &fields);
             let why = format!("Edit the step {}: {}.", step.chain, step.step);
             let call = edit_call(app, &id);
             if let crate::runner::Begun::Answered(answer) = self.runner.begin(&folder, env, &call, "", crate::runner::RUN_COMMAND, &json!({ "command": command, "why": why })) {
@@ -178,8 +204,12 @@ mod tests {
     #[test]
     fn a_step_edit_names_only_what_it_changes() {
         let step = StepRef { chain: "the animatic".into(), step: "animatic".into() };
-        assert_eq!(step_command("002", &step, Some("python3 assemble.py a.json"), None), ["pipeline.py", "step", "002", "the animatic", "animatic", "--script", "python3 assemble.py a.json"]);
-        assert_eq!(step_command("002", &step, None, Some("[]")), ["pipeline.py", "step", "002", "the animatic", "animatic", "--refs", "[]"]);
+        let script = StepFields { script: Some("python3 assemble.py a.json".into()), ..Default::default() };
+        assert_eq!(step_command("002", &step, &script), ["pipeline.py", "step", "002", "the animatic", "animatic", "--script", "python3 assemble.py a.json"]);
+        let refs = StepFields { refs: Some("[]".into()), ..Default::default() };
+        assert_eq!(step_command("002", &step, &refs), ["pipeline.py", "step", "002", "the animatic", "animatic", "--refs", "[]"]);
+        let new = StepFields { order: Some(1), skill: Some("build-animatic".into()), artifact: Some("The Last Signal: animatic".into()), ..script };
+        assert_eq!(step_command("002", &step, &new)[5..9], ["--order", "1", "--skill", "build-animatic"]);
     }
 
     /// Catches a skill or script name that would reach outside its folder.

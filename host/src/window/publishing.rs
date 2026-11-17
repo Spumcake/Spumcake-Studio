@@ -1,11 +1,11 @@
-//! The window's side of publishing from a workspace, in a Skills project:
+//! The window's side of publishing from a workspace:
 //! what a workspace asks to publish, revert, or see the history of waits in
 //! `Publishing::asked` for the runner, which fills the publish card or the
 //! history card. The window draws them, keeps what the person chose in
 //! `Publishing::confirmed` for the runner to carry out, and sends the
 //! runner's answer back to whoever asked: a workspace, or the assistant's
-//! `publish_take`, through the same card. Outside a Skills project a
-//! workspace's publish is refused, since there is no canon to publish into.
+//! `publish_take`, through the same card. With no project open, or no
+//! Spumcake-Skills found, a workspace's publish is refused with why.
 
 use super::HostWindow;
 use crate::history_card::History;
@@ -152,27 +152,27 @@ impl HostWindow {
                 deliveries.push(Delivery { app, tab, artifact, file, uses, size, frame_rate, format });
             }
         }
-        // A delivery waits for the runner, which fills the Deliver card, in
-        // a Skills project; elsewhere there is no canon to publish it into.
-        if self.skills_project().is_some() {
+        // A delivery waits for the runner, which fills the Deliver card,
+        // once the project's scripts are found.
+        if self.project_scripts().is_some() {
             self.publishing.delivering.extend(deliveries);
         } else {
             for delivery in deliveries {
-                let error = Some(String::from("Only a Skills project has canon to publish into."));
+                let error = Some(String::from(self.scripts_missing()));
                 self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error });
             }
         }
         if asked.is_empty() {
             return;
         }
-        if self.skills_project().is_some() {
+        if self.project_scripts().is_some() {
             self.publishing.asked.extend(asked);
             return;
         }
         for asked in asked {
             match asked {
                 Asked::Publish { asker, artifact, source: file, .. } | Asked::Revert { asker, artifact, file } => {
-                    let error = Some(String::from("Only a Skills project has canon to publish into."));
+                    let error = Some(String::from(self.scripts_missing()));
                     self.answer_published(asker, artifact, file, None, error);
                 }
                 Asked::History { app, tab, artifact } => self.send(app, HostMessage::History { tab, artifact, versions: Vec::new() }),

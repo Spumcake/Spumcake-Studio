@@ -97,7 +97,7 @@ mod tests {
 
     fn catalogue() -> String {
         let workspaces = workspaces();
-        // In a Skills project the host offers its project tools instead of
+        // In a project the host offers its project tools instead of
         // its prompt tools; the skills listed in their instructions vary.
         let project = crate::skills_setup::tool_group(std::path::Path::new("<project>"), &[]);
         let count: usize = workspaces.iter().flat_map(|(_, _, groups)| groups).map(|group| group.tools.len()).sum::<usize>()
@@ -108,7 +108,7 @@ mod tests {
         );
         out.push_str(&format!("\n{count} tools.\n"));
         section(&mut out, crate::route::HOST_ID, "The host", &[crate::route::host_tools()]);
-        section(&mut out, crate::route::HOST_ID, "The host, in a Skills project", &[project]);
+        section(&mut out, crate::route::HOST_ID, "The host, in a project", &[project]);
         for (id, name, groups) in &workspaces {
             section(&mut out, id, name, groups);
         }

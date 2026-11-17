@@ -760,7 +760,8 @@ impl HostWindow {
             SessionChoice::CreateProject { name, location } => {
                 let name = name.trim();
                 let name = if name.is_empty() { workspace::UNTITLED } else { name };
-                match workspace::create_project_at(&data, Path::new(&location), name) {
+                let folders = self.settings.skill_folders.clone();
+                match workspace::create_laid_out_project(&data, Path::new(&location), name, |folder| crate::skills_checkout::lay_out(folder, &folders)) {
                     Ok((record, session)) => {
                         self.sessions.open = false;
                         self.sessions.page = Page::Recent;
@@ -1021,7 +1022,8 @@ impl HostWindow {
     fn made_by_itself(&self, data: &Path) -> Result<Opening, String> {
         let root = self.projects_root().ok_or_else(|| "There is no folder for projects.".to_string())?;
         let folder = workspace::default_project_folder(&root);
-        let (record, session) = workspace::create_project_at(data, &folder, workspace::UNTITLED)
+        let folders = self.settings.skill_folders.clone();
+        let (record, session) = workspace::create_laid_out_project(data, &folder, workspace::UNTITLED, |folder| crate::skills_checkout::lay_out(folder, &folders))
             .map_err(|reason| format!("A project could not be started: {reason}"))?;
         Ok(Opening {
             id: record.id,
@@ -1425,10 +1427,9 @@ impl HostWindow {
         for started in std::mem::take(&mut self.apps) {
             started.running.shutdown();
         }
-        // Whether the folder is a Skills project, as every workspace is
-        // told it, and kept to tell them again when it changes.
-        let skills = folder.is_some_and(crate::skills_setup::is_skills_project);
-        self.project_skills = folder.map(|folder| (folder.to_path_buf(), skills, std::time::Instant::now()));
+        // Every project is organized the way Last order is, so every
+        // workspace is told so, until none reads the flag and it goes.
+        let skills = folder.is_some();
         self.apps = specs
             .into_iter()
             .enumerate()
