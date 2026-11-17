@@ -144,9 +144,11 @@ fn git(folder: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Whether the project is kept in git, so a publish can be committed.
+/// Whether the project is kept in git, so a publish can be committed: it
+/// is inside a repository's work tree, and that repository does not ignore
+/// it, as one holding the project only by chance would.
 fn in_git(folder: &Path) -> bool {
-    git(folder, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
+    git(folder, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true") && git(folder, &["check-ignore", "-q", "."]).is_err()
 }
 
 /// The run log's lines not yet committed, which a commit takes along, each
