@@ -152,7 +152,7 @@ pub struct Declared {
     pub open_ins: VecDeque<(String, String)>,
     /// Films it asked to deliver: the tab, the artifact, the file, and the
     /// card's Uses line.
-    pub delivers: VecDeque<(String, String, String, String)>,
+    pub delivers: VecDeque<(String, String, String, String, String, String, String)>,
     /// Skill scripts it asked to run: the id, the skill, the script, and
     /// its arguments.
     pub skill_scripts: VecDeque<(String, String, String, Vec<String>)>,
@@ -672,7 +672,9 @@ impl Running {
             AppMessage::EditStep { id, tab, step, script, refs } => declared.step_edits.push_back((id, tab, step, script, refs)),
             AppMessage::RunStep { id, tab, step } => declared.step_runs.push_back((id, tab, step)),
             AppMessage::OpenIn { path, media_type } => declared.open_ins.push_back((path, media_type)),
-            AppMessage::Deliver { tab, artifact, file, uses } => declared.delivers.push_back((tab, artifact, file, uses)),
+            AppMessage::Deliver { tab, artifact, file, uses, size, frame_rate, format } => {
+                declared.delivers.push_back((tab, artifact, file, uses, size, frame_rate, format))
+            }
             AppMessage::RunSkillScript { id, skill, script, args } => declared.skill_scripts.push_back((id, skill, script, args)),
             AppMessage::AskAssistant { text, items } => declared.ask_assistant.push_back((text, items)),
             // A failed preview keeps the row's own icon.

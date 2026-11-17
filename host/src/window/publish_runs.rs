@@ -573,7 +573,6 @@ impl HostWindow {
 
     /// The user's answer on the Deliver card: a yes carries it out, a
     /// Cancel answers the workspace with no file and no error.
-    #[allow(dead_code)] // Called by the Deliver card's events, wired at Video Playback Work's merge.
     pub(crate) fn answer_delivery(&mut self, yes: bool) {
         let Some(delivery) = self.publish_runs.deliver_card.take() else { return };
         if yes {
@@ -777,7 +776,7 @@ mod tests {
         std::fs::write(folder.join("agent/mix.wav"), b"RIFF mix").unwrap();
         let mix = last(skills("request.py", &["resource", "agent/mix.wav", "--name", "mix", "--from", &take]));
         let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
-        let delivery = |file: &str| Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: final shot"), file: file.into(), uses: String::from("Take 1 · with Voice") };
+        let delivery = |file: &str| Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: final shot"), file: file.into(), uses: String::from("Take 1 · with Voice"), size: String::from("1280 × 720"), frame_rate: String::from("24 fps"), format: String::from("H.264 with AAC sound") };
         check_delivery(&place, &delivery(&mix)).unwrap();
         let output = deliver(&place, &delivery(&mix)).unwrap();
         assert!(output.starts_with("output/") && folder.join(&output).is_file(), "{output}");

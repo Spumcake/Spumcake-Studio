@@ -7,7 +7,8 @@ publish = false
 
 # What the Image Generator and the Video Generator do alike, since neither
 # may depend on the other: linked files, notes, the pre-vis check's edges,
-# laying out a round, and drawing its labels. Never used by the host.
+# laying out a round, drawing its labels, and how a file keeps a cell.
+# Never used by the host.
 # `sha2` matches the sha256 Spumcake-Skills records for every file, as the
 # 0.15 plan approved.
 [dependencies]
@@ -17,3 +18,10 @@ sha2 = "=0.11.1"
 # owner's approval of ab_glyph on 2026-10-31 covers it, as the Image and
 # Video build plan's As built records. Already in the lockfile through egui.
 ab_glyph = "=0.2.32"
+# The cells both workspaces keep in their files, as the protocol has them.
+protocol = { path = "../protocol" }
+# Notes as both workspaces' files keep them. Already in the lockfile.
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "=1.0.152"

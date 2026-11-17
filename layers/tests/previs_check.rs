@@ -1,6 +1,9 @@
 //! The pre-vis check against Spumcake-Skills' own method: `expected.png`
 //! is what `build-animatic/scripts/overlay.py`'s lines make from the same
-//! render and pre-vis (`fixtures/make_previs_check.py`).
+//! render and pre-vis (`fixtures/make_previs_check.py`); and a take over
+//! its animatic, `expected-line-art.png` and `expected-over-animatic.png`,
+//! from the same lines with one animatic frame
+//! (`fixtures/make_take_over_animatic.py`).
 
 use layers::{Rgba, edges};
 
@@ -24,9 +27,32 @@ fn a_coloured_previs_matches_overlay_py() {
     compare("previs-colour.png", "expected-colour.png");
 }
 
+/// Catches line art that only looks like overlay.py's: every pixel darker
+/// than 128 in grey is white, at the threshold too, and no other changes.
+#[test]
+fn the_line_art_matches_overlay_py() {
+    let mut render = load("render.png");
+    edges::line_art(&mut render, &load("animatic.png"), edges::WHITE);
+    same(&render, "expected-line-art.png");
+}
+
+/// Catches a take over its animatic drawn in another order or way: the
+/// animatic's edges in cyan, then its lines in white over them, match the
+/// script's output pixel for pixel.
+#[test]
+fn a_take_over_its_animatic_matches_overlay_py() {
+    let mut render = load("render.png");
+    edges::over_animatic(&mut render, &load("animatic.png"));
+    same(&render, "expected-over-animatic.png");
+}
+
 fn compare(previs: &str, expected: &str) {
     let mut render = load("render.png");
     edges::check(&mut render, &load(previs), edges::CYAN);
+    same(&render, expected);
+}
+
+fn same(render: &Rgba, expected: &str) {
     let expected = load(expected);
     let mut differing = Vec::new();
     for y in 0..render.height {

@@ -57,6 +57,10 @@ pub(crate) struct Delivery {
     pub artifact: String,
     pub file: String,
     pub uses: String,
+    /// The Deliver card's lines of the film, as the workspace read it.
+    pub size: String,
+    pub frame_rate: String,
+    pub format: String,
 }
 
 /// What was asked for, with who asked.
@@ -119,6 +123,15 @@ pub(crate) struct Publishing {
     pub last_tool: Option<String>,
 }
 
+/// The file `pipeline.py deliver` writes, as it names it: the minute, the
+/// pipeline's number, and the project folder's name, with the film's own
+/// extension, in `output/`.
+pub(crate) fn output_name(stamp: &str, pipeline: &str, project: &str, film: &str) -> String {
+    let extension = std::path::Path::new(film).extension().map(|ext| format!(".{}", ext.to_string_lossy())).unwrap_or_default();
+    let number = pipeline.parse::<u32>().unwrap_or(0);
+    format!("output/{stamp}-{number:03}-{project}{extension}")
+}
+
 impl HostWindow {
     /// Takes what workspaces asked to publish, revert, or see.
     pub(super) fn take_publishing(&mut self) {
@@ -135,8 +148,8 @@ impl HostWindow {
             for (tab, artifact) in declared.canon_histories.drain(..) {
                 asked.push(Asked::History { app, tab, artifact });
             }
-            for (tab, artifact, file, uses) in declared.delivers.drain(..) {
-                deliveries.push(Delivery { app, tab, artifact, file, uses });
+            for (tab, artifact, file, uses, size, frame_rate, format) in declared.delivers.drain(..) {
+                deliveries.push(Delivery { app, tab, artifact, file, uses, size, frame_rate, format });
             }
         }
         // A delivery waits for the runner, which fills the Deliver card, in
@@ -160,7 +173,7 @@ impl HostWindow {
             match asked {
                 Asked::Publish { asker, artifact, source: file, .. } | Asked::Revert { asker, artifact, file } => {
                     let error = Some(String::from("Only a Skills project has canon to publish into."));
-                    self.reply(published_reply(asker, artifact, file, None, error, false));
+                    self.answer_published(asker, artifact, file, None, error);
                 }
                 Asked::History { app, tab, artifact } => self.send(app, HostMessage::History { tab, artifact, versions: Vec::new() }),
             }
@@ -210,6 +223,23 @@ impl HostWindow {
     /// Draws the publish card, a refusal, and the history card, and acts on
     /// what the person chose.
     pub(super) fn show_publishing(&mut self, ctx: &egui::Context) {
+        // The Deliver card, over a delivery the runner checked: its yes
+        // publishes and delivers, its Cancel answers with nothing.
+        let folder = self.project.as_ref().map(|project| project.folder.clone());
+        if let Some(delivery) = &self.publish_runs.deliver_card {
+            let pipeline = folder.as_deref().and_then(crate::prompt_page::living_pipeline).unwrap_or_default();
+            let project = folder.as_deref().and_then(|folder| folder.file_name()).map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+            let view = crate::deliver_card::DeliverCardView {
+                file: output_name(&crate::skills_setup::local_stamp(), &pipeline, &project, &delivery.file),
+                size: delivery.size.clone(),
+                frame_rate: delivery.frame_rate.clone(),
+                format: delivery.format.clone(),
+                uses: delivery.uses.clone(),
+            };
+            if let Some(event) = crate::deliver_card::show(ctx, &view) {
+                self.answer_delivery(event == crate::deliver_card::DeliverCardEvent::Deliver);
+            }
+        }
         if let Some(card) = self.publishing.card.clone()
             && let Some(event) = crate::publish_card::show(ctx, &card.view)
         {
@@ -260,6 +290,13 @@ impl HostWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a Deliver card that names a file other than the one
+    /// `pipeline.py deliver` writes.
+    #[test]
+    fn the_deliver_card_names_the_file_deliver_writes() {
+        assert_eq!(output_name("2026-11-15_08-25", "002", "last-order", "library/2026-11-15_08-20-final-shot-mix.mp4"), "output/2026-11-15_08-25-002-last-order.mp4");
+    }
 
     /// Catches a Cancel heard as a publish, or heard by the wrong asker: a
     /// workspace hears `published` with no file and no error, and the

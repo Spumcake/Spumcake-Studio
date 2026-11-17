@@ -1,6 +1,7 @@
 //! What the working area shows, drawn into the one raster image the host
-//! draws: the shown take alone, two takes side by side at the same frame,
-//! or every take as a row of eight frames. The image is the working area's
+//! draws: the shown take alone, two takes side by side at the same time,
+//! or every take as a row of eight frames, with the notes at the time
+//! shown over the shown take's frame. The image is the working area's
 //! own size, and each frame is decoded at the size it is drawn, never
 //! larger than the file's own, so a 4K take is never decoded whole to be
 //! shown small. At 100% and more, the takes are drawn at that zoom about a
@@ -27,6 +28,11 @@ pub const STRIP_FRAMES: u32 = 8;
 pub const TIME_ROOM: u32 = 18;
 const CAPTION: f32 = 12.0;
 const CAPTION_COLOUR: [u8; 4] = [110, 110, 118, 255];
+/// A round's line over its strips, as the Image Generator's round grid
+/// writes it, and the room it takes.
+const TITLE: f32 = 15.0;
+const TITLE_COLOUR: [u8; 4] = [70, 70, 76, 255];
+const TITLE_ROOM: u32 = 30;
 /// The working area's white, as the host draws around an image.
 const GROUND: [u8; 4] = [255, 255, 255, 255];
 /// A take whose file could not be read: the host's light checker grey.
@@ -57,20 +63,50 @@ pub struct Scene {
     pub focus: Option<[f64; 2]>,
     /// Words over the frames: each strip's times, or the takes' names.
     pub captions: Vec<Caption>,
+    /// The notes over the take shown that show at the time shown, drawn
+    /// over its frame; the session sets them.
+    pub notes: Option<crate::notes::NotesOver>,
+    /// The animatic's frame at the same time, decoded at the take's size,
+    /// whose lines and edges are laid over the frame of the place it
+    /// names, as the pre-vis check shows a take over its animatic; the
+    /// session sets it.
+    pub animatic: Option<Animatic>,
+}
+
+/// The animatic's frame over a place: which place, the frame's key, and
+/// whether its line art is drawn in white over its edges, as over a
+/// Motion reference, or only its edges, as over a Start frame, whose
+/// darks are no line art.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animatic {
+    pub place: usize,
+    pub key: Key,
+    pub lines: bool,
 }
 
 /// Words drawn over the view in gray: their line's top at `at[1]`, and
-/// their left end, or with `centre` their middle, at `at[0]`.
+/// their left end, or with `centre` their middle, at `at[0]`; with
+/// `title`, larger, as a round's line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Caption {
     pub words: String,
     pub at: [f32; 2],
     pub centre: bool,
+    pub title: bool,
+}
+
+/// The words over a round shown whole as frame strips: its line, and each
+/// reference by its order and role, in a narrow column at the left.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sheet {
+    pub title: String,
+    pub references: Vec<String>,
 }
 
 impl Scene {
+    /// Every frame the scene draws: each place's, then the animatic's.
     pub fn keys(&self) -> Vec<Key> {
-        self.places.iter().filter_map(|place| place.key.clone()).collect()
+        self.places.iter().filter_map(|place| place.key.clone()).chain(self.animatic.as_ref().map(|animatic| animatic.key.clone())).collect()
     }
 }
 
@@ -86,18 +122,25 @@ pub struct Look {
 
 /// The scene a gallery shows in an image of `size`.
 pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
+    scene_with(gallery, size, look, None)
+}
+
+/// The scene a gallery shows, and over frame strips a round's `sheet`:
+/// its line above them, and its references in a column at their left, as
+/// vg-frame-strips shows a round whole.
+pub fn scene_with(gallery: &Gallery, size: (u32, u32), look: Look, sheet: Option<&Sheet>) -> Scene {
     let (width, height) = size;
-    let area = Rect {
+    let mut area = Rect {
         x: MARGIN as i32,
         y: MARGIN as i32,
         w: width.saturating_sub(2 * MARGIN).max(2),
         h: height.saturating_sub(2 * MARGIN).max(2),
     };
-    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None, captions: Vec::new() };
+    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None, captions: Vec::new(), notes: None, animatic: None };
     match gallery.view() {
         Mode::Single => {
             if let Some(take) = gallery.take() {
-                let (place, focus) = shown(take, area, look, None);
+                let (place, focus) = shown(take, area, look, None, look.frame);
                 scene.places.push(place);
                 scene.focus = focus;
             }
@@ -110,12 +153,17 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
             // larger one's scale, so they show the same region.
             let half = area.w.saturating_sub(SIDE_GAP) / 2;
             let widest = [left, right].iter().filter_map(|take| take.info.map(|info| info.width)).max();
+            // One time for both: the first take's frame, and the second's
+            // frame at the same time in seconds, a shorter take holding its
+            // last.
+            let first = look.frame.min(left.last_frame());
+            let frames = [first, frame_at(right, seconds_at(left, first))];
             for (index, take) in [left, right].into_iter().enumerate() {
                 let cell = Rect { x: area.x + (index as u32 * (half + SIDE_GAP)) as i32, y: area.y, w: half.max(2), h: area.h };
-                let (place, focus) = shown(take, cell, look, widest);
+                let (place, focus) = shown(take, cell, look, widest, frames[index]);
                 // Its name, small, over it.
                 let top = place.rect.y.max(place.clip.y) as f32 - CAPTION - 8.0;
-                scene.captions.push(Caption { words: take.name.clone(), at: [place.rect.x.max(place.clip.x) as f32, top.max(2.0)], centre: false });
+                scene.captions.push(Caption { words: take.name.clone(), at: [place.rect.x.max(place.clip.x) as f32, top.max(2.0)], centre: false, title: false });
                 scene.places.push(place);
                 if index == 0 {
                     scene.focus = focus;
@@ -124,6 +172,9 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
         }
         Mode::Strips => {
             scene.live = false;
+            if let Some(sheet) = sheet {
+                lay_sheet(&mut scene, &mut area, sheet);
+            }
             let count = gallery.takes.len() as u32;
             let aspect = gallery.takes.iter().find_map(|take| take.info.map(aspect_of)).unwrap_or(WIDE);
             let cells = strip_cells(area, count, aspect);
@@ -139,13 +190,57 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
                     if let Some(seconds) = take.seconds() {
                         let at = f64::from(column + 1) * seconds / f64::from(STRIP_FRAMES);
                         let under = [cell.x as f32 + cell.w as f32 / 2.0, (cell.y + cell.h as i32) as f32 + 3.0];
-                        scene.captions.push(Caption { words: format!("{at:.1} s"), at: under, centre: true });
+                        scene.captions.push(Caption { words: format!("{at:.1} s"), at: under, centre: true, title: false });
                     }
                 }
             }
         }
     }
     scene
+}
+
+/// A round's sheet over its strips: its line at the top, then its
+/// references in a column at the left, each wrapped to it, the strips'
+/// area made smaller by both.
+fn lay_sheet(scene: &mut Scene, area: &mut Rect, sheet: &Sheet) {
+    scene.captions.push(Caption { words: sheet.title.clone(), at: [area.x as f32, area.y as f32], centre: false, title: true });
+    area.y += TITLE_ROOM as i32;
+    area.h = area.h.saturating_sub(TITLE_ROOM).max(2);
+    if sheet.references.is_empty() {
+        return;
+    }
+    let column = (scene.width as f32 * 0.16).clamp(110.0, 220.0);
+    let line = (layers::label::height(CAPTION) * 1.25).round();
+    let mut y = area.y as f32;
+    for reference in &sheet.references {
+        for words in wrap(reference, column) {
+            scene.captions.push(Caption { words, at: [area.x as f32, y], centre: false, title: false });
+            y += line;
+        }
+        y += 8.0;
+    }
+    let room = column as u32 + 2 * SIDE_GAP;
+    area.x += room as i32;
+    area.w = area.w.saturating_sub(room).max(2);
+}
+
+/// Words broken at spaces into lines no wider than `most` at the
+/// captions' size; a word wider than a line has it to itself.
+fn wrap(words: &str, most: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in words.split_whitespace() {
+        let longer = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && layers::label::measure(&longer, CAPTION, false) > most {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = longer;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// The frame strips' cells, row by row: eight across the area, each row
@@ -200,15 +295,15 @@ fn fitted(take: &Take, cell: Rect, index: u32) -> Place {
 
 /// The shown take in `cell`: fitted, or at the look's zoom about its focus,
 /// scaled as if it were `widest` pixels wide so two takes show one region.
-fn shown(take: &Take, cell: Rect, look: Look, widest: Option<u32>) -> (Place, Option<[f64; 2]>) {
+fn shown(take: &Take, cell: Rect, look: Look, widest: Option<u32>, frame: u32) -> (Place, Option<[f64; 2]>) {
     let (Some(zoom), Some(info)) = (look.zoom, take.info) else {
-        return (fitted(take, cell, look.frame), None);
+        return (fitted(take, cell, frame), None);
     };
     let scale = zoom * f64::from(widest.unwrap_or(info.width).max(1)) / f64::from(info.width.max(1));
     let drawn = ((f64::from(info.width) * scale).round().max(2.0) as u32, (f64::from(info.height) * scale).round().max(2.0) as u32);
     // Decoded at the size drawn, and no larger than the file holds.
     let decoded = even((drawn.0.min(info.width), drawn.1.min(info.height)));
-    let index = look.frame.min(take.last_frame());
+    let index = frame.min(take.last_frame());
     let along = |start: i32, room: u32, size: u32, focus: f64| -> (i32, f64) {
         if size <= room {
             return (start + ((room - size) / 2) as i32, 0.5);
@@ -224,6 +319,17 @@ fn shown(take: &Take, cell: Rect, look: Look, widest: Option<u32>) -> (Place, Op
     (Place { key: Some(Key::new(take.file.clone(), index, decoded)), rect, clip: cell }, Some([focus_x, focus_y]))
 }
 
+/// The time of a take's frame, in seconds.
+pub fn seconds_at(take: &Take, frame: u32) -> f64 {
+    take.info.map_or(0.0, |info| f64::from(frame) / info.fps().max(f64::EPSILON))
+}
+
+/// A take's frame at a time in seconds, its last when the time is past it.
+pub fn frame_at(take: &Take, seconds: f64) -> u32 {
+    let fps = take.info.map_or(24.0, |info| info.fps());
+    ((seconds.max(0.0) * fps).round() as u32).min(take.last_frame())
+}
+
 fn centred(cell: Rect, w: u32, h: u32) -> Rect {
     Rect { x: cell.x + (cell.w.saturating_sub(w) / 2) as i32, y: cell.y + (cell.h.saturating_sub(h) / 2) as i32, w, h }
 }
@@ -232,8 +338,26 @@ fn centred(cell: Rect, w: u32, h: u32) -> Rect {
 /// never to be, leaves its place empty.
 pub fn compose(scene: &Scene, frames: &std::collections::HashMap<Key, Rgba>) -> Rgba {
     let mut image = Rgba::new(scene.width, scene.height, GROUND);
-    for place in &scene.places {
-        match place.key.as_ref().and_then(|key| frames.get(key)) {
+    for (index, place) in scene.places.iter().enumerate() {
+        let frame = place.key.as_ref().and_then(|key| frames.get(key));
+        // The take over its animatic: the animatic's edges and lines over
+        // the take's frame, before it is placed.
+        let over = scene.animatic.as_ref().filter(|animatic| animatic.place == index).and_then(|animatic| Some((frames.get(&animatic.key)?, animatic.lines)));
+        let overlaid = match (frame, over) {
+            (Some(frame), Some((animatic, true))) => {
+                let mut frame = frame.clone();
+                layers::edges::over_animatic(&mut frame, animatic);
+                Some(frame)
+            }
+            // A Start frame: its edges only, as the pre-vis check draws.
+            (Some(frame), Some((animatic, false))) => {
+                let mut frame = frame.clone();
+                layers::edges::check(&mut frame, animatic, layers::edges::CYAN);
+                Some(frame)
+            }
+            _ => None,
+        };
+        match overlaid.as_ref().or(frame) {
             Some(frame) if (frame.width, frame.height) == (place.rect.w, place.rect.h) && inside(place.rect, place.clip) => {
                 layout::place(&mut image, frame, place.rect);
             }
@@ -242,9 +366,16 @@ pub fn compose(scene: &Scene, frames: &std::collections::HashMap<Key, Rgba>) -> 
         }
     }
     for caption in &scene.captions {
-        let look = layers::label::Look { size: CAPTION, colour: CAPTION_COLOUR, bold: false };
+        let look = if caption.title {
+            layers::label::Look { size: TITLE, colour: TITLE_COLOUR, bold: false }
+        } else {
+            layers::label::Look { size: CAPTION, colour: CAPTION_COLOUR, bold: false }
+        };
         let anchor = if caption.centre { layers::label::Anchor::Centre } else { layers::label::Anchor::Left };
         layers::label::draw(&mut image, &caption.words, caption.at, look, anchor);
+    }
+    if let Some(notes) = &scene.notes {
+        crate::notes::draw(&mut image, notes);
     }
     image
 }
@@ -359,6 +490,23 @@ mod tests {
         assert!(strips.captions.iter().all(|caption| caption.centre));
     }
 
+    /// Catches two takes side by side at different times, as when they have
+    /// different frame rates: at the first's frame 12, half a second at 24
+    /// frames a second, the second, at 30, shows its frame 15; past the
+    /// shorter take's end, it holds its last.
+    #[test]
+    fn side_by_side_shares_a_time() {
+        let mut gallery = gallery(&[("a", info(128, 72, 48)), ("b", media::Info { width: 128, height: 72, rate: (30, 1), frames: 30, sound: false })]);
+        let other = gallery.uid_at(1).unwrap();
+        gallery.set_view(Mode::Side { other }, 0).unwrap();
+        let indices = |frame: u32| -> Vec<u32> {
+            let look = Look { frame, zoom: None, focus: [0.5, 0.5] };
+            scene(&gallery, (1200, 800), look).places.iter().map(|place| place.key.as_ref().unwrap().index).collect()
+        };
+        assert_eq!(indices(12), [12, 15]);
+        assert_eq!(indices(47), [47, 29], "the shorter take did not hold its last frame");
+    }
+
     /// Catches side by side drawing different regions at 100%: a 720p and
     /// a 4K take show the same part, the 4K one at its own pixels.
     #[test]
@@ -378,6 +526,63 @@ mod tests {
         assert!(side.focus.is_some());
     }
 
+    /// Catches a Start frame's darks drawn as line art, or its edges left
+    /// out: over a colour keyframe, only its edges are drawn, in cyan, and
+    /// its dark middle leaves the take as it is; over a Motion reference,
+    /// the same dark is a white line.
+    #[test]
+    fn over_a_start_frame_only_its_edges_are_drawn() {
+        let take = Key::new(PathBuf::from("/scratch/take.mp4"), 0, (16, 16));
+        let art = Key::new(PathBuf::from("/scratch/start.png"), 0, (16, 16));
+        let rect = Rect { x: 0, y: 0, w: 16, h: 16 };
+        let mut frames = HashMap::new();
+        frames.insert(take.clone(), Rgba::new(16, 16, [100, 100, 100, 255]));
+        let mut start = Rgba::new(16, 16, [230, 230, 230, 255]);
+        for y in 4..12 {
+            for x in 4..12 {
+                start.set(x, y, [10, 10, 10, 255]);
+            }
+        }
+        frames.insert(art.clone(), start);
+        let mut scene = Scene {
+            width: 16,
+            height: 16,
+            places: vec![Place { key: Some(take), rect, clip: rect }],
+            live: true,
+            focus: None,
+            captions: Vec::new(),
+            notes: None,
+            animatic: Some(Animatic { place: 0, key: art, lines: false }),
+        };
+        let edges = compose(&scene, &frames);
+        assert_eq!(edges.pixel(8, 8), [100, 100, 100, 255], "a Start frame's darks were drawn as line art");
+        let edge = edges.pixel(3, 8);
+        assert!(edge[0] < 40 && edge[2] > 200, "the Start frame's edge is not cyan: {edge:?}");
+        if let Some(animatic) = scene.animatic.as_mut() {
+            animatic.lines = true;
+        }
+        assert_eq!(compose(&scene, &frames).pixel(8, 8), [255, 255, 255, 255], "a Motion reference's line is not white");
+    }
+
+    /// Catches a round shown whole without its line or its references, or
+    /// its strips laid over them: the line is at the top, the references
+    /// in a column at the left, and the strips start right of it and
+    /// below the line.
+    #[test]
+    fn a_round_whole_has_its_line_and_references() {
+        let mut gallery = gallery(&[("a", info(128, 72, 48)), ("b", info(128, 72, 48))]);
+        gallery.set_view(Mode::Strips, 0).unwrap();
+        let sheet = Sheet { title: "Round 2 · Model A · 2 takes".into(), references: vec!["1st, start frame: the keeper.".into()] };
+        let scene = scene_with(&gallery, (1200, 800), FIT, Some(&sheet));
+        assert!(scene.captions.iter().any(|caption| caption.title && caption.words == sheet.title && caption.at == [MARGIN as f32, MARGIN as f32]));
+        let reference = scene.captions.iter().find(|caption| caption.words.starts_with("1st")).expect("the reference is not written");
+        assert_eq!(reference.at[0], MARGIN as f32);
+        let first = scene.places[0].rect;
+        assert!(first.x as f32 > reference.at[0] + 110.0, "the strips are over the references' column");
+        assert!(first.y >= (MARGIN + TITLE_ROOM) as i32, "the strips are over the round's line");
+        assert_eq!(scene.places.len(), 16);
+    }
+
     /// Catches a frame drawn outside its place, or a missing one drawn as
     /// another: a zoomed frame stays within its cell, scaled smoothly.
     #[test]
@@ -395,6 +600,8 @@ mod tests {
             live: true,
             focus: None,
             captions: Vec::new(),
+            notes: None,
+            animatic: None,
         };
         let image = compose(&scene, &frames);
         assert_eq!(image.pixel(5, 5), GROUND);

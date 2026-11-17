@@ -3,9 +3,14 @@
 //! link to a video file, which is never copied or written. Adding,
 //! duplicating, removing, renaming, and moving takes, and changing the
 //! view, are steps of the history; choosing a take on the strip and
-//! stepping its frames are not, as in the Image Generator.
+//! stepping its frames are not, as in the Image Generator. So are changes
+//! to the tab's cells: a prompt edited on the Prompt page, and a next round
+//! made from a take; and to the notes marked on a take: a pin with its
+//! words, a mark, a pin moved, and a pin taken away.
 
 use layers::link::Link;
+use layers::notes::Notes;
+use protocol::{Cell, CellState, StepRef};
 use std::path::PathBuf;
 
 /// One take of a gallery: a frame of its filmstrip.
@@ -43,7 +48,7 @@ pub enum Mode {
     /// Every take, a row of eight frames each, in filmstrip order.
     Strips,
     /// The shown take on the left and another, by its uid, on the right, at
-    /// the same frame.
+    /// the same time.
     Side { other: u64 },
 }
 
@@ -60,6 +65,56 @@ enum Change {
     Move { from: usize, to: usize },
     /// The view and the take shown, before and after.
     View { before: (Mode, usize), after: (Mode, usize) },
+    /// The tab's cells and the one the Prompt page shows, before and after.
+    Cells { before: (Vec<Cell>, Option<String>), after: (Vec<Cell>, Option<String>) },
+    /// One take's notes, by its file, before and after.
+    Notes { path: String, sha256: String, before: Notes, after: Notes },
+    /// The take's own sound and the tab's sound layers, before and after.
+    Sounds { before: (TakeSound, Vec<SoundLayer>), after: (TakeSound, Vec<SoundLayer>) },
+}
+
+/// The take's own sound as a layer of the mix, applying to whichever take
+/// is shown: its gain in decibels, and whether it is muted.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TakeSound {
+    pub gain_db: f64,
+    pub muted: bool,
+}
+
+impl TakeSound {
+    pub fn is_default(&self) -> bool {
+        *self == TakeSound::default()
+    }
+}
+
+/// A sound layer of the tab, as vg-layers shows one: a link to a sound
+/// file it never writes, its name, its gain in decibels, when it starts on
+/// the take in seconds, and whether it is muted. It belongs to the tab, not
+/// to a take, and plays with whichever take is shown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundLayer {
+    /// Unique among the tab's sound layers for this run, from 1.
+    pub id: u64,
+    pub name: String,
+    pub link: Link,
+    /// The file itself, as an absolute path.
+    pub file: PathBuf,
+    pub gain_db: f64,
+    pub start: f64,
+    pub muted: bool,
+}
+
+/// A sound layer's gain, from -24 to +12 decibels.
+pub const GAIN_DB: (f64, f64) = (-24.0, 12.0);
+
+/// The notes marked on a take, kept by its file: its path, as the `.vgx`
+/// names a take's file, and the sha256 of the bytes they were marked on,
+/// so they come back only for the same take.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TakeNotes {
+    pub path: String,
+    pub sha256: String,
+    pub notes: Notes,
 }
 
 #[derive(Debug)]
@@ -81,6 +136,17 @@ pub struct Gallery {
     /// Rises with every change, done or undone.
     pub edits: u64,
     next_uid: u64,
+    /// The tab's cells, each a pointer to a chain step or a draft before
+    /// its first run, kept in its file, and the one the Prompt page shows.
+    pub cells: Vec<Cell>,
+    pub cell: Option<String>,
+    /// The notes marked on takes, the gallery's and the rounds' alike,
+    /// kept in its file as editing state.
+    pub notes: Vec<TakeNotes>,
+    /// The take's own sound, and the tab's sound layers, top first, kept
+    /// in its file.
+    pub take_sound: TakeSound,
+    pub sounds: Vec<SoundLayer>,
 }
 
 impl Gallery {
@@ -139,6 +205,13 @@ impl Gallery {
         !self.redo.is_empty()
     }
 
+    /// Whether the step an undo, or a redo, would take is a take's notes
+    /// or the tab's sound layers, which leave the take shown as it is.
+    pub fn steps_notes(&self, redo: bool) -> bool {
+        let next = if redo { self.redo.last() } else { self.undo.last() };
+        next.is_some_and(|step| matches!(step.change, Change::Notes { .. } | Change::Sounds { .. }))
+    }
+
     fn check(&self, index: usize) -> Result<(), String> {
         if index < self.takes.len() {
             Ok(())
@@ -151,6 +224,116 @@ impl Gallery {
         self.undo.push(Step { change, shown_before });
         self.redo.clear();
         self.edits += 1;
+    }
+
+    /// Replaces the take's own sound and the tab's sound layers. One step;
+    /// the same are none. Returns whether they changed.
+    pub fn set_mix(&mut self, take_sound: TakeSound, sounds: Vec<SoundLayer>) -> bool {
+        if take_sound == self.take_sound && sounds == self.sounds {
+            return false;
+        }
+        let before = (self.take_sound, std::mem::replace(&mut self.sounds, sounds.clone()));
+        self.take_sound = take_sound;
+        let shown = self.shown;
+        self.commit(Change::Sounds { before, after: (take_sound, sounds) }, shown);
+        true
+    }
+
+    /// Replaces the tab's sound layers, keeping the take's own sound. One
+    /// step, as `set_mix`.
+    pub fn set_sounds(&mut self, sounds: Vec<SoundLayer>) -> bool {
+        self.set_mix(self.take_sound, sounds)
+    }
+
+    /// The id a new sound layer takes: one past the highest.
+    pub fn next_sound(&self) -> u64 {
+        self.sounds.iter().map(|sound| sound.id).max().unwrap_or(0) + 1
+    }
+
+    /// The notes marked on the take whose file is `path` with `sha256`.
+    pub fn notes_of(&self, path: &str, sha256: &str) -> Notes {
+        self.notes.iter().find(|kept| kept.path == path && kept.sha256 == sha256).map(|kept| kept.notes.clone()).unwrap_or_default()
+    }
+
+    /// Replaces a take's notes. One step; the same notes are none. Returns
+    /// whether they changed.
+    pub fn set_notes(&mut self, path: &str, sha256: &str, notes: Notes) -> bool {
+        let before = self.notes_of(path, sha256);
+        if before == notes {
+            return false;
+        }
+        self.put_notes(path, sha256, notes.clone());
+        let shown = self.shown;
+        self.commit(Change::Notes { path: path.to_string(), sha256: sha256.to_string(), before, after: notes }, shown);
+        true
+    }
+
+    fn put_notes(&mut self, path: &str, sha256: &str, notes: Notes) {
+        self.notes.retain(|kept| kept.path != path || kept.sha256 != sha256);
+        if !notes.is_empty() {
+            self.notes.push(TakeNotes { path: path.to_string(), sha256: sha256.to_string(), notes });
+        }
+    }
+
+    /// The cell the Prompt page shows.
+    pub fn current_cell(&self) -> Option<&Cell> {
+        let id = self.cell.as_deref()?;
+        self.cells.iter().find(|cell| cell.id == id)
+    }
+
+    /// Makes the Prompt page's cell, an empty draft of `size`, when the tab
+    /// has none. It is no step: nothing was asked for. Returns whether it
+    /// made one.
+    pub fn ensure_cell(&mut self, size: (u32, u32)) -> bool {
+        if self.current_cell().is_some() {
+            return false;
+        }
+        if let Some(last) = self.cells.last() {
+            self.cell = Some(last.id.clone());
+            return false;
+        }
+        let draft = empty_draft(size);
+        self.cell = Some(draft.id.clone());
+        self.cells.push(draft);
+        true
+    }
+
+    /// Replaces the tab's cells and the one shown. One step; the same
+    /// cells are none. Returns whether they changed.
+    pub fn set_cells(&mut self, cells: Vec<Cell>, cell: Option<String>) -> bool {
+        let after = (cells, cell);
+        if after.0 == self.cells && after.1 == self.cell {
+            return false;
+        }
+        let before = (std::mem::replace(&mut self.cells, after.0.clone()), std::mem::replace(&mut self.cell, after.1.clone()));
+        let shown = self.shown;
+        self.commit(Change::Cells { before, after }, shown);
+        true
+    }
+
+    /// The draft cell `id` is now that chain step: it keeps only the
+    /// pointer, here and in every step of the history that holds it, so
+    /// no undo brings its draft back. Not a step itself. Returns whether
+    /// the tab has that cell.
+    pub fn point_at_step(&mut self, id: &str, step: &StepRef) -> bool {
+        let point = |cells: &mut Vec<Cell>| {
+            for cell in cells.iter_mut().filter(|cell| cell.id == id) {
+                cell.step = Some(step.clone());
+                *cell = layers::cells::stored_cell(cell);
+            }
+        };
+        let found = self.cells.iter().any(|cell| cell.id == id);
+        point(&mut self.cells);
+        for kept in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if let Change::Cells { before, after } = &mut kept.change {
+                point(&mut before.0);
+                point(&mut after.0);
+            }
+        }
+        if found {
+            self.edits += 1;
+        }
+        found
     }
 
     /// Shows the take at `index`. Choosing a take is not a step.
@@ -298,6 +481,15 @@ impl Gallery {
             Change::View { before, .. } => {
                 (self.mode, self.shown) = *before;
             }
+            Change::Cells { before, .. } => {
+                self.cells = before.0.clone();
+                self.cell = before.1.clone();
+            }
+            Change::Notes { path, sha256, before, .. } => {
+                let (path, sha256, notes) = (path.clone(), sha256.clone(), before.clone());
+                self.put_notes(&path, &sha256, notes);
+            }
+            Change::Sounds { before, .. } => (self.take_sound, self.sounds) = before.clone(),
         }
         self.redo.push(step);
         self.edits += 1;
@@ -329,11 +521,43 @@ impl Gallery {
             Change::View { after, .. } => {
                 (self.mode, self.shown) = *after;
             }
+            Change::Cells { after, .. } => {
+                self.cells = after.0.clone();
+                self.cell = after.1.clone();
+            }
+            Change::Notes { path, sha256, after, .. } => {
+                let (path, sha256, notes) = (path.clone(), sha256.clone(), after.clone());
+                self.put_notes(&path, &sha256, notes);
+            }
+            Change::Sounds { after, .. } => (self.take_sound, self.sounds) = after.clone(),
         }
         self.undo.push(step);
         self.edits += 1;
         true
     }
+}
+
+/// A take's length a new draft asks for, in seconds, as the Prompt page's
+/// Length starts.
+pub const LENGTH: f64 = 8.0;
+/// A new draft's Size with no take to take it from.
+pub const SIZE: (u32, u32) = (1280, 720);
+
+/// A new video cell with no prompt, as the Prompt page starts: its Size
+/// `size`, written "1280 × 720", and its Length 8 seconds.
+pub fn empty_draft(size: (u32, u32)) -> Cell {
+    let mut cell = Cell::text(protocol::cell_id(), "");
+    cell.kind = String::from(protocol::VIDEO_KIND);
+    cell.input = Vec::new();
+    cell.state = CellState::Idle;
+    cell.settings = Some(draft_settings(size));
+    cell
+}
+
+/// A new draft's settings: its Size, as ig-request-anchor writes one, and
+/// its Length.
+pub fn draft_settings(size: (u32, u32)) -> serde_json::Value {
+    serde_json::json!({ "size": format!("{} × {}", size.0, size.1), "length": LENGTH })
 }
 
 /// Where the take at `index` is after the one at `from` moves to `to`.
@@ -427,5 +651,25 @@ mod tests {
         assert_eq!(gallery.shown, 2, "choosing a take in the same view was refused");
         assert!(gallery.undo());
         assert_eq!((gallery.view(), gallery.shown), (Mode::Single, 0));
+    }
+
+    /// Catches a cell edit that is no step, a new draft with no Size or
+    /// Length, or a step's draft that an undo brings back.
+    #[test]
+    fn the_cells_change_as_steps_and_a_step_keeps_its_pointer() {
+        let mut gallery = Gallery::new(Vec::new(), 0);
+        assert!(gallery.ensure_cell(SIZE));
+        assert!(!gallery.can_undo(), "making the first draft was a step");
+        let draft = gallery.current_cell().unwrap().clone();
+        assert_eq!(draft.kind, protocol::VIDEO_KIND);
+        assert_eq!(draft.settings, Some(serde_json::json!({ "size": "1280 × 720", "length": 8.0 })));
+        let mut edited = draft.clone();
+        edited.input = vec![protocol::CellPart::Text { text: "The door opens.".into() }];
+        assert!(gallery.set_cells(vec![edited], Some(draft.id.clone())));
+        let step = StepRef { chain: "shot-12".into(), step: "take".into() };
+        assert!(gallery.point_at_step(&draft.id, &step));
+        assert!(gallery.undo());
+        let cell = gallery.current_cell().unwrap();
+        assert!(cell.step.is_some() && !cell.copies_its_step(), "an undo brought the draft back");
     }
 }

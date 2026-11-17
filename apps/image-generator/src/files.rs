@@ -273,7 +273,7 @@ fn notes_file(notes: &Notes, hidden: bool) -> NotesFile {
 fn read_notes(notes: NotesFile) -> (Notes, bool) {
     (
         Notes {
-            pins: notes.pins.into_iter().filter(|pin| pin.x.is_finite() && pin.y.is_finite()).map(|pin| Pin { number: pin.number, x: pin.x, y: pin.y, text: pin.text }).collect(),
+            pins: notes.pins.into_iter().filter(|pin| pin.x.is_finite() && pin.y.is_finite()).map(|pin| Pin { number: pin.number, x: pin.x, y: pin.y, text: pin.text, at: None }).collect(),
             marks: notes
                 .marks
                 .into_iter()
@@ -281,6 +281,7 @@ fn read_notes(notes: NotesFile) -> (Notes, bool) {
                     points: mark.points.into_iter().filter(|point| point[0].is_finite() && point[1].is_finite()).collect(),
                     width: if mark.width.is_finite() { mark.width.clamp(0.5, 500.0) } else { 4.0 },
                     colour: mark.colour,
+                    at: None,
                 })
                 .collect(),
         },
@@ -288,25 +289,9 @@ fn read_notes(notes: NotesFile) -> (Notes, bool) {
     )
 }
 
-/// A cell as the file keeps it: a pointer to its step and nothing else,
-/// or a draft's own prompt, settings, model, and endpoint, with no run,
-/// result, or record of what made anything.
-pub fn stored_cell(cell: &protocol::Cell) -> protocol::Cell {
-    let mut kept = cell.clone();
-    kept.versions.clear();
-    kept.output.clear();
-    kept.current = None;
-    kept.error = None;
-    kept.state = protocol::CellState::Idle;
-    kept.effort = None;
-    if kept.step.is_some() {
-        kept.input.clear();
-        kept.settings = None;
-        kept.endpoint = None;
-        kept.model = None;
-    }
-    kept
-}
+/// A cell as the file keeps it, as the Video Generator's file keeps one
+/// too: a pointer to its step, or a draft's own prompt.
+pub use layers::cells::stored_cell;
 
 /// An encoded layer, shared by an image's cache and the writes using it.
 pub type Png = std::sync::Arc<Vec<u8>>;
@@ -1212,8 +1197,8 @@ mod tests {
         std::fs::write(&render, encode_png(2, 2, &[50u8; 16]).unwrap()).unwrap();
         let image = LayeredImage::blank(20, 10);
         let notes = Notes {
-            pins: vec![Pin { number: 2, x: 4.5, y: 3.0, text: "less rain".into() }],
-            marks: vec![Mark { points: vec![[1.0, 1.0], [9.0, 2.0]], width: 4.0, colour: layers::notes::RED }],
+            pins: vec![Pin { number: 2, x: 4.5, y: 3.0, text: "less rain".into(), at: None }],
+            marks: vec![Mark { points: vec![[1.0, 1.0], [9.0, 2.0]], width: 4.0, colour: layers::notes::RED, at: None }],
         };
         let settings = Settings { render: Some(Link { path: "previs.png".into(), sha256: "cd".into() }), see_through: true, opacity: 0.3, on: true };
         let path = dir.join("Notes.ipx");

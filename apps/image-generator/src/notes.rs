@@ -21,10 +21,10 @@ pub const MARK_WIDTH: f32 = 4.0;
 /// ig-notes-pin shows a card: about 320 at 100%.
 const CARD_WORDS: f32 = 320.0;
 
-/// A pin's radius, in image pixels: larger on a larger image, so a pin
-/// reads at any size, and the same wherever it is drawn.
+/// A pin's radius, in image pixels, as `layers::notes` has it for both
+/// workspaces.
 pub fn pin_radius(width: u32, height: u32) -> f32 {
-    (width.max(height) as f32 / 120.0).clamp(8.0, 48.0)
+    layers::notes::pin_radius(width, height)
 }
 
 /// The size of a card's words.
@@ -157,12 +157,10 @@ pub fn lay_over(layer: &Rgba, rect: Rect, rows: &mut [u8]) {
     }
 }
 
-/// A pin's number, white and bold, in the middle of its disc, drawn by
-/// `layers::label` as the views' labels are.
+/// A pin's number, white and bold, in the middle of its disc, as
+/// `layers::notes` draws it for both workspaces.
 fn number(image: &mut Rgba, pin: &Pin, radius: f32) {
-    let size = radius * 1.15;
-    let look = layers::label::Look { size, colour: [255, 255, 255, 255], bold: true };
-    layers::label::draw(image, &pin.number.to_string(), [pin.x, pin.y - layers::label::height(size) / 2.0], look, layers::label::Anchor::Centre);
+    layers::notes::draw_number(image, pin, radius);
 }
 
 /// Straight RGBA pixels drawn onto `image` with their corner at `corner`,
@@ -222,8 +220,8 @@ mod tests {
 
     fn notes() -> Notes {
         Notes {
-            pins: vec![Pin { number: 1, x: 100.0, y: 60.0, text: "less rain on the glass".into() }],
-            marks: vec![Mark { points: vec![[20.0, 150.0], [180.0, 150.0]], width: 4.0, colour: RED }],
+            pins: vec![Pin { number: 1, x: 100.0, y: 60.0, text: "less rain on the glass".into(), at: None }],
+            marks: vec![Mark { points: vec![[20.0, 150.0], [180.0, 150.0]], width: 4.0, colour: RED, at: None }],
         }
     }
 
@@ -256,7 +254,7 @@ mod tests {
     /// 320 pixels, and a card near the right edge stays inside the image.
     #[test]
     fn a_card_grows_with_its_words_then_wraps() {
-        let pin = |x: f32, words: &str| Pin { number: 1, x, y: 60.0, text: words.into() };
+        let pin = |x: f32, words: &str| Pin { number: 1, x, y: 60.0, text: words.into(), at: None };
         let short = card(&pin(40.0, "less rain on the glass"), 1920, 1080);
         let laid = text::lay(&short.text);
         assert!(short.text.width.is_none() && short.rect[2] >= laid.width, "a short note does not fit its card");
