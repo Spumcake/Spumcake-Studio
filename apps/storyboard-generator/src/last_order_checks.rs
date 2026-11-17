@@ -1,7 +1,7 @@
 //! M4.2's real-data checks: Last order's animatic, opened, retimed, and
 //! followed on a whole copy of Last order, with Skills' own scripts run
 //! where the host would run them. They run when `check.sh` finds Last order
-//! and a Spumcake-Skills checkout (`SPUMCAKE_LAST_ORDER`,
+//! and a Spumcake-Skills checkout (`LAST_ORDER`,
 //! `SPUMCAKE_SKILLS_SCRIPTS`); otherwise they say they were skipped, and
 //! why. With both set, a copy that cannot be made fails. One copy serves
 //! every check, put back as git holds it between them. Nothing here spends:
@@ -196,8 +196,8 @@ impl Copy {
 /// The copy, or a line saying the checks were skipped and why. A copy that
 /// cannot be made where both are set fails.
 fn copy_or_skip() -> Option<Copy> {
-    let (Some(last_order), Some(scripts)) = (std::env::var_os("SPUMCAKE_LAST_ORDER"), std::env::var_os("SPUMCAKE_SKILLS_SCRIPTS")) else {
-        eprintln!("skipped: Last order's checks need SPUMCAKE_LAST_ORDER and SPUMCAKE_SKILLS_SCRIPTS");
+    let (Some(last_order), Some(scripts)) = (std::env::var_os("LAST_ORDER"), std::env::var_os("SPUMCAKE_SKILLS_SCRIPTS")) else {
+        eprintln!("skipped: Last order's checks need LAST_ORDER and SPUMCAKE_SKILLS_SCRIPTS");
         return None;
     };
     Some(copy(PathBuf::from(last_order), PathBuf::from(scripts)).unwrap_or_else(|why| panic!("Last order could not be copied: {why}")))
@@ -207,7 +207,7 @@ fn copy_or_skip() -> Option<Copy> {
 #[test]
 fn last_order_on_a_test_copy() {
     let Some(copy) = copy_or_skip() else { return };
-    let checks: [(&str, fn(&Copy)); 8] = [
+    let checks: [(&str, fn(&Copy)); 9] = [
         ("opens and saves back unchanged", opens_from_its_step_and_saves_back_unchanged),
         ("the step decides, not the newest file", the_step_decides_not_the_newest_file),
         ("Studio's retime is what build-animatic assembles", studios_retime_is_what_build_animatic_assembles),
@@ -216,6 +216,7 @@ fn last_order_on_a_test_copy() {
         ("the step found by its skill", the_step_is_found_by_its_skill),
         ("drawing reaches the animatic through canon", drawing_reaches_the_animatic_through_canon),
         ("import and export the Skills way", import_and_export_the_skills_way),
+        ("playback is what the step's take is", playback_is_the_take),
     ];
     for (name, check) in checks {
         copy.reset();
@@ -353,9 +354,6 @@ fn studios_retime_is_what_build_animatic_assembles(copy: &Copy) {
     // workspace file gone, Skills alone assembles Studio's timing.
     let _ = std::fs::remove_dir_all(copy.project.join(protocol::PROJECT_DIR));
     let _ = std::fs::remove_dir_all(copy.project.join("work"));
-    // The step writes into `.build/`, which git never holds, so a clone has
-    // none: a copy made by copying the folder would. Skills is told.
-    std::fs::create_dir_all(copy.project.join(".build")).unwrap();
     let ran = copy.pipeline(&["rerun", "--step", "the animatic", "animatic", "--json"]).unwrap();
     let take: Value = ran.lines().rev().find_map(|line| serde_json::from_str(line).ok()).unwrap_or_else(|| panic!("rerun said: {ran}"));
     assert_eq!(take["stand_in"], json!(false), "{take}");
@@ -492,13 +490,12 @@ fn apart(a: &[u8], b: &[u8]) -> f64 {
 /// as "Shot 2: rough board", made from shot 2's keyframe; saved, the step
 /// assembles it, and `touches` follows the rough board to the animatic.
 fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
-    std::fs::create_dir_all(copy.project.join(".build")).unwrap();
-    // The animatic from the keyframes alone, assembled into .build/, which
-    // files nothing.
+    // The animatic from the keyframes alone, assembled beside the copy,
+    // which files nothing.
     let published = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: animatic'", "--read-only"]).unwrap();
     let assemble = copy.skills.join("skills/build-animatic/scripts/assemble.py");
-    copy.run(&assemble, &["prompts/resources/2026-11-14_16-07-animatic-assembly.json".to_string(), ".build/before.mp4".to_string()]).unwrap();
-    let before = copy.project.join(".build/before.mp4");
+    let before = copy.root.join("before.mp4");
+    copy.run(&assemble, &["prompts/resources/2026-11-14_16-07-animatic-assembly.json".to_string(), before.display().to_string()]).unwrap();
     let before = (frame_at(&before, 30), frame_at(&before, 85));
     let (mut server, tab) = opened(copy);
     let film = tool(&mut server, copy, &tab, "read_film", json!({}));
@@ -546,7 +543,6 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
 /// Check 10: a sound from outside is filed into the project, never into
 /// sounds/, and Export animatic video runs the step, never writing exports/.
 fn import_and_export_the_skills_way(copy: &Copy) {
-    std::fs::create_dir_all(copy.project.join(".build")).unwrap();
     let (mut server, tab) = opened(copy);
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
     assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
@@ -597,4 +593,75 @@ fn tool_in(server: &mut Server, copy: &Copy, tab: &str, group: &str, name: &str,
     }
     copy.host(server, replies);
     output
+}
+
+/// Each frame's loudness in decibels, from stereo samples at `rate`.
+fn loudness(samples: &[f32], rate: u32, frames: usize) -> Vec<f64> {
+    let per = (rate / 24) as usize * media::Sound::CHANNELS;
+    (0..frames)
+        .map(|frame| {
+            let part = samples.get(frame * per..((frame + 1) * per).min(samples.len())).unwrap_or_default();
+            let power = part.iter().map(|sample| f64::from(*sample) * f64::from(*sample)).sum::<f64>() / part.len().max(1) as f64;
+            10.0 * power.max(1e-12).log10()
+        })
+        .collect()
+}
+
+/// Check 9: Studio's playback of the animatic, its images and its mix, is
+/// what the step's take holds, within a tolerance for `assemble.py`'s
+/// scaling, padding, and encoding.
+fn playback_is_the_take(copy: &Copy) {
+    let (mut server, tab) = opened(copy);
+    let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
+    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    assert_eq!(film["animatic"]["state"], "done", "{}", film["animatic"]);
+    let take = copy.project.join(film["animatic"]["file"].as_str().unwrap());
+    // Studio's playback of the same animatic, as the stage and the mix
+    // play it.
+    let mut session = crate::session::Session::new();
+    session.set_project(&copy.project);
+    session.set_skills(true);
+    session.open_assembly(&copy.project.join("prompts/resources/2026-11-14_16-07-animatic-assembly.json")).unwrap();
+    let tracks = session.mix_tracks();
+    let mut plan = crate::export::plan(session.active_storyboard(), tracks.clone(), Some(copy.project.as_path()));
+    // Each hold, in its middle.
+    let held = [36usize, 86, 126, 171];
+    let mut decoded = media::Video::open(&take).unwrap();
+    let frames: Vec<media::Frame> = decoded.frames(0, plan.size).map(Result::unwrap).filter(|frame| held.contains(&(frame.index as usize))).collect();
+    assert_eq!(frames.len(), held.len(), "the take is missing frames");
+    // Each hold is near Studio's, and nearer its own than any other
+    // hold's, so a take with two holds swapped fails though the keyframes
+    // are alike.
+    let mut looker = crate::look::Looker::new();
+    let studio: Vec<Vec<u8>> = held.iter().map(|at| {
+        let shown = plan.frames[*at];
+        crate::export::pixels(&mut looker, &mut plan, shown)
+    }).collect();
+    for (index, frame) in frames.iter().enumerate() {
+        let distances: Vec<f64> = studio.iter().map(|image| apart(image, &frame.rgba)).collect();
+        let own = distances[index];
+        assert!(own < 4.0, "frame {} is {own:.2} apart from Studio's", frame.index);
+        for (other, distance) in distances.iter().enumerate().filter(|(other, _)| *other != index) {
+            assert!(own < *distance, "frame {} is nearer Studio's frame {} ({distance:.2}) than its own ({own:.2})", frame.index, held[other]);
+        }
+    }
+    // The sound, frame by frame, wherever it is heard.
+    let rate = 48_000;
+    let length = session.film().length() as usize;
+    let studio = loudness(&media::mix(&tracks, 0, length as u32, rate, (24, 1)), rate, length);
+    let made = loudness(&media::Sound::open(&take, rate).unwrap().samples, rate, length);
+    let mut compared = 0;
+    for (frame, (studio, made)) in studio.iter().zip(&made).enumerate() {
+        if *studio > -50.0 {
+            compared += 1;
+            assert!((studio - made).abs() <= 1.0, "frame {frame}: Studio's mix is {studio:.1} dB, the take's {made:.1} dB");
+        }
+    }
+    assert!(compared > length / 2, "only {compared} frames were heard");
+    // The comparison can tell: without Otis's lines, Studio's mix is more
+    // than 1 dB from the take where he speaks.
+    let bed: Vec<media::Track> = tracks.iter().take(1).cloned().collect();
+    let quiet = loudness(&media::mix(&bed, 0, length as u32, rate, (24, 1)), rate, length);
+    assert!(quiet.iter().zip(&made).any(|(quiet, made)| (quiet - made).abs() > 1.0), "the sound comparison cannot tell the voice is missing");
 }
