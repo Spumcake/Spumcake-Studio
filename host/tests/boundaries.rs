@@ -122,7 +122,9 @@ fn the_host_depends_on_no_layers_crate() {
 fn declared_tool_groups(program: &str) -> Vec<(String, protocol::ToolGroup)> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug").join(program);
+    // A test runs from `<build folder>/debug/deps`, beside the built
+    // programs, wherever the build folder is.
+    let path = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join(program);
     assert!(path.exists(), "{} is missing: run `cargo build` first", path.display());
     let mut child = Command::new(path)
         .stdin(Stdio::piped())

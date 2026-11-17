@@ -13,17 +13,32 @@ pub struct App {
 
 /// Folders that hold one folder per sub-application, in search order:
 /// `apps` beside the host's executable, then, in a development build, the
-/// workspace's own `apps` folder, found from the executable's own place.
+/// `apps` folder of the workspace that built it, then the one two folders
+/// above the executable.
 fn roots(exe_dir: &Path) -> Vec<PathBuf> {
     #[allow(unused_mut)]
     let mut roots = vec![exe_dir.join("apps")];
-    // `target/debug/inpainter` sits two folders below the workspace, which
-    // stays true when the workspace is moved after it was built.
+    // Several worktrees may share one build folder, so the workspace is the
+    // one the host was built from, not one found from the executable.
+    #[cfg(debug_assertions)]
+    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../apps"));
+    // `target/debug/inpainter` sits two folders below its own workspace,
+    // which stays true when that workspace is moved after it was built.
     #[cfg(debug_assertions)]
     if let Some(workspace) = exe_dir.parent().and_then(Path::parent) {
         roots.push(workspace.join("apps"));
     }
     roots
+}
+
+/// Where the build put the workspace's programs: beside this test or this
+/// program's own folder, whichever build folder Cargo was given, since a
+/// test runs from `<build folder>/debug/deps`.
+#[cfg(test)]
+pub(crate) fn built_programs() -> PathBuf {
+    let exe = std::env::current_exe().expect("the running test");
+    let dir = exe.parent().expect("its folder");
+    if dir.file_name().is_some_and(|name| name == "deps") { dir.parent().expect("the profile folder").to_path_buf() } else { dir.to_path_buf() }
 }
 
 /// Every registered sub-application, ordered by id. An id found again in a

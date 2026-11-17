@@ -29,7 +29,7 @@ mod tests {
             if manifest.hidden {
                 continue;
             }
-            let program = root().join("target/debug").join(&manifest.executable);
+            let program = crate::apps::built_programs().join(&manifest.executable);
             assert!(program.exists(), "{} is missing: run `cargo build` first", program.display());
             let mut child = Command::new(program).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("start");
             let _ = child.stdin.take().expect("stdin").write_all(b"{\"type\":\"shutdown\"}\n");

@@ -73,9 +73,7 @@ fn ledger_program(dir: &Path) -> PathBuf {
 }
 
 fn built(program: &str) -> PathBuf {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../target/debug")
-        .join(program);
+    let path = crate::apps::built_programs().join(program);
     assert!(path.exists(), "{} is missing: run `cargo build` first", path.display());
     path
 }

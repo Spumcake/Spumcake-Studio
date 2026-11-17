@@ -710,11 +710,11 @@ mod tests {
     /// can be looked at; and the skills a setup lists, linked or not, are
     /// found with the setup's note, their repositories readable, as the H3
     /// prompt skill is read before a shot is planned. Runs when
-    /// SPUMCAKE_LAST_ORDER names a copy of Last order, and
+    /// LAST_ORDER names a copy of Last order, and
     /// SPUMCAKE_SKILL_FOLDERS the skill folders, separated by `:`.
     #[test]
     fn last_order_reads_as_it_stands() {
-        let Ok(folder) = std::env::var("SPUMCAKE_LAST_ORDER") else { return };
+        let Ok(folder) = std::env::var("LAST_ORDER") else { return };
         let folder = PathBuf::from(folder);
         let folders: Vec<String> = std::env::var("SPUMCAKE_SKILL_FOLDERS").unwrap_or_default().split(':').filter(|f| !f.is_empty()).map(String::from).collect();
         let skills = find_skills(&folders.iter().map(PathBuf::from).collect::<Vec<_>>());
