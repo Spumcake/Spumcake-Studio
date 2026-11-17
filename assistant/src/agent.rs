@@ -821,6 +821,21 @@ fn compact_request(messages: &mut [Value]) {
                 }
             }
         }
+        // One turn's own images can pass it too: its earlier images give
+        // way, its last always kept.
+        if bytes > IMAGE_BYTES
+            && let Some(parts) = messages.get_mut(latest).and_then(|message| message.get_mut("content")).and_then(Value::as_array_mut)
+        {
+            let last = parts.iter().rposition(|part| part.pointer("/image_url/url").is_some()).unwrap_or(0);
+            for part in &mut parts[..last] {
+                let Some(size) = part.pointer("/image_url/url").and_then(Value::as_str).map(str::len) else { continue };
+                *part = json!({ "type": "text", "text": EARLIER_IN_TURN_IMAGE });
+                bytes -= size;
+                if bytes <= IMAGE_BYTES_AFTER_CUT {
+                    break;
+                }
+            }
+        }
     }
     let mut total: usize = messages.iter().map(weight).sum();
     if total <= REQUEST_BUDGET {
@@ -885,6 +900,19 @@ mod compaction {
         assert!(total <= REQUEST_BUDGET, "the request was left at {total}");
     }
 
+    /// Catches one turn that looks at many images at once sending a request
+    /// too large: its earlier images give way, its last is kept.
+    #[test]
+    fn one_turns_images_stay_within_what_a_service_accepts() {
+        let mut parts = vec![json!({ "type": "text", "text": format!("{IMAGES_LEAD}`look_at_file` returned:") })];
+        parts.extend((0..10).map(|n| image_part("image/png", &format!("{n:02}{}", "A".repeat(2_000_000)))));
+        let mut messages = vec![call("seen", "inpainter__project__look_at_file"), output("seen", "looked"), json!({ "role": "user", "content": parts })];
+        compact_request(&mut messages);
+        let bytes: usize = messages.iter().map(image_bytes).sum();
+        assert!(bytes <= IMAGE_BYTES, "one turn still carries {bytes} bytes of images");
+        assert!(messages[2].to_string().contains("09AAAA"), "the turn's last image was cut");
+    }
+
     /// Catches a chain that looks at many keyframes sending a request too
     /// large for a service to accept: twenty 2 MB images keep the request's
     /// images under the byte limit, the latest whole, and the skill whole.
@@ -912,6 +940,7 @@ mod compaction {
 // the owner saw on 2026-10-30.
 const EARLIER: &str = "This tool's output was seen when an earlier request ran and is no longer kept here. The replies after it were based on it. To know what is there now, read or look again.";
 const IMAGES_LEAD: &str = "The images ";
+const EARLIER_IN_TURN_IMAGE: &str = "[An image a tool returned in this turn was seen and is no longer kept, to save space. To see it again, look again.]";
 const EARLIER_IN_REQUEST: &str = "This tool's output was seen earlier in this request and is no longer kept here, to save space. The replies after it were based on it. To know what is there now, read or look again.";
 const EARLIER_IN_REQUEST_IMAGES: &str = "[The images the tools returned here were seen earlier in this request; they are no longer kept, to save space. The replies after them were based on them. To see what is there now, look again.]";
 const EARLIER_IMAGES: &str = "[The images the tools returned here were seen when an earlier request ran; they are no longer kept, to save space. The replies after them were based on them. To see what is there now, look again.]";
