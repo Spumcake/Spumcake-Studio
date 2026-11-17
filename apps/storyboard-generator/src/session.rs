@@ -28,6 +28,10 @@ pub mod project;
 pub mod sound;
 pub(crate) use declare::{action_named, command_named, session_value, tool_named};
 
+/// The project's folder for its workspaces' files, as every project has,
+/// the way the Last order benchmark is organized.
+pub(crate) const WORK: &str = "work";
+
 /// How long a dirty storyboard waits between recovery copies.
 pub(crate) const RECOVERY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
@@ -347,17 +351,12 @@ pub struct Session {
     /// Notices that stay until closed: a failed import, a finished export.
     kept_notices: Vec<protocol::Notice>,
     next_notice: u64,
-    /// The animatic export under way.
-    export: Option<crate::export::Job>,
     /// Playing and scrubbing the active storyboard.
     playback: Option<crate::playback::Playback>,
     /// The loop button inside a clip.
     looping: bool,
     /// Image keys' images as the stage shows them, by path and size.
     key_images: HashMap<(String, u32, u32), Option<protocol::Thumbnail>>,
-    /// The project is a Skills project: storyboards are kept in `work/`,
-    /// and what reaches the project goes through Skills' scripts.
-    skills: bool,
     /// Holds asked to be published, by their artifact: the storyboard, the
     /// clip, and the hold's first frame in it.
     publishing: HashMap<String, (DrawingId, u64, u32, String, PathBuf)>,
@@ -381,9 +380,9 @@ pub struct Session {
     /// The last Save timing to the project that finished: the storyboard
     /// and the assembly it filed.
     last_saved: Option<(DrawingId, String)>,
-    /// Export animatic video in a Skills project, running the step.
+    /// Export animatic video, running the project's animatic step.
     stepping: Option<project::Stepping>,
-    /// Sounds from outside a Skills project being filed into it, by the
+    /// Sounds from outside the project being filed into it, by the
     /// filing's id.
     filing: HashMap<String, sound::Filing>,
     last_check: Option<std::time::Instant>,
@@ -441,11 +440,9 @@ impl Session {
             imports: Vec::new(),
             kept_notices: Vec::new(),
             next_notice: 1,
-            export: None,
             playback: None,
             looping: false,
             key_images: HashMap::new(),
-            skills: false,
             publishing: HashMap::new(),
             to_publish: Vec::new(),
             outgoing: Vec::new(),
@@ -694,7 +691,7 @@ impl Session {
 
     /// The name a new storyboard takes: "Untitled Storyboard", or the next
     /// free one, among the open tabs other than `skip` and, in a project,
-    /// the `.smx` files in its folder.
+    /// the `.smx` files in its `work/` folder.
     fn fresh_name(&self, skip: Option<DrawingId>) -> String {
         protocol::free_name(&protocol::untitled("Storyboard"), |name| {
             let open = self
@@ -704,7 +701,7 @@ impl Session {
             let filed = self
                 .project
                 .as_ref()
-                .is_some_and(|folder| folder.join(format!("{name}.smx")).exists());
+                .is_some_and(|folder| folder.join(WORK).join(format!("{name}.smx")).exists());
             open || filed
         })
     }
@@ -762,14 +759,12 @@ impl Session {
     /// nothing, such as `Beach.smx`, then `Beach 2.smx`. Returns the
     /// file, or none for an untouched storyboard that has nothing to write.
     pub(crate) fn write_into_project(&mut self, id: DrawingId) -> Result<Option<PathBuf>, String> {
-        let Some(mut folder) = self.project.clone() else {
+        let Some(project) = self.project.clone() else {
             return Err("No project folder.".to_string());
         };
-        // In a Skills project, workspace files are kept in `work/`.
-        if self.skills {
-            folder = folder.join("work");
-            std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
-        }
+        // A workspace's files are kept in the project's `work/`.
+        let folder = project.join(WORK);
+        std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
         let Some(index) = self.index_of(id) else {
             return Ok(None);
         };

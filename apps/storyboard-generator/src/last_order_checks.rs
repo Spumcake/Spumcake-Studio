@@ -269,8 +269,9 @@ fn command(server: &mut Server, copy: &Copy, tab: &str, id: &str) -> Vec<AppMess
 fn opened(copy: &Copy) -> (Server, String) {
     let mut server = Server::new(None);
     server.greeting();
-    server.handle(HostMessage::Project { folder: copy.project.display().to_string(), skills: true });
-    let seen = command(&mut server, copy, "1", "open_animatic");
+    // Told the project, it shows the project's animatic.
+    let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string(), skills: true }).unwrap();
+    let seen = copy.host(&mut server, replies);
     let tab = shown_tab(&seen).expect("a tab");
     (server, tab)
 }
@@ -455,24 +456,22 @@ fn claude_codes_retime_needs_none_of_studios_files(copy: &Copy) {
 }
 
 /// Check 12: the animatic step is found by its skill and its script,
-/// whatever it is called; with two, the one named opens.
+/// whatever it is called; with two, the first in its chain is shown, and
+/// the storyboard takes the film's name, Last order's own element.
 fn the_step_is_found_by_its_skill(copy: &Copy) {
     copy.pipeline(&["sql", "UPDATE step SET name = 'the cut' WHERE chain = 'the animatic' AND name = 'animatic'"]).unwrap();
-    let (mut server, tab) = opened(copy);
-    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
-    assert_eq!(film["project_animatic"]["step"], "the animatic: the cut");
-    // A second animatic, a shot shorter at the start.
+    // A second animatic after it, a shot shorter at the start.
     let mut second = last_orders_assembly(copy);
     second.frames[0].end = 2.0;
     second.frames[1].start = 2.0;
     let file = file_assembly(copy, &second);
     let script = crate::assembly::repoint(&step_named(copy, "the cut").0, &file).unwrap();
     copy.pipeline(&["step", "the animatic", "the other cut", "--order", "99", "--skill", "build-animatic", "--script", &script]).unwrap();
-    let (_, other) = tool_and_tab(&mut server, copy, &tab, "open_animatic", json!({ "step": "the other cut" }));
-    assert_ne!(other, tab, "the second animatic did not open");
-    let film = tool(&mut server, copy, &other, "read_film", json!({}));
-    assert_eq!(film["project_animatic"]["step"], "the animatic: the other cut");
-    assert_eq!(spans(&film)[0], (0, 48));
+    let (mut server, tab) = opened(copy);
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    assert_eq!(film["project_animatic"]["step"], "the animatic: the cut");
+    assert_eq!(spans(&film)[0], (0, 72));
+    assert_eq!(film["title"], "Last order");
 }
 
 /// The decoded video's frame `frame`, small.
@@ -487,7 +486,7 @@ fn apart(a: &[u8], b: &[u8]) -> f64 {
 }
 
 /// Check 4: a mark drawn on shot 2 is refused until its hold is published
-/// as "Shot 2: rough board", made from shot 2's keyframe; saved, the step
+/// as "Last order: rough board, Shot 2", made from shot 2's keyframe; saved, the step
 /// assembles it, and `touches` follows the rough board to the animatic.
 fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
     // The animatic from the keyframes alone, assembled beside the copy,
@@ -511,12 +510,12 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
     assert_eq!(refused["error"], "Shot 2 has drawing that is not published yet. Publish it first.");
     tool(&mut server, copy, &tab, "edit_clip", json!({ "clip": second }));
     let asked = tool(&mut server, copy, &tab, "publish_hold", json!({}));
-    assert_eq!(asked["made"]["artifact"], "Shot 2: rough board", "{asked}");
+    assert_eq!(asked["made"]["artifact"], "Last order: rough board, Shot 2", "{asked}");
     tool(&mut server, copy, &tab, "leave_clip", json!({}));
-    let made_from = copy.pipeline(&["sql", "SELECT source FROM made_from WHERE artifact = 'Shot 2: rough board'", "--read-only"]).unwrap();
+    let made_from = copy.pipeline(&["sql", "SELECT source FROM made_from WHERE artifact = 'Last order: rough board, Shot 2'", "--read-only"]).unwrap();
     assert_eq!(made_from.trim(), "Last order: keyframe, the bell");
     // Filed with the keyframe as its input, and not from work/.
-    let board = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Shot 2: rough board'", "--read-only"]).unwrap();
+    let board = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: rough board, Shot 2'", "--read-only"]).unwrap();
     let record = copy.run(&copy.scripts.join("request.py"), &["show".to_string(), board.trim().to_string()]).unwrap();
     assert!(record.contains("library/2026-11-14_16-04-keyframe-the-bell.png") && !record.contains("\"work/"), "{record}");
     // Export animatic video saves the timing, runs the step, and publishes
@@ -524,9 +523,9 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
     assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
     let (_, refs) = step(copy);
-    assert_eq!(refs[1]["artifact"], "Shot 2: rough board", "{refs}");
+    assert_eq!(refs[1]["artifact"], "Last order: rough board, Shot 2", "{refs}");
     let take = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: animatic'", "--read-only"]).unwrap();
-    let touched = copy.pipeline(&["touches", "--artifact", "Shot 2: rough board", "--json"]).unwrap();
+    let touched = copy.pipeline(&["touches", "--artifact", "Last order: rough board, Shot 2", "--json"]).unwrap();
     assert!(touched.contains("Last order: animatic"), "{touched}");
     assert_ne!(take.trim(), published.trim(), "the take was not published");
     let after = copy.project.join(take.trim());
@@ -621,8 +620,7 @@ fn playback_is_the_take(copy: &Copy) {
     // play it.
     let mut session = crate::session::Session::new();
     session.set_project(&copy.project);
-    session.set_skills(true);
-    session.open_assembly(&copy.project.join("prompts/resources/2026-11-14_16-07-animatic-assembly.json")).unwrap();
+    session.open_assembly(&copy.project.join("prompts/resources/2026-11-14_16-07-animatic-assembly.json"), "Last order").unwrap();
     let tracks = session.mix_tracks();
     let mut plan = crate::export::plan(session.active_storyboard(), tracks.clone(), Some(copy.project.as_path()));
     // Each hold, in its middle.

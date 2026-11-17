@@ -36,7 +36,7 @@ pub fn group() -> ToolGroup {
         id: "clips".into(),
         name: "Film and clips".into(),
         description: "Make and time the film's clips and its sound, and inside a clip its layers, keyframes, holds, labels, and onion skin, as the timeline and its pages do; export the animatic.".into(),
-        instructions: "A storyboard holds a film: clips on the Shots track, each one shot, played in order. Inside a clip are layers, top to bottom, each with keyframes: a keyframe's drawing holds until the next keyframe, and a blank keyframe holds nothing. Frames count from 1, on the film from its start and in a clip from the clip's start. Drawing happens inside a clip, on the active layer at the playhead: open a clip with edit_clip, choose a frame with go_to_frame and a layer with select_layer, then use the Draw by hand tools; go back with leave_clip. read_film says where the person is, every clip with its layers and keys, and each clip's item, which other workspaces name its first and last frames by. Retiming a clip's end moves the clips after it; moving clips with push moves those they land on, and without it covers them. Moving frames with push moves the frames after them; without it, they replace the frames they land on. Under the Shots track are Sound tracks: import_sound copies a sound or video file into the project and places it, and read_sound gives how loud the film's sound is on each frame, so clips and a mouth's keys can be timed to it. A locked track refuses changes until set_track unlocks it; a muted Sound track and a hidden Shots track are left out of what plays and what is exported. export_animatic writes the film with its sound as a video into the project's exports folder; list_items says when it is done. All the changes of one request are taken back by one undo.".into(),
+        instructions: "A storyboard holds a film: clips on the Shots track, each one shot, played in order. Inside a clip are layers, top to bottom, each with keyframes: a keyframe's drawing holds until the next keyframe, and a blank keyframe holds nothing. Frames count from 1, on the film from its start and in a clip from the clip's start. Drawing happens inside a clip, on the active layer at the playhead: open a clip with edit_clip, choose a frame with go_to_frame and a layer with select_layer, then use the Draw by hand tools; go back with leave_clip. read_film says where the person is, every clip with its layers and keys, and each clip's item, which other workspaces name its first and last frames by. Retiming a clip's end moves the clips after it; moving clips with push moves those they land on, and without it covers them. Moving frames with push moves the frames after them; without it, they replace the frames they land on. Under the Shots track are Sound tracks: import_sound places a sound or video's sound, filing one from outside into the project first, and read_sound gives how loud the film's sound is on each frame, so clips and a mouth's keys can be timed to it. A locked track refuses changes until set_track unlocks it; a muted Sound track and a hidden Shots track are left out of what plays and what is exported. The storyboard is the project's animatic: when the project has one, read_film's project_animatic names its step and assembly. save_timing writes its timing to that step, and export_animatic runs the step to make the video; list_items says when it is done. All the changes of one request are taken back by one undo.".into(),
         tools: vec![
             tool("read_film", "The film as data: where the person is, the storyboard's settings, the onion skin, the selection, and every clip with its timing, notes, items, layers, keys, and marks.", json!({}), &[]),
             tool("add_clip", "Add a clip, with one blank layer. Clips it lands on move later.", json!({ "start": integer("The film's frame it starts on. Leave out for after the last clip."), "length": integer("Frames. Default 48, two seconds.") }), &[]),
@@ -68,7 +68,7 @@ pub fn group() -> ToolGroup {
             tool("remove_mark", "Remove a label or a comment.", json!({ "layer": integer("The layer's id."), "mark": integer("The mark's id.") }), &["layer", "mark"]),
             tool("set_onion_skin", "Turn onion skin on or off, and set how many keys before and after it shows, its starting opacity, how much it fades, and whether it counts keys only. A view aid: not an undo step.", json!({ "on": { "type": "boolean" }, "before": integer("0 to 9."), "after": integer("0 to 9."), "opacity": { "type": "number", "minimum": 0, "maximum": 1 }, "fade": { "type": "number", "minimum": 0, "maximum": 1 }, "keys_only": { "type": "boolean" } }), &[]),
             tool("set_storyboard", "Set the storyboard's title and scene, which the sheet's header shows, and the film's frame size and paper.", json!({ "title": { "type": "string" }, "scene": { "type": "string" }, "width": integer("Frame width."), "height": integer("Frame height."), "paper": integer("0: Japanese layout paper, 16:9.") }), &[]),
-            tool("import_sound", "Import a sound, or a video's sound, from a file: it is copied into the project's sounds folder and placed whole on a Sound track, a new one when none has room. In a Skills project, a sound already in the project is placed where it is, and one from outside is filed into the project first, then placed.", json!({ "path": { "type": "string", "description": "The file's path." }, "track": integer("The Sound track's id. Leave out for the first with room."), "frame": integer("The film's frame it starts on, from 1. Leave out for the playhead.") }), &["path"]),
+            tool("import_sound", "Import a sound, or a video's sound, from a file and place it whole on a Sound track, a new one when none has room. A sound already in the project, such as a take in library/, is placed where it is; one from outside is filed into the project with request.py resource first, then placed.", json!({ "path": { "type": "string", "description": "The file's path." }, "track": integer("The Sound track's id. Leave out for the first with room."), "frame": integer("The film's frame it starts on, from 1. Leave out for the playhead.") }), &["path"]),
             tool("add_sound_track", "Add an empty Sound track under the others.", json!({}), &[]),
             tool("rename_sound_track", "Rename a Sound track.", json!({ "track": integer("The Sound track's id."), "name": { "type": "string" } }), &["track", "name"]),
             tool("delete_sound_track", "Delete a Sound track and the sounds on it.", json!({ "track": integer("The Sound track's id.") }), &["track"]),
@@ -77,18 +77,16 @@ pub fn group() -> ToolGroup {
             tool("move_sound", "Move a sound to a frame of the film, and to another Sound track.", json!({ "sound": integer("The sound's id."), "frame": integer("The film's frame it starts on, from 1."), "track": integer("The Sound track it moves to. Leave out to stay."), "push": { "type": "boolean", "description": "Move the sounds it lands on later instead of covering them. Default true." } }), &["sound", "frame"]),
             tool("trim_sound", "Set where a sound starts on the film, where it starts inside its own sound, and its length, as dragging its edges and its page do.", json!({ "sound": integer("The sound's id."), "at": integer("The film's frame it starts on, from 1."), "from": integer("The frame of its own sound it starts from, from 1."), "length": integer("Frames.") }), &["sound"]),
             tool("set_sound_volume", "Set a sound's volume, as its page does.", json!({ "sound": integer("The sound's id."), "volume": { "type": "number", "minimum": 0, "maximum": 1 } }), &["sound", "volume"]),
-            tool("delete_sound", "Take a sound off its track. Its file stays in the sounds folder.", json!({ "sound": integer("The sound's id.") }), &["sound"]),
+            tool("delete_sound", "Take a sound off its track. Its file stays where it is in the project.", json!({ "sound": integer("The sound's id.") }), &["sound"]),
             tool("set_listening_volume", "Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step.", json!({ "volume": { "type": "number", "minimum": 0, "maximum": 1 } }), &["volume"]),
             tool("read_sound", "How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound.", json!({ "start": integer("The film's first frame, from 1."), "end": integer("The film's last frame, from 1.") }), &["start", "end"]),
-            tool("export_animatic", "Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done. In a Skills project, the project's animatic step makes it instead, after the timing is saved when it differs, and its take is offered for publishing.", json!({}), &[]),
-            tool("cancel_export", "Cancel the export under way.", json!({}), &[]),
+            tool("export_animatic", "Export the animatic: the project's animatic step makes it again, as build-animatic does, after the timing is saved when it differs, and its take is offered for publishing. Returns the step at once; list_items says when it is done.", json!({}), &[]),
             tool("list_items", "Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed.", json!({}), &[]),
             tool("insert_image_key", "Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does.", json!({ "image": { "type": "string", "description": "The image's path in the project, such as library/keyframe.png." } }), &["image"]),
-            tool("publish_hold", "In a Skills project, publish the open clip's hold under the playhead, drawing and all, as the rough board \"<shot>: rough board\", as Publish hold does, so the animatic can use it. The user approves it on the publish card.", json!({}), &[]),
-            tool("open_animatic", "In a Skills project, open the project's animatic as a storyboard: the assembly its build-animatic step names, with its keyframes as image keys and its sound. It opens when the project answers; read_film then shows it.", json!({ "step": { "type": "string", "description": "The step's name, when the project has several animatics. Leave out for the first." } }), &[]),
-            tool("save_timing", "In a Skills project, save the open animatic's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published.", json!({}), &[]),
+            tool("publish_hold", "Publish the open clip's hold under the playhead, drawing and all, as its rough board, as Publish hold does, so the animatic can use it. The user approves it on the publish card.", json!({}), &[]),
+            tool("save_timing", "Save the storyboard's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published.", json!({}), &[]),
             tool("follow_retime", "Take the timing the project's animatic step now names, after it was retimed in another tool, as one undo step, as Follow does.", json!({}), &[]),
-            tool("render_again", "Render an item again from what made it: the animatic is exported again.", json!({ "item": { "type": "string", "description": "The item's id, such as \"animatic\"." } }), &["item"]),
+            tool("render_again", "Render an item again from what made it: the animatic's step runs again.", json!({ "item": { "type": "string", "description": "The item's id, such as \"animatic\"." } }), &["item"]),
         ],
     }
 }
@@ -483,9 +481,9 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                     Some(_) => Some(frame(input, "frame")?),
                     None => None,
                 };
-                // In a Skills project, a sound from outside is filed first,
-                // through the host, and placed when it is.
-                if session.outside_skills_project(std::path::Path::new(path)) {
+                // A sound from outside the project is filed first, through
+                // the host, and placed when it is.
+                if session.outside_project(std::path::Path::new(path)) {
                     session.start_import(std::path::PathBuf::from(path));
                     made = json!({ "filing": path, "note": "It is filed into the project with request.py resource, then placed at the playhead; read_film shows it once it is." });
                 } else {
@@ -551,14 +549,9 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 return Ok(json!({ "start": start + 1, "loudness": loudness }));
             }
             "export_animatic" => {
-                let file = session.start_export()?;
-                made = if session.is_skills() {
-                    json!({ "step": file, "note": "The project's animatic step runs again, after the timing is saved when it differs; the user approves it on the plan card, then its take on the publish card. list_items says when it is done." })
-                } else {
-                    json!({ "file": file, "animatic": session.animatic_state()["item"] })
-                };
+                let step = session.start_export()?;
+                made = json!({ "step": step, "note": "The project's animatic step runs again, after the timing is saved when it differs; the user approves it on the plan card, then its take on the publish card. list_items says when it is done." });
             }
-            "cancel_export" => changed(session.cancel_export(), "no export is under way")?,
             "list_items" => {
                 let path = session.animatic_state()["item"]["path"].as_str().map(str::to_string);
                 let Some(path) = path else {
@@ -587,12 +580,8 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
             }
             "publish_hold" => {
                 in_clip(session)?;
-                if !session.is_skills() {
-                    return Err("only a Skills project publishes holds".to_string());
-                }
                 made = json!({ "artifact": session.publish_hold()? });
             }
-            "open_animatic" => session.open_animatic(text(input, "step"))?,
             "save_timing" => {
                 session.save_timing()?;
                 made = json!({ "saving": true, "note": "The user approves the step's edit. read_film's project_animatic says when it is saved: saved names the new assembly, and step_uses_it says whether the step now uses it." });
@@ -602,8 +591,7 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 if text(input, "item") != Some(crate::board::ANIMATIC) {
                     return Err("only the animatic is rendered again here; a clip's frames are drawn, not rendered".to_string());
                 }
-                let file = session.start_export()?;
-                made = if session.is_skills() { json!({ "step": file }) } else { json!({ "file": file }) };
+                made = json!({ "step": session.start_export()? });
             }
             _ => return Err(format!("Storyboard Generator has no tool clips__{tool}")),
         }

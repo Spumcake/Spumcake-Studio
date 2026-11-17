@@ -1,8 +1,9 @@
-//! The animatic video this workspace exports itself: the film's frames, as
-//! playback shows them, with its sound, encoded by `media`. An export is an
-//! item of the storyboard, made from the cut and each clip's frames; what it
-//! was made from is kept beside the film, never in its undo history, so an
-//! undo never loses it.
+//! What playback shows, frame by frame, and the animatic the project's step
+//! made: the film's frames drawn as the stage shows them, for playback, for
+//! a hold published as a rough board, and for checks against the step's
+//! take. The animatic is an item of the storyboard, made from the cut and
+//! each clip's frames; what it was made from is kept beside the film, never
+//! in its undo history, so an undo never loses it.
 
 use serde_json::{Value, json};
 
@@ -51,17 +52,7 @@ use crate::film::Film;
 use crate::look::Looker;
 use crate::record::Record;
 use draw::document::SceneMark;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
-
-/// The project's folder exports go in.
-pub const FOLDER: &str = "exports";
-/// A keyframe each second, so the file scrubs well.
-const KEYFRAMES: u32 = crate::film::FPS;
-/// Frames mixed at once while exporting.
-const SOUND_CHUNK: u32 = crate::film::FPS;
+use std::path::Path;
 
 /// The field's white, where a hidden Shots track shows nothing.
 const WHITE: [u8; 3] = [255, 255, 255];
@@ -199,146 +190,12 @@ fn placed(rendered: &[u8], (w, h): (u32, u32), (width, height): (u32, u32)) -> V
     out
 }
 
-/// An export under way on a thread of its own.
-pub struct Job {
-    pub storyboard: draw::document::DrawingId,
-    /// Its file, relative to the project.
-    pub file: String,
-    pub total: u32,
-    /// What it is made from, with the fingerprints they had at its start.
-    pub sources: Vec<(String, String)>,
-    written: Arc<AtomicU32>,
-    cancel: Arc<AtomicBool>,
-    result: Receiver<Result<String, String>>,
-}
-
-/// How a poll found an export.
-pub enum Polled {
-    Running,
-    /// Finished: what it was made from, for the storyboard to keep.
-    Done(Exported),
-    Failed(String),
-}
-
-impl Job {
-    pub fn written(&self) -> u32 {
-        self.written.load(Ordering::Relaxed)
-    }
-
-    pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-    }
-
-    pub fn poll(&self) -> Polled {
-        match self.result.try_recv() {
-            Err(TryRecvError::Empty) => Polled::Running,
-            Err(TryRecvError::Disconnected) => Polled::Failed("The export stopped unexpectedly.".to_string()),
-            Ok(Err(reason)) => Polled::Failed(reason),
-            Ok(Ok(bytes)) => Polled::Done(Exported { file: self.file.clone(), bytes, sources: self.sources.clone() }),
-        }
-    }
-}
-
-/// The export's file for a film titled `title`, relative to the project:
-/// "exports/The Last Signal — animatic.mp4".
-pub fn file_for(title: &str) -> String {
-    let title: String = title.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '\0') { ' ' } else { c }).collect();
-    let title = title.trim();
-    let title = if title.is_empty() { "Untitled Storyboard" } else { title };
-    format!("{FOLDER}/{title} — animatic.mp4")
-}
-
-/// Starts writing `plan` to `file` in `project`. The previous export of
-/// that name stays whole until this one finishes.
-pub fn start(
-    plan: Plan,
-    project: &Path,
-    file: String,
-    storyboard: draw::document::DrawingId,
-    sources: Vec<(String, String)>,
-) -> Job {
-    let written = Arc::new(AtomicU32::new(0));
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (send, result) = std::sync::mpsc::channel();
-    let total = plan.frames.len() as u32;
-    let path = project.join(&file);
-    let (counter, stop) = (written.clone(), cancel.clone());
-    std::thread::spawn(move || {
-        let _ = send.send(write(plan, &path, &counter, &stop));
-    });
-    Job { storyboard, file, total, sources, written, cancel, result }
-}
-
-/// Writes the animatic. Returns its bytes' fingerprint.
-fn write(mut plan: Plan, path: &Path, written: &AtomicU32, cancel: &AtomicBool) -> Result<String, String> {
-    if plan.frames.is_empty() {
-        return Err("The film has no clips to export.".to_string());
-    }
-    if let Some(folder) = path.parent() {
-        std::fs::create_dir_all(folder).map_err(|error| crate::store::reason(&error))?;
-    }
-    let settings = media::Settings {
-        width: plan.size.0,
-        height: plan.size.1,
-        rate: crate::sounds::fps(),
-        keyframes: KEYFRAMES,
-        sound: (!plan.tracks.is_empty()).then_some((crate::sounds::RATE, 2)),
-    };
-    let mut encoder = media::Encoder::create(path, settings).map_err(|error| error.to_string())?;
-    let mut looker = Looker::new();
-    // Each image is drawn once and kept while the frames that hold it are
-    // written, which come one after another.
-    let mut drawn: Option<(usize, Vec<u8>)> = None;
-    let length = plan.frames.len() as u32;
-    let frames = plan.frames.clone();
-    for (frame, shown) in frames.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            // Dropping the encoder removes what was written.
-            return Err("The export was cancelled.".to_string());
-        }
-        let frame = frame as u32;
-        if !plan.tracks.is_empty() && frame % SOUND_CHUNK == 0 {
-            let frames = SOUND_CHUNK.min(length - frame);
-            let samples = media::mix(&plan.tracks, frame, frames, crate::sounds::RATE, crate::sounds::fps());
-            encoder.sound(&samples).map_err(|error| error.to_string())?;
-        }
-        if let Shown::Image(index) = shown {
-            if drawn.as_ref().is_none_or(|(at, _)| at != index) {
-                drawn = Some((*index, pixels(&mut looker, &mut plan, *shown)));
-            }
-            let (_, pixels) = drawn.as_ref().expect("drawn above");
-            encoder.frame(pixels).map_err(|error| error.to_string())?;
-        } else {
-            encoder.frame(&pixels(&mut looker, &mut plan, *shown)).map_err(|error| error.to_string())?;
-        }
-        written.store(encoder.frames_written(), Ordering::Relaxed);
-    }
-    encoder.finish().map_err(|error| error.to_string())?;
-    let bytes = std::fs::read(path).map_err(|error| crate::store::reason(&error))?;
-    Ok(protocol::fingerprint(&bytes))
-}
-
-/// The exported file, checked against what was recorded, copied to the
-/// render path named by the animatic's fingerprint, never over an
-/// existing one. Returns its path in the project and its fingerprint.
+/// The step's take, checked against what was recorded. Returns its path in
+/// the project, where the step filed it, and the animatic's fingerprint.
 pub fn render(project: &Path, exported: &Exported) -> Result<(String, String), String> {
-    let source = project.join(&exported.file);
-    let bytes = std::fs::read(&source).ok().filter(|bytes| protocol::fingerprint(bytes) == exported.bytes);
-    let Some(bytes) = bytes else {
+    let unchanged = std::fs::read(project.join(&exported.file)).is_ok_and(|bytes| protocol::fingerprint(&bytes) == exported.bytes);
+    if !unchanged {
         return Err("The animatic video has been moved or replaced. Export it again.".to_string());
-    };
-    let fingerprint = exported.fingerprint();
-    let relative = format!("{}/renders/storyboard-generator/{}-{fingerprint}.mp4", protocol::PROJECT_DIR, crate::board::ANIMATIC);
-    let path: PathBuf = project.join(&relative);
-    if !path.is_file() {
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder).map_err(|error| crate::store::reason(&error))?;
-        }
-        std::fs::write(&path, bytes).map_err(|error| crate::store::reason(&error))?;
     }
-    Ok((relative, fingerprint))
+    Ok((exported.file.clone(), exported.fingerprint()))
 }

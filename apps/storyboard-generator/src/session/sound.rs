@@ -24,7 +24,7 @@ pub struct Import {
     result: Receiver<Result<Imported, String>>,
 }
 
-/// A sound from outside a Skills project, copied into `work/` and being
+/// A sound from outside the project, copied into `work/` and being
 /// filed into the project by the host: placed once it is filed.
 pub struct Filing {
     notice: u64,
@@ -114,15 +114,16 @@ impl Session {
         crate::sounds::loudness(&tracks, from, frames)
     }
 
-    /// Decodes and copies a sound into the project, and places it, as one
+    /// Decodes a sound in the project and places it where it is, as one
     /// undo step: at `at` on the film, or the playhead, on `track` when it
     /// fits there. Returns the sound clip's id. A file that is not sound is
-    /// neither copied nor placed, and the error says why.
+    /// not placed, and the error says why; a sound from outside the project
+    /// is filed into it first, by `start_import`.
     pub fn import_sound(&mut self, path: &Path, track: Option<u64>, at: Option<u32>) -> Result<u64, String> {
-        if self.outside_skills_project(path) {
+        if self.outside_project(path) {
             return Err("that sound is outside the project, so it is filed first, as Import sound… does".to_string());
         }
-        let imported = crate::sounds::import(self.project.as_deref(), path, self.skills)?;
+        let imported = crate::sounds::import(self.project.as_deref(), path)?;
         self.place_imported(imported, track, at).ok_or_else(|| "The sound could not be placed.".to_string())
     }
 
@@ -131,10 +132,10 @@ impl Session {
         self.file_intent = Some(crate::session::FileIntent::ImportSound);
     }
 
-    /// Whether a sound is from outside a Skills project, so it is filed
-    /// into the project before it is placed.
-    pub fn outside_skills_project(&self, path: &Path) -> bool {
-        let Some(project) = self.project.as_deref().filter(|_| self.skills) else {
+    /// Whether a sound is from outside the project, so it is filed into the
+    /// project before it is placed.
+    pub fn outside_project(&self, path: &Path) -> bool {
+        let Some(project) = self.project.as_deref() else {
             return false;
         };
         let project = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
@@ -142,7 +143,7 @@ impl Session {
         !source.starts_with(&project)
     }
 
-    /// A sound from outside a Skills project: copied into `work/`, then
+    /// A sound from outside the project: copied into `work/`, then
     /// filed with Skills' `request.py resource` through the host, and
     /// placed where it was filed when the host answers.
     fn file_sound(&mut self, path: PathBuf) {
@@ -152,7 +153,7 @@ impl Session {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let work = project.join("work");
+        let work = project.join(super::WORK);
         let copy = (1..100)
             .map(|n| {
                 let stem = Path::new(&name).file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
@@ -190,7 +191,7 @@ impl Session {
     /// is decoded, at the playhead as it is now, and a notice says it is
     /// coming.
     pub fn start_import(&mut self, path: PathBuf) {
-        if self.outside_skills_project(&path) {
+        if self.outside_project(&path) {
             self.file_sound(path);
             return;
         }
@@ -202,9 +203,8 @@ impl Session {
         let (send, result) = std::sync::mpsc::channel();
         let project = self.project.clone();
         let source = path.clone();
-        let in_place = self.skills;
         std::thread::spawn(move || {
-            let _ = send.send(crate::sounds::import(project.as_deref(), &source, in_place));
+            let _ = send.send(crate::sounds::import(project.as_deref(), &source));
         });
         let id = self.next_notice;
         self.next_notice += 1;
@@ -290,7 +290,7 @@ impl Session {
                 close: None,
             })
             .collect();
-        // Sounds from outside a Skills project, while the host files them.
+        // Sounds from outside the project, while the host files them.
         let mut filing: Vec<&Filing> = self.filing.values().collect();
         filing.sort_by_key(|filing| filing.notice);
         out.extend(filing.into_iter().map(|filing| Notice {
@@ -428,7 +428,7 @@ mod tests {
         session.seek_film(12);
         let clip = session.import_sound(&source, None, None).unwrap();
         let (track, placed) = session.film().sound(clip).unwrap();
-        assert_eq!((placed.at, placed.length, placed.file.as_str()), (12, 24, "sounds/line.wav"));
+        assert_eq!((placed.at, placed.length, placed.file.as_str()), (12, 24, "line.wav"));
         assert_eq!(track.name, "Sound");
         // The click is heard on its frame.
         let loud = session.loudness(12, 24);
@@ -436,7 +436,7 @@ mod tests {
         session.undo().unwrap();
         assert!(session.film().sound_tracks.is_empty());
         assert_eq!(session.film().clips.len(), 1);
-        assert!(project.join("sounds/line.wav").is_file());
+        assert!(project.join("line.wav").is_file());
         session.redo().unwrap();
         assert!(session.film().sound(clip).is_some());
     }

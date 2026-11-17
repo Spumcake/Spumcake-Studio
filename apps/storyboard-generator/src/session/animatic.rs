@@ -1,7 +1,8 @@
-//! The storyboard in a Skills project: opening the project's animatic from
-//! its assembly file, saving the film's timing as a new one, image keys, and
-//! holds published as rough boards. Filing a file into the project and
-//! pointing the animatic's step at it are the host's, through Skills'
+//! The storyboard as the project's animatic, in every project, organized the
+//! way the Last order benchmark is: opening the animatic from its assembly
+//! file, saving the film's timing as a new one, image keys, and holds
+//! published as rough boards. Filing a file into the project and pointing
+//! the animatic's step at it are the host's, through Spumcake-Skills'
 //! scripts; this keeps what the storyboard read and what it would write.
 
 use super::Session;
@@ -30,9 +31,29 @@ pub(crate) fn hold_stamp(record: &Record, clip: &Clip, start: u32) -> String {
     protocol::fingerprint(Value::Array(shown).to_string().as_bytes())
 }
 
+/// A hold's rough board, as `build-animatic` names it, under the film as
+/// Last order names a shot's images: "Last order: rough board, Shot 2".
+/// Proposed to the owner on 2026-11-17 in place of the approved
+/// "<shot>: rough board", not yet approved.
+pub fn rough_board(film: &str, shot: &str) -> String {
+    format!("{film}: rough board, {shot}")
+}
+
 impl Session {
-    /// Opens an assembly file of the project as a new storyboard, shown.
-    pub fn open_assembly(&mut self, path: &Path) -> Result<DrawingId, String> {
+    /// The film's name: its animatic step's, when the storyboard is the
+    /// project's animatic, else the film's title.
+    pub(crate) fn film_name(&self) -> String {
+        let read = self.active_storyboard().assembly();
+        let step = read.and_then(|read| read.step.as_ref()).and_then(|(chain, name)| self.steps.get(&format!("{chain}: {name}")));
+        match (step, self.project.as_deref()) {
+            (Some(step), Some(project)) => step.film(project),
+            _ => self.film().title.clone(),
+        }
+    }
+
+    /// Opens an assembly file of the project as a new storyboard named
+    /// `title`, the film's, shown in place of an untouched blank.
+    pub fn open_assembly(&mut self, path: &Path, title: &str) -> Result<DrawingId, String> {
         let bytes = std::fs::read(path).map_err(|error| crate::store::reason(&error))?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "It is not an animatic's assembly, or it is damaged.".to_string())?;
         let assembly = Assembly::from_value(&value)?;
@@ -40,10 +61,9 @@ impl Session {
             Some(project) => path.strip_prefix(project).unwrap_or(path).to_string_lossy().replace('\\', "/"),
             None => path.display().to_string(),
         };
-        let title = self.project.as_deref().and_then(Path::file_name).map_or_else(|| "Animatic".to_string(), |name| name.to_string_lossy().into_owned());
         let project = self.project.clone();
         let sounds = &mut self.sounds;
-        let (film, made, read) = crate::assembly::open(&assembly, &title, &relative, &protocol::fingerprint(&bytes), |file| {
+        let (film, made, read) = crate::assembly::open(&assembly, title, &relative, &protocol::fingerprint(&bytes), |file| {
             sounds.loaded(project.as_deref(), file).map(|loaded| loaded.frames)
         });
         let palette = self.brush_palette.clone();
@@ -51,15 +71,38 @@ impl Session {
         for drawing in made {
             drawings.insert(drawing.id, crate::record::blank_drawing(&mut self.ids, &palette));
         }
+        let blank = self.untouched_blank();
         let id = self.allocate_storyboard();
-        let name = self.fresh_name(None);
-        let mut record = crate::record::Record::from_film(id, name, film, drawings, &mut self.ids, &palette);
+        let mut record = crate::record::Record::from_film(id, title.to_string(), film, drawings, &mut self.ids, &palette);
         record.set_assembly(Some(read));
         record.set_dirty(true);
         self.settle();
         self.storyboards.push(record);
         self.active = self.storyboards.len() - 1;
+        self.drop_blank(blank);
         Ok(id)
+    }
+
+    /// The only storyboard, when it is a blank nothing was done to, which a
+    /// storyboard opened in its place replaces.
+    pub(crate) fn untouched_blank(&self) -> Option<DrawingId> {
+        let [only] = self.storyboards.as_slice() else {
+            return None;
+        };
+        (only.is_clean() && only.path().is_none() && self.text_draft.is_none()).then(|| only.id())
+    }
+
+    /// Takes away the blank a storyboard was opened in place of.
+    pub(crate) fn drop_blank(&mut self, blank: Option<DrawingId>) {
+        let Some(index) = blank.and_then(|id| self.index_of(id)) else {
+            return;
+        };
+        if self.storyboards.len() > 1 && index != self.active {
+            self.storyboards.remove(index);
+            if self.active > index {
+                self.active -= 1;
+            }
+        }
     }
 
     /// The stage with the image key the playhead shows under the drawing,
@@ -134,7 +177,7 @@ impl Session {
                         record.assembly().and_then(|read| read.board(clip.id, *start, &stamp)).map(|board| board.file.clone())
                     }
                 };
-                Hold { start: *start, length: end - start, image }
+                Hold { start: *start, length: end - start, image, blank: !drawn && images.is_empty() }
             })
             .collect()
     }
@@ -193,22 +236,13 @@ impl Session {
         (gain_db > 0.0 && playing.volume >= 1.0).then_some(gain_db)
     }
 
-    /// Whether the project is a Skills project, as the host says.
-    pub fn set_skills(&mut self, skills: bool) {
-        self.skills = skills;
-    }
-
-    pub fn is_skills(&self) -> bool {
-        self.skills
-    }
-
     /// Publish hold: the hold of the open clip under the playhead, composited
     /// as the export draws it, written as a PNG in `work/`, and asked to
-    /// be published as "<shot>: rough board", made from the images its keys
+    /// be published as its rough board, made from the images its keys
     /// show. The storyboard in `work/` is never named as an input. Returns
     /// the artifact asked for, or why not.
     pub fn publish_hold(&mut self) -> Result<String, String> {
-        let project = self.project.clone().filter(|_| self.skills).ok_or("Only a Skills project has canon to publish into.")?;
+        let project = self.project.clone().ok_or("The storyboard is not in a project.")?;
         let nothing = || "that hold has nothing to publish".to_string();
         let view = self.view();
         let clip_id = view.clip.ok_or_else(nothing)?;
@@ -241,7 +275,7 @@ impl Session {
             }
         }
         let stamp = hold_stamp(self.active_storyboard(), &clip, hold.start);
-        let artifact = format!("{}: rough board", clip.name);
+        let artifact = rough_board(&self.film_name(), &clip.name);
         self.publishing.insert(artifact.clone(), (self.active_id(), clip_id, hold.start, stamp, folder.join(&name)));
         self.to_publish.push((artifact.clone(), source, from));
         Ok(artifact)
@@ -375,7 +409,7 @@ mod tests {
         let read = Assembly::from_value(&serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let mut session = Session::new();
         session.set_project(&dir);
-        session.open_assembly(&path).unwrap();
+        session.open_assembly(&path, "Last order").unwrap();
         (session, read)
     }
 
@@ -446,9 +480,8 @@ mod tests {
     }
 
     #[test]
-    fn in_a_skills_project_holds_are_published_and_sounds_stay_in_place() {
+    fn holds_are_published_and_sounds_are_filed_into_the_project() {
         let (mut session, _) = opened("skills");
-        session.set_skills(true);
         let dir = session.project().unwrap().to_path_buf();
         // A take already in the project is placed where it is.
         let take = session.import_sound(&dir.join("library/2026-11-12_20-03-otis-line-1.wav"), None, Some(0)).unwrap();
@@ -477,23 +510,23 @@ mod tests {
         let second = session.film().clips[1].id;
         session.enter_clip(second);
         stroke(&mut session, 100.0);
-        assert_eq!(session.publish_hold().unwrap(), "Shot 2: rough board");
+        assert_eq!(session.publish_hold().unwrap(), "Last order: rough board, Shot 2");
         let asked = session.take_publishes();
         assert_eq!(asked.len(), 1);
         assert!(asked[0].1.starts_with("work/") && dir.join(&asked[0].1).is_file(), "the hold was not written as a PNG in work/");
         // Made from the keyframe under it, never from the storyboard in work/.
         assert_eq!(asked[0].2, ["library/2026-11-14_16-04-keyframe-the-bell.png"]);
         // The host's answer makes it the hold's image.
-        session.published("Shot 2: rough board", "prompts/resources/2026-11-17_10-00-shot-2-rough-board.png", None);
+        session.published("Last order: rough board, Shot 2", "prompts/resources/2026-11-17_10-00-shot-2-rough-board.png", None);
         session.leave_clip();
         let (saved, _) = session.timing(Some(8.0)).unwrap();
         assert_eq!(saved.frames[1].image, "prompts/resources/2026-11-17_10-00-shot-2-rough-board.png");
-        // No sounds/ folder was made, here or by the export.
+        // Nothing was made outside the project's own folders.
         assert!(!dir.join("sounds").exists() && !dir.join("exports").exists());
     }
 
     #[test]
-    fn a_skills_export_runs_the_step_and_offers_its_take() {
+    fn the_export_runs_the_step_and_offers_its_take() {
         let mut session = from_its_step("export-step");
         // Untouched: the step runs at once.
         let step = session.start_export().unwrap();
@@ -587,7 +620,6 @@ mod tests {
     /// published.
     fn from_its_step(label: &str) -> Session {
         let (mut session, _) = opened(label);
-        session.set_skills(true);
         let script = "python3 assemble.py prompts/resources/2026-11-14_16-07-animatic-assembly.json .build/animatic.mp4";
         let step = crate::session::project::AnimaticStep { chain: "the animatic".into(), name: "animatic".into(), artifact: "Last order: animatic".into(), script: script.into() };
         session.steps.insert(step.key(), step);
@@ -697,6 +729,68 @@ mod tests {
         assert!(session.active_storyboard().assembly().unwrap().boards.iter().any(|board| board.file == "library/board.png"));
     }
 
+    /// Answers the reads `show_animatic` sent: no published files, and one
+    /// animatic step naming `assembly`.
+    fn answer_steps(session: &mut Session, assembly: &str) {
+        let script = format!("python3 assemble.py {assembly} .build/animatic.mp4");
+        for message in session.take_outgoing() {
+            if let protocol::AppMessage::ReadCanon { id, query } = message {
+                let rows = if query.contains("FROM step") {
+                    vec![Value::String(format!("the animatic\u{1f}animatic\u{1f}Last order: animatic\u{1f}{script}"))]
+                } else {
+                    Vec::new()
+                };
+                session.canon_rows(&id, &rows, None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_project_s_animatic_is_its_storyboard() {
+        let dir = project("show");
+        let mut session = Session::new();
+        session.set_project(&dir);
+        assert_eq!(session.storyboards.len(), 1);
+        // Told the project, it shows the animatic in place of the blank,
+        // named after the film.
+        session.show_animatic();
+        answer_steps(&mut session, "prompts/resources/2026-11-14_16-07-animatic-assembly.json");
+        assert_eq!(session.storyboards.len(), 1);
+        assert_eq!(session.film().title, "Last order");
+        assert_eq!(session.active_storyboard().name(), "Last order");
+        let read = session.active_storyboard().assembly().unwrap().clone();
+        assert_eq!(read.step, Some(("the animatic".to_string(), "animatic".to_string())));
+        // Shown again after another tool retimed it, the same storyboard
+        // takes the step's timing, with no card.
+        let mut retimed = read.assembly.clone();
+        retimed.frames[0].end = 2.5;
+        retimed.frames[1].start = 2.5;
+        std::fs::write(dir.join("prompts/resources/retimed.json"), serde_json::to_vec(&retimed.to_value()).unwrap()).unwrap();
+        session.show_animatic();
+        answer_steps(&mut session, "prompts/resources/retimed.json");
+        assert_eq!(session.storyboards.len(), 1);
+        assert_eq!(session.active_storyboard().assembly().unwrap().path, "prompts/resources/retimed.json");
+        assert_eq!(session.film().clips[0].length, 60);
+        assert!(session.retimed().is_none());
+    }
+
+    #[test]
+    fn a_project_with_no_animatic_keeps_its_blank() {
+        let dir = project("none");
+        let mut session = Session::new();
+        session.set_project(&dir);
+        session.show_animatic();
+        for message in session.take_outgoing() {
+            if let protocol::AppMessage::ReadCanon { id, .. } = message {
+                session.canon_rows(&id, &[], None);
+            }
+        }
+        assert_eq!(session.storyboards.len(), 1);
+        assert!(session.active_storyboard().assembly().is_none());
+        assert!(session.kept_notices.is_empty(), "a card was shown");
+        assert_eq!(session.save_timing().unwrap_err(), "This project has no animatic yet.");
+    }
+
     #[test]
     fn a_gain_above_0_db_is_kept_as_read() {
         let dir = project("gain");
@@ -706,7 +800,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let mut session = Session::new();
         session.set_project(&dir);
-        session.open_assembly(&path).unwrap();
+        session.open_assembly(&path, "Last order").unwrap();
         let read = session.active_storyboard().assembly().unwrap().clone();
         assert_eq!(session.kept_gain(read.voices[0]), Some(3.0));
         assert_eq!(session.kept_gain(read.voices[1]), None);

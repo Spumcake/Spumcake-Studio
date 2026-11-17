@@ -1,4 +1,4 @@
-//! The storyboard and a Skills project's animatic step, through the host:
+//! The storyboard and the project's animatic step, through the host:
 //! finding the step whose `build-animatic` script runs `assemble.py`,
 //! opening the assembly it names, saving the film's timing as a new
 //! assembly that the step is pointed at, and following a retime made in
@@ -40,6 +40,16 @@ pub struct AnimaticStep {
 }
 
 impl AnimaticStep {
+    /// The film's name, the element of the artifact the step makes, such as
+    /// "Last order" for "Last order: animatic"; the project folder's when
+    /// the step names none.
+    pub fn film(&self, project: &std::path::Path) -> String {
+        match self.artifact.split_once(':') {
+            Some((element, _)) if !element.trim().is_empty() => element.trim().to_string(),
+            _ => project.file_name().map_or_else(|| "Animatic".to_string(), |name| name.to_string_lossy().into_owned()),
+        }
+    }
+
     /// How this session keys it: "chain: name".
     pub fn key(&self) -> String {
         format!("{}: {}", self.chain, self.name)
@@ -76,8 +86,8 @@ pub fn writer_args(assembly: &Assembly) -> Vec<String> {
 /// What a canon read was for.
 #[derive(Clone, Debug)]
 pub enum Asked {
-    /// Open animatic, of the step named, or the first.
-    Open(Option<String>),
+    /// Showing the project's animatic, when the project opens.
+    Open,
     /// Whether the animatic a storyboard read was retimed elsewhere.
     Check(DrawingId),
     Artifacts,
@@ -101,8 +111,8 @@ pub struct Saving {
     pub then_export: Option<Vec<(String, String)>>,
 }
 
-/// Export animatic video in a Skills project: the animatic's step running
-/// again through the host, for the storyboard that asked.
+/// Export animatic video: the animatic's step running again through the
+/// host, for the storyboard that asked.
 #[derive(Clone, Debug)]
 pub struct Stepping {
     pub id: String,
@@ -162,15 +172,16 @@ impl Session {
         std::mem::take(&mut self.outgoing)
     }
 
-    /// Open animatic: asks the project for its animatic steps and the files
-    /// it has published; the assembly opens when the host answers.
-    pub fn open_animatic(&mut self, step: Option<&str>) -> Result<(), String> {
-        if !self.skills || self.project.is_none() {
-            return Err("Only a Skills project has an animatic to open.".to_string());
+    /// A project opened: asks for its animatic step and the files it has
+    /// published. When the host answers, the project's animatic is shown as
+    /// a storyboard; a project with no animatic yet keeps its blank, whose
+    /// Save timing to the project makes one.
+    pub fn show_animatic(&mut self) {
+        if self.project.is_none() {
+            return;
         }
         self.ask_canon(ARTIFACTS, Asked::Artifacts);
-        self.ask_canon(STEPS, Asked::Open(step.map(str::to_string)));
-        Ok(())
+        self.ask_canon(STEPS, Asked::Open);
     }
 
     /// Asks, now and then, whether the shown animatic's step names another
@@ -189,7 +200,7 @@ impl Session {
         }
         let has_step = self.active_storyboard().assembly().is_some_and(|read| read.step.is_some());
         let asking = self.canon_asked.values().any(|asked| matches!(asked, Asked::Check(_)));
-        if !self.skills || !has_step || asking || self.is_playing() || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
+        if self.project.is_none() || !has_step || asking || self.is_playing() || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
             return;
         }
         self.last_check = Some(now);
@@ -203,7 +214,7 @@ impl Session {
             return;
         };
         if let Some(error) = error {
-            if let Asked::Open(_) = asked {
+            if let Asked::Open = asked {
                 let id = self.next_notice;
                 self.next_notice += 1;
                 self.keep_failed(id, "Animatic not opened", error);
@@ -218,19 +229,17 @@ impl Session {
                     }
                 }
             }
-            Asked::Open(want) => {
+            Asked::Open => {
                 let steps = steps_of(rows);
-                let chosen = match &want {
-                    Some(want) => steps.iter().find(|step| &step.name == want || &step.key() == want),
-                    None => steps.first(),
-                };
-                let Some(step) = chosen.cloned() else {
-                    let id = self.next_notice;
-                    self.next_notice += 1;
-                    self.keep_failed(id, "Animatic not opened", "This project has no animatic yet.");
+                for step in &steps {
+                    self.steps.insert(step.key(), step.clone());
+                }
+                // No animatic yet: the blank storyboard is the one whose
+                // save makes it.
+                let Some(step) = steps.first().cloned() else {
                     return;
                 };
-                if let Err(reason) = self.open_step(&step) {
+                if let Err(reason) = self.show_step(&step) {
                     let id = self.next_notice;
                     self.next_notice += 1;
                     self.keep_failed(id, "Animatic not opened", &reason);
@@ -256,25 +265,72 @@ impl Session {
         }
     }
 
-    /// Opens the assembly a step names, and remembers the step.
-    fn open_step(&mut self, step: &AnimaticStep) -> Result<(), String> {
+    /// Shows the step's animatic as a storyboard, with the timing the step
+    /// names now: the storyboard already open, or the one kept in `work/`
+    /// under the film's name, with its drawing, or else one opened from the
+    /// assembly alone.
+    fn show_step(&mut self, step: &AnimaticStep) -> Result<(), String> {
         let file = crate::assembly::named_in(&step.script).ok_or("The animatic's step names no assembly.")?;
-        let project = self.project.clone().ok_or("No project folder.")?;
-        self.open_assembly(&project.join(&file))?;
-        self.steps.insert(step.key(), step.clone());
+        let project = self.project.clone().ok_or("The storyboard is not in a project.")?;
+        let key = (step.chain.clone(), step.name.clone());
+        let ours = |record: &crate::record::Record| record.assembly().is_some_and(|read| read.step.as_ref() == Some(&key));
+        if let Some(id) = self.storyboards.iter().find(|record| ours(record)).map(|record| record.id()) {
+            self.activate(id);
+            return self.take_timing(&file);
+        }
+        let film = step.film(&project);
+        let kept = project.join(super::WORK).join(format!("{film}.smx"));
+        if kept.is_file() {
+            let blank = self.untouched_blank();
+            if !self.open_path(&kept) {
+                return Err(self.file_error.as_ref().map_or_else(String::new, |error| error.reason.clone()));
+            }
+            self.drop_blank(blank);
+            if !ours(self.active_storyboard()) {
+                // Kept before it knew its step: it is the step's from now.
+                let record = self.active_storyboard_mut();
+                if let Some(mut read) = record.assembly().cloned() {
+                    read.step = Some(key.clone());
+                    record.set_assembly(Some(read));
+                }
+            }
+            return self.take_timing(&file);
+        }
+        self.open_assembly(&project.join(&file), &film)?;
         let record = self.active_storyboard_mut();
         if let Some(mut read) = record.assembly().cloned() {
-            read.step = Some((step.chain.clone(), step.name.clone()));
+            read.step = Some(key);
             record.set_assembly(Some(read));
         }
         Ok(())
+    }
+
+    /// Opening the animatic takes the timing its step names now, made in
+    /// Studio or in another tool, as Follow would, with no card.
+    fn take_timing(&mut self, file: &str) -> Result<(), String> {
+        let read = self.active_storyboard().assembly().cloned();
+        match read {
+            Some(read) if read.path != file => {
+                self.retimed = Some((self.active_id(), file.to_string()));
+                self.follow_retime()
+            }
+            Some(_) => Ok(()),
+            // A storyboard with no timing read: its drawing is kept, and the
+            // step's timing is read as its own.
+            None => Err("This storyboard was not opened from the project's animatic.".to_string()),
+        }
     }
 
     /// Save timing to the project: writes the film's timing as an assembly
     /// and asks the host to file it; once filed, the step is pointed at it.
     /// The error says why it cannot be saved.
     pub fn save_timing(&mut self) -> Result<(), String> {
-        let project = self.project.clone().filter(|_| self.skills).ok_or("Only a Skills project has an animatic to save to.")?;
+        let project = self.project.clone().ok_or("The storyboard is not in a project.")?;
+        // A project with no animatic yet: its storyboard's save will make
+        // one, once Studio can record the step build-animatic records.
+        if self.active_storyboard().assembly().is_none() && self.steps.is_empty() {
+            return Err("This project has no animatic yet.".to_string());
+        }
         let read = self.active_storyboard().assembly().cloned().ok_or("This storyboard was not opened from the project's animatic.")?;
         let (chain, name) = read.step.clone().ok_or("This storyboard was not opened from the project's animatic.")?;
         let step = self.steps.get(&format!("{chain}: {name}")).cloned().ok_or("The project's animatic step is not known yet.")?;
@@ -305,8 +361,8 @@ impl Session {
         Ok(())
     }
 
-    /// Export animatic video in a Skills project: the animatic is made by
-    /// running its step again, as `build-animatic` makes it, after saving
+    /// Export animatic video: the animatic is made by running its step
+    /// again, as `build-animatic` makes it, after saving
     /// the timing when it differs. The take is then offered for publishing
     /// on the publish card. Returns the step being run.
     pub(crate) fn export_by_step(&mut self) -> Result<String, String> {

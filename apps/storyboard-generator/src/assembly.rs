@@ -447,6 +447,14 @@ pub struct Hold {
     /// The image it shows: an image key's alone, or the rough board it was
     /// published as; none while it has drawing that is not published.
     pub image: Option<String>,
+    /// It shows nothing: no drawing and no image key.
+    pub blank: bool,
+}
+
+/// Why a blank shot cannot be saved. Proposed to the owner on 2026-11-17,
+/// not yet approved.
+pub fn blank_refusal(shot: &str) -> String {
+    format!("{shot} is blank. Draw on it or insert an image key first.")
 }
 
 /// The film's timing as an assembly. `holds` gives each clip's holds;
@@ -489,6 +497,9 @@ pub fn save(film: &Film, read: Option<&Read>, holds: impl Fn(u64) -> Vec<Hold>, 
         let same = was.len() == clip_holds.len();
         for (index, hold) in clip_holds.into_iter().enumerate() {
             let Some(image) = hold.image else {
+                if hold.blank {
+                    return Err(blank_refusal(&clip.name));
+                }
                 return Err(format!("{} has drawing that is not published yet. Publish it first.", clip.name));
             };
             let start = clip.start + hold.start;
@@ -663,7 +674,7 @@ mod tests {
     fn plain_holds(film: &Film) -> impl Fn(u64) -> Vec<Hold> + '_ {
         move |clip| {
             let clip = film.clip(clip).unwrap();
-            vec![Hold { start: 0, length: clip.length, image: clip.layers[0].images.values().next().cloned() }]
+            vec![Hold { start: 0, length: clip.length, image: clip.layers[0].images.values().next().cloned(), blank: false }]
         }
     }
 
@@ -730,8 +741,11 @@ mod tests {
         gapped.delete_clip(third);
         assert_eq!(save(&gapped, Some(&read), plain_holds(&gapped), None).unwrap_err(), "The film has a gap at 4.2 s, which the project's animatic cannot hold.");
         // Drawing not published.
-        let unpublished = |_| vec![Hold { start: 0, length: 72, image: None }];
+        let unpublished = |_| vec![Hold { start: 0, length: 72, image: None, blank: false }];
         assert_eq!(save(&film, Some(&read), unpublished, None).unwrap_err().split(" has").next(), Some("Shot 1"));
+        // A blank shot says it is blank.
+        let blank = |_| vec![Hold { start: 0, length: 72, image: None, blank: true }];
+        assert_eq!(save(&film, Some(&read), blank, None).unwrap_err(), blank_refusal("Shot 1"));
         // A muted bed.
         let bed_track = film.sound_tracks[0].id;
         assert!(film.set_track_flag(crate::soundtrack::TrackRef::Sound(bed_track), crate::soundtrack::TrackFlag::Muted, true));

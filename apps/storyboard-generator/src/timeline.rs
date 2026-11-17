@@ -325,7 +325,8 @@ fn sound_row(session: &Session, track: &SoundTrack, picked: &[u64]) -> protocol:
             };
             let tip = match state {
                 Some(State::Unreadable(reason)) => reason.clone(),
-                Some(State::Missing) => format!("{} is missing from the sounds folder.", clip.name),
+                // As a layer's missing file says it, by its place in the project.
+                Some(State::Missing) => format!("Missing: {}", clip.file),
                 _ => String::new(),
             };
             TimelineItem {
@@ -397,7 +398,7 @@ fn frame_menu(session: &Session) -> Vec<MenuEntry> {
         entry("Insert keyframe\tF6", action("insert_keyframe"), true),
         entry("Insert blank keyframe\tF7", action("insert_blank_keyframe"), true),
         entry("Insert image key…", action("insert_image_key"), true),
-        entry("Publish hold", action("publish_hold"), session.is_skills()),
+        entry("Publish hold", action("publish_hold"), session.project().is_some()),
         entry("Clear keyframe\t⇧F6", action("clear_keyframe"), true),
         entry("Remove frames\t⇧F5", action("remove_frames"), true),
         divider(),
@@ -993,11 +994,6 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
                 session.failed_by_hand(Some("Hold not published"), &reason);
             }
         }
-        "open_animatic" => {
-            if let Err(reason) = session.open_animatic(None) {
-                session.failed_by_hand(Some("Animatic not opened"), &reason);
-            }
-        }
         "save_timing" => {
             if let Err(reason) = session.save_timing() {
                 session.timing_refused(&reason);
@@ -1010,9 +1006,6 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
         }
         "export_animatic" => {
             let _ = session.start_export();
-        }
-        "cancel_export" => {
-            session.cancel_export();
         }
         "close_notice" => {
             if let Some(id) = arg.and_then(Value::as_str).or_else(|| arg.and_then(|arg| arg.get("arg")).and_then(Value::as_str)) {

@@ -2,7 +2,7 @@
 //! decoded once by `media` at one rate, with its fingerprint and the peaks
 //! its waveform is drawn from. The film keeps only where each plays; this
 //! keeps what plays. Nothing here is saved: a storyboard's sounds are
-//! decoded again from the project's `sounds/` folder when it opens.
+//! decoded again from where they are in the project when it opens.
 
 use crate::film::{FPS, Film};
 use media::{Sound, Track};
@@ -16,8 +16,6 @@ pub const RATE: u32 = 48_000;
 pub const PEAKS_PER_FRAME: usize = 12;
 /// The most peaks one item of the timeline carries.
 pub const MOST_PEAKS: usize = 4000;
-/// The project's folder imported sounds are copied into.
-pub const FOLDER: &str = "sounds";
 /// The file types Import sound offers.
 pub const EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "m4a", "aac", "mp4", "mov"];
 
@@ -216,71 +214,33 @@ fn file_name(path: &Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// A sound, decoded and copied into the project's `sounds/` folder under a
-/// free name, ready to place.
+/// A sound, decoded, ready to place.
 pub struct Imported {
     /// Its file, relative to the project.
     pub file: String,
     /// The name its clip shows: the file's name.
     pub name: String,
     pub loaded: Arc<Loaded>,
-    /// Where it was copied to.
+    /// Where it is.
     pub path: PathBuf,
 }
 
-/// Decodes `source` and, when it is sound, copies it into the project's
-/// `sounds/` folder. A file that is not sound is not copied. Outside a
-/// project the sound stays where it is, and so it does in a Skills project
-/// (`in_place`) when it is already inside the project, as a take in
-/// `library/` is.
-pub fn import(project: Option<&Path>, source: &Path, in_place: bool) -> Result<Imported, String> {
+/// Decodes `source`, a sound in the project, such as a take in `library/`
+/// or one just filed into `prompts/resources/`, which is used where it is.
+/// A sound from outside the project is filed into it first, through the
+/// host. Outside a project the sound stays where it is.
+pub fn import(project: Option<&Path>, source: &Path) -> Result<Imported, String> {
     let loaded = decode(source)?;
     let name = file_name(source);
     let Some(project) = project else {
         let file = source.display().to_string();
         return Ok(Imported { file, name, loaded: Arc::new(loaded), path: source.to_path_buf() });
     };
-    let folder = project.join(FOLDER);
-    // A sound already in the folder is used where it is.
-    if source.parent().is_some_and(|parent| crate::store::same_file(parent, &folder)) {
-        let file = format!("{FOLDER}/{name}");
-        return Ok(Imported { file, name, loaded: Arc::new(loaded), path: source.to_path_buf() });
-    }
-    // In a Skills project, a sound already in the project, such as a take in
-    // `library/`, is used where it is.
     let project_abs = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
     let source_abs = source.canonicalize().unwrap_or_else(|_| source.to_path_buf());
-    if let Ok(inside) = source_abs.strip_prefix(&project_abs).map_err(|_| ()).and_then(|inside| if in_place { Ok(inside) } else { Err(()) }) {
-        let file = inside.to_string_lossy().replace('\\', "/");
-        return Ok(Imported { file, name, loaded: Arc::new(loaded), path: source.to_path_buf() });
-    }
-    std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
-    let target = free_path(&folder, &name);
-    std::fs::copy(source, &target).map_err(|error| crate::store::reason(&error))?;
-    let copied = file_name(&target);
-    // Known by the copy, which is what the storyboard plays from now on.
-    let loaded = Loaded { stamp: stamp_of(&target), ..loaded };
-    Ok(Imported { file: format!("{FOLDER}/{copied}"), name: copied, loaded: Arc::new(loaded), path: target })
-}
-
-/// `name` in `folder`, or, when that is taken, "Storm and radio 2.wav" and on.
-fn free_path(folder: &Path, name: &str) -> PathBuf {
-    let path = folder.join(name);
-    if !path.exists() {
-        return path;
-    }
-    let (stem, extension) = match name.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => (stem.to_string(), format!(".{extension}")),
-        _ => (name.to_string(), String::new()),
-    };
-    let mut n = 2;
-    loop {
-        let path = folder.join(format!("{stem} {n}{extension}"));
-        if !path.exists() {
-            return path;
-        }
-        n += 1;
-    }
+    let inside = source_abs.strip_prefix(&project_abs).map_err(|_| "that sound is outside the project, so it is filed first, as Import sound… does".to_string())?;
+    let file = inside.to_string_lossy().replace('\\', "/");
+    Ok(Imported { file, name, loaded: Arc::new(loaded), path: source.to_path_buf() })
 }
 
 /// A WAV file of 16-bit stereo samples, for tests and the no-host check:
@@ -333,16 +293,18 @@ mod tests {
     }
 
     #[test]
-    fn an_import_is_copied_under_a_free_name_and_decoded() {
+    fn a_sound_in_the_project_is_used_where_it_is_and_decoded() {
         let project = scratch("import");
-        let outside = scratch("import-source");
-        let source = outside.join("Storm and radio.wav");
+        std::fs::create_dir_all(project.join("library")).unwrap();
+        let source = project.join("library/Storm and radio.wav");
         std::fs::write(&source, wav_bytes(RATE, &clicks(48, &[30]))).unwrap();
-        let first = import(Some(&project), &source, false).unwrap();
-        assert_eq!(first.file, "sounds/Storm and radio.wav");
+        let first = import(Some(&project), &source).unwrap();
+        assert_eq!(first.file, "library/Storm and radio.wav");
         assert_eq!(first.loaded.frames, 48);
-        let second = import(Some(&project), &source, false).unwrap();
-        assert_eq!(second.file, "sounds/Storm and radio 2.wav");
+        // One from outside is filed into the project first.
+        let outside = scratch("import-source");
+        std::fs::write(outside.join("Storm and radio.wav"), wav_bytes(RATE, &clicks(48, &[30]))).unwrap();
+        assert!(import(Some(&project), &outside.join("Storm and radio.wav")).is_err());
         // The click is the loudest thing, on its frame.
         let peaks = span_peaks(&first.loaded.peaks, 0, 48);
         let loudest = peaks.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
@@ -354,8 +316,7 @@ mod tests {
         let project = scratch("not-sound");
         let source = project.join("notes.txt");
         std::fs::write(&source, "not sound").unwrap();
-        assert!(import(Some(&project), &source, false).is_err());
-        assert!(!project.join(FOLDER).exists());
+        assert!(import(Some(&project), &source).is_err());
     }
 
     #[test]
