@@ -645,7 +645,7 @@ mod tests {
         skills("pipeline.py", &["step", "001", "the diner", "sound bed", "--order", "4", "--skill", "generate-sound", "--artifact", "the diner: sound bed"]);
         std::fs::write(folder.join("agent/bed.wav"), b"RIFF").unwrap();
         let bed = skills("request.py", &["resource", "agent/bed.wav", "--name", "bed", "--from", &take]).lines().last().unwrap().trim().to_string();
-        let asked = Asked::Publish {
+        let bed_asked = Asked::Publish {
             asker: Asker::Assistant { call: String::from("c2") },
             artifact: String::from("the diner: sound bed"),
             source: bed,
@@ -653,8 +653,8 @@ mod tests {
             with: Vec::new(),
             sources: vec![(String::from("the diner: keyframe"), String::from("the beat it scores"))],
         };
-        let view = prepare(&place, &asked).unwrap();
-        carry(&place, &Card { asked, view }, false).unwrap();
+        let view = prepare(&place, &bed_asked).unwrap();
+        carry(&place, &Card { asked: bed_asked, view }, false).unwrap();
         let named = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
         assert_eq!(named.trim(), "the beat it scores", "a source the assistant named was lost");
 
