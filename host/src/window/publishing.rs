@@ -106,7 +106,6 @@ pub(crate) struct Publishing {
     pub asked: VecDeque<Asked>,
     /// Films workspaces asked to deliver, oldest first, for the runner to
     /// take. The Deliver card is drawn from what it reads.
-    #[allow(dead_code)]
     pub delivering: VecDeque<Delivery>,
     /// The publish or revert card the runner filled.
     pub card: Option<Card>,
