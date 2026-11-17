@@ -3,11 +3,46 @@
 //! edited with `pipeline.py step` on the user's yes on the runner's card,
 //! and a skill's own script run, such as `build-animatic`'s writer, so a
 //! workspace never writes a Skills format itself. A step run again as a
-//! take waits in `step_runs` for the runner's rerun.
+//! take waits in `step_runs` for the runner's rerun. Reads and scripts run
+//! on threads of their own, so a workspace that polls canon never stalls
+//! drawing or playback; their answers are sent on the frame they arrive.
 
 use super::HostWindow;
 use protocol::{HostMessage, StepRef, ToolResult};
 use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, channel};
+
+/// Answers made off the window's thread, each with the workspace it goes to.
+pub(crate) struct Answers {
+    sender: Sender<(usize, HostMessage)>,
+    receiver: Receiver<(usize, HostMessage)>,
+}
+
+impl Default for Answers {
+    fn default() -> Self {
+        let (sender, receiver) = channel();
+        Self { sender, receiver }
+    }
+}
+
+/// Runs one of Skills' scripts on its own thread, and sends what `answer`
+/// makes of it to the workspace `app`.
+fn run_off_thread(
+    answers: &Answers,
+    app: usize,
+    (scripts, folder, vars): (PathBuf, PathBuf, Vec<(String, String)>),
+    name: String,
+    args: Vec<String>,
+    answer: impl FnOnce(Result<String, String>) -> HostMessage + Send + 'static,
+) {
+    let sender = answers.sender.clone();
+    std::thread::spawn(move || {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let result = crate::prompt_page::script(&scripts, &folder, &vars, &name, &args);
+        let _ = sender.send((app, answer(result)));
+    });
+}
 
 /// The runner's call for a workspace's step edit, so its answer goes back.
 fn edit_call(app: usize, id: &str) -> String {
@@ -60,39 +95,36 @@ impl HostWindow {
         let pipeline = project.as_ref().and_then(|(folder, _)| crate::prompt_page::living_pipeline(folder));
         let outside = String::from("Only a Skills project has canon.");
         for (app, (id, query)) in reads {
-            let answer = match (&project, &pipeline) {
-                (Some((folder, env)), Some(pipeline)) => {
-                    let scripts = env.scripts.clone().unwrap_or_default();
-                    crate::prompt_page::script(&scripts, folder, &env.vars, "pipeline.py", &["sql", pipeline, &query, "--read-only"])
-                }
-                _ => Err(outside.clone()),
+            let (Some((folder, env)), Some(pipeline)) = (&project, &pipeline) else {
+                self.send(app, HostMessage::CanonRows { id, rows: Vec::new(), error: Some(outside.clone()) });
+                continue;
             };
-            let message = match answer {
+            let place = (env.scripts.clone().unwrap_or_default(), folder.clone(), env.vars.clone());
+            let args = vec![String::from("sql"), pipeline.clone(), query, String::from("--read-only")];
+            run_off_thread(&self.canon_answers, app, place, String::from("pipeline.py"), args, move |result| match result {
                 Ok(printed) => HostMessage::CanonRows { id, rows: printed.lines().filter(|line| !line.is_empty()).map(canon_row).collect(), error: None },
                 Err(error) => HostMessage::CanonRows { id, rows: Vec::new(), error: Some(error) },
-            };
-            self.send(app, message);
+            });
         }
         for (app, (id, skill, script, args)) in scripts {
-            let answer = match &project {
+            let found = match &project {
                 Some(_) if !plain_name(&skill) || !plain_name(&script) => Err(format!("“{skill}/{script}” names no skill's script.")),
                 Some((folder, env)) => {
                     let folder_of = env.scripts.as_ref().and_then(|scripts| scripts.parent()).map(|checkout| checkout.join("skills").join(&skill).join("scripts"));
                     match folder_of {
-                        Some(found) if found.join(&script).is_file() => {
-                            let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                            crate::prompt_page::script(&found, folder, &env.vars, &script, &args)
-                        }
+                        Some(found) if found.join(&script).is_file() => Ok((found, folder.clone(), env.vars.clone())),
                         _ => Err(format!("The skill {skill} has no script {script}.")),
                     }
                 }
                 None => Err(outside.clone()),
             };
-            let message = match answer {
-                Ok(output) => HostMessage::SkillScriptRan { id, output, error: None },
-                Err(error) => HostMessage::SkillScriptRan { id, output: String::new(), error: Some(error) },
-            };
-            self.send(app, message);
+            match found {
+                Ok(place) => run_off_thread(&self.canon_answers, app, place, script, args, move |result| match result {
+                    Ok(output) => HostMessage::SkillScriptRan { id, output, error: None },
+                    Err(error) => HostMessage::SkillScriptRan { id, output: String::new(), error: Some(error) },
+                }),
+                Err(error) => self.send(app, HostMessage::SkillScriptRan { id, output: String::new(), error: Some(error) }),
+            }
         }
         for (app, (id, _tab, step, script, refs)) in edits {
             let (Some((folder, env)), Some(pipeline)) = (project.clone(), pipeline.clone()) else {
@@ -105,6 +137,15 @@ impl HostWindow {
             if let crate::runner::Begun::Answered(answer) = self.runner.begin(&folder, env, &call, "", crate::runner::RUN_COMMAND, &json!({ "command": command, "why": why })) {
                 self.answer_step_edit(answer);
             }
+        }
+    }
+
+    /// Sends the canon reads and skill scripts that finished off the
+    /// window's thread.
+    pub(super) fn send_canon_answers(&mut self) {
+        let finished: Vec<(usize, HostMessage)> = self.canon_answers.receiver.try_iter().collect();
+        for (app, message) in finished {
+            self.send(app, message);
         }
     }
 

@@ -1995,6 +1995,7 @@ fn reference_row(
                     .iter()
                     .enumerate()
                     .map(|(index, role)| widgets::MenuItem {
+                        tip: None,
                         label: &role.label,
                         icon: (current == Some(index)).then_some("check"),
                         enabled: true,
@@ -2002,7 +2003,7 @@ fn reference_row(
                         divider: false,
                     })
                     .collect();
-                items.push(widgets::MenuItem { label: "Name what it's for…", icon: None, enabled: true, submenu: false, divider: !declared.roles.is_empty() });
+                items.push(widgets::MenuItem { tip: None, label: "Name what it's for…", icon: None, enabled: true, submenu: false, divider: !declared.roles.is_empty() });
                 match widgets::menu_rows(ui, &items) {
                     Some(index) if index < declared.roles.len() => {
                         let role = &declared.roles[index];
@@ -2049,15 +2050,16 @@ fn reference_row(
 /// A reference row's menu: Choose…, the declared rows, and Clear. Returns
 /// the row chosen, by its place in that order.
 fn reference_menu(ui: &mut egui::Ui, declared: &PanelCell) -> Option<usize> {
-    let mut items = vec![widgets::MenuItem { label: "Choose…", icon: None, enabled: true, submenu: false, divider: false }];
+    let mut items = vec![widgets::MenuItem { tip: None, label: "Choose…", icon: None, enabled: true, submenu: false, divider: false }];
     items.extend(declared.reference_menu.iter().map(|row| widgets::MenuItem {
+        tip: row.tip.as_deref(),
         label: &row.label,
         icon: row.icon.as_deref(),
         enabled: row.enabled,
         submenu: false,
         divider: row.divider,
     }));
-    items.push(widgets::MenuItem { label: "Clear", icon: None, enabled: true, submenu: false, divider: true });
+    items.push(widgets::MenuItem { tip: None, label: "Clear", icon: None, enabled: true, submenu: false, divider: true });
     widgets::menu_rows(ui, &items)
 }
 

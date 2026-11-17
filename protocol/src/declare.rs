@@ -92,7 +92,8 @@ pub struct Keys {
 
 /// One row of a menu. A row with `submenu` rows opens them; a row with
 /// `rename` starts renaming the thing its menu belongs to in place.
-/// `divider` draws a line above the row.
+/// `divider` draws a line above the row. `tip` shows when the pointer
+/// rests on it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MenuEntry {
     pub label: String,
@@ -108,6 +109,9 @@ pub struct MenuEntry {
     pub submenu: Vec<MenuEntry>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub rename: bool,
+    /// Shown when the pointer rests on the row, such as why it is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
 }
 
 fn yes() -> bool {

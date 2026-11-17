@@ -77,6 +77,7 @@ fn button(icon: &str, tip: &str, action: Action, enabled: bool, selected: bool) 
 
 fn row(label: &str, action: Action) -> MenuEntry {
     MenuEntry {
+        tip: None,
         label: label.into(),
         icon: None,
         enabled: true,
@@ -837,6 +838,7 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
     let id = node.id;
     let target = json!({ "node": id });
     let rename = MenuEntry {
+        tip: None,
         label: "Rename".into(),
         icon: None,
         enabled: true,
