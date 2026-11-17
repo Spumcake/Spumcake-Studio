@@ -697,7 +697,7 @@ impl Session {
                 }
             }
             HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
-            HostMessage::CellBecameStep { tab, cell, step } => self.cell_became_step(&tab, &cell, &step, &mut out),
+            HostMessage::CellBecameStep { tab, cell, step, .. } => self.cell_became_step(&tab, &cell, &step, &mut out),
             _ => {}
         }
         if self.finish_writes(false) {
@@ -1087,6 +1087,12 @@ impl Session {
             }
             "film_new" => {
                 self.film(|gallery| gallery.add(&protocol::untitled(ITEM), new_doc(), None));
+            }
+            // The written-out notice's close mark.
+            "notice_close" => {
+                if let Some(image) = self.active_image() {
+                    out.push(AppMessage::Notices { tab: image.id.clone(), notices: Vec::new(), corner: protocol::NoticeCorner::BottomLeft });
+                }
             }
             "film_open" => {
                 let Some(image) = self.active_image() else {

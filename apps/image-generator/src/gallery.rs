@@ -214,7 +214,8 @@ impl Gallery {
             self.cell = Some(last.id.clone());
             return false;
         }
-        let draft = empty_draft();
+        let image = &self.frame().doc.image;
+        let draft = empty_draft((image.width, image.height));
         self.cell = Some(draft.id.clone());
         self.cells.push(draft);
         true
@@ -402,13 +403,20 @@ impl Gallery {
     }
 }
 
-/// A new image cell with no prompt, as the Prompt page starts.
-pub fn empty_draft() -> Cell {
+/// A new image cell with no prompt, as the Prompt page starts, its Size
+/// the image's it is for.
+pub fn empty_draft(size: (u32, u32)) -> Cell {
     let mut cell = Cell::text(protocol::cell_id(), "");
     cell.kind = String::from(protocol::IMAGE_KIND);
     cell.input = Vec::new();
     cell.state = CellState::Idle;
+    cell.settings = Some(size_setting(size));
     cell
+}
+
+/// A draft's Size setting, as ig-request-anchor writes it: "1536 × 864".
+pub fn size_setting(size: (u32, u32)) -> serde_json::Value {
+    serde_json::json!({ "size": format!("{} × {}", size.0, size.1) })
 }
 
 #[cfg(test)]
@@ -519,6 +527,7 @@ mod tests {
         assert!(!gallery.can_undo(), "making the first draft was a step");
         let draft = gallery.current_cell().unwrap().clone();
         assert_eq!((draft.kind.as_str(), draft.prompt().as_str()), (protocol::IMAGE_KIND, ""));
+        assert_eq!(draft.settings, Some(serde_json::json!({ "size": "8 × 6" })), "a new draft's Size is not its image's");
         let mut edited = draft.clone();
         edited.input = vec![protocol::CellPart::Text { text: "A lighthouse.".into() }];
         assert!(gallery.set_cells(vec![edited.clone()], Some(draft.id.clone())));

@@ -219,13 +219,18 @@ impl Session {
         let image = &mut self.images[index];
         let current = image.gallery.current_cell().cloned();
         let from = current.as_ref().filter(|cell| cell.step.is_none());
+        // The takes' size, or the image's, for a draft's Size.
+        let size = image.rounds.shape().unwrap_or_else(|| {
+            let shown = &image.gallery.frame().doc.image;
+            (shown.width, shown.height)
+        });
         let mut draft = match from.filter(|cell| !image.rounds.has_rounds(&cell.id)) {
             Some(cell) => cell.clone(),
-            None => crate::gallery::empty_draft(),
+            None => crate::gallery::empty_draft(size),
         };
         draft.input = input;
         draft.model = Some(round.model.clone()).filter(|model| !model.is_empty()).or_else(|| from.and_then(|cell| cell.model.clone()));
-        draft.settings = from.and_then(|cell| cell.settings.clone());
+        draft.settings = from.and_then(|cell| cell.settings.clone()).or_else(|| Some(crate::gallery::size_setting(size)));
         draft.endpoint = from.and_then(|cell| cell.endpoint.clone());
         let mut cells = image.gallery.cells.clone();
         match cells.iter_mut().find(|cell| cell.id == draft.id) {
@@ -368,6 +373,20 @@ impl Session {
             }
             out.push(AppMessage::FileResource { tab, path, from });
         }
+        // As ig-layer-export shows it, at the working area's bottom left.
+        out.push(AppMessage::Notices {
+            tab: self.images[index].id.clone(),
+            notices: vec![protocol::Notice {
+                id: String::from("written-out"),
+                text: format!("Wrote {stem}.png. It points back to this image's {layer} layer."),
+                detail: String::new(),
+                progress: None,
+                state: protocol::NoticeState::Done,
+                actions: Vec::new(),
+                close: Some(protocol::Action::new("notice_close")),
+            }],
+            corner: protocol::NoticeCorner::BottomLeft,
+        });
         let image = &mut self.images[index];
         if !image.written_out.contains(&(name.clone(), node)) {
             image.written_out.push((name, node));
@@ -574,7 +593,9 @@ impl Session {
             return;
         };
         let image = &mut self.images[index];
-        let cell = files::stored_cell(&cell.unwrap_or_else(crate::gallery::empty_draft));
+        let shown = &image.gallery.frame().doc.image;
+        let size = (shown.width, shown.height);
+        let cell = files::stored_cell(&cell.unwrap_or_else(|| crate::gallery::empty_draft(size)));
         if image.gallery.cells.iter().any(|own| own.id == cell.id) {
             return;
         }

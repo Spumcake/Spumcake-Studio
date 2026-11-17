@@ -399,6 +399,7 @@ fn round_of(id: &str, record: &Value, state: RoundState, started: u64, outputs: 
         takes: outputs.iter().map(|path| TakeFile { path: path.clone(), media_type: media_type(path).to_string(), canon: false }).collect(),
         error,
         report,
+        artifact: None,
     }
 }
 

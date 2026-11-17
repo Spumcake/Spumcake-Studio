@@ -131,6 +131,15 @@ pub struct Declared {
     /// Plain files it asked the runner to file: the tab, the file, and what
     /// it came from, the workspace file first, then the linked files beneath. Chat Assistant Work's runner takes them.
     pub resources: VecDeque<(String, String, Vec<String>)>,
+    /// Plain files it asked the runner to file and publish as canon, each on
+    /// the publish card's one yes: the tab, the artifact, the file, what it
+    /// came from as `resources` has it, and the artifacts published with it.
+    pub publishes: VecDeque<(String, String, String, Vec<String>, Vec<String>)>,
+    /// Canon artifacts whose versions it asked for: the tab and the artifact.
+    pub canon_histories: VecDeque<(String, String)>,
+    /// Earlier versions it asked to publish again through the publish card:
+    /// the tab, the artifact, and the file.
+    pub reverts: VecDeque<(String, String, String)>,
     /// Cells the toolbar asked the host to run.
     pub run_cells: VecDeque<(String, String)>,
     /// Cells the toolbar asked the host to stop.
@@ -630,6 +639,9 @@ impl Running {
             }
             AppMessage::OpenReport { request } => declared.reports.push_back(request),
             AppMessage::FileResource { tab, path, from } => declared.resources.push_back((tab, path, from)),
+            AppMessage::Publish { tab, artifact, source, from, with } => declared.publishes.push_back((tab, artifact, source, from, with)),
+            AppMessage::CanonHistory { tab, artifact } => declared.canon_histories.push_back((tab, artifact)),
+            AppMessage::Revert { tab, artifact, file } => declared.reverts.push_back((tab, artifact, file)),
             AppMessage::AskAssistant { text, items } => declared.ask_assistant.push_back((text, items)),
             // The Prompt page's previews are drawn by the work that builds
             // them; until then they are read and let go.

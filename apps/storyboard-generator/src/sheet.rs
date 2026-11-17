@@ -371,9 +371,11 @@ pub fn stage(record: &Record, tab: String) -> Stage {
                     if layer.folder || !clip.shows(layer) {
                         continue;
                     }
-                    // The clip's field lands on the film's field.
+                    // The clip's field lands on the film's field. A hidden Shots
+                    // track shows faded, so its clips can still be found.
+                    let opacity = if film.shots_visible { layer.opacity } else { layer.opacity * HIDDEN_TRACK };
                     if let Some(drawing) = layer_drawing(record, layer, frame) {
-                        underlays.push(moved(drawing, layer.opacity, false, None, [-clip.origin[0], -clip.origin[1]]));
+                        underlays.push(moved(drawing, opacity, false, None, [-clip.origin[0], -clip.origin[1]]));
                     }
                 }
                 underlays.insert(0, plain(blank_field(film), 1.0, false, None));
@@ -392,6 +394,9 @@ pub fn stage(record: &Record, tab: String) -> Stage {
         active,
     }
 }
+
+/// How strongly a hidden Shots track's clips still show on the film's stage.
+const HIDDEN_TRACK: f64 = 0.3;
 
 /// The white of the field, under a clip's drawings at the film's level.
 fn blank_field(film: &Film) -> Value {

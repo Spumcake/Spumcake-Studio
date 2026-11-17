@@ -309,6 +309,10 @@ pub struct Round {
     /// Its report, relative to the project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
+    /// The canon artifact its step makes, "<element>: <role>", when the
+    /// step names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
 }
 
 /// One reference of a round: its file, relative to the project, and its role.
@@ -339,6 +343,24 @@ pub struct TakeFile {
     pub media_type: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub canon: bool,
+}
+
+/// One version of a canon artifact, as `history` lists them: its file,
+/// relative to the project, when it was published as `canon.sql` records
+/// it, in seconds since the epoch as `Round.started` is, its note, whether it is the version canon names now, and the request
+/// that made it, so its report can be opened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonVersion {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub published: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub canon: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {

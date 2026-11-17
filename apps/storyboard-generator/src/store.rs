@@ -59,7 +59,8 @@ pub(crate) fn file_title(path: &Path) -> String {
 pub(crate) enum Stored {
     /// A version-1 file: one drawing, from before storyboards held a film.
     Drawing(SnapshotDrawing),
-    /// A version-2 file: the film and its drawings.
+    /// A version-2 or version-3 file: the film and its drawings, and from
+    /// version 3 its sound, the listening volume, and its export.
     Film {
         id: DrawingId,
         name: String,
@@ -67,6 +68,8 @@ pub(crate) enum Stored {
         drawings: HashMap<u64, Drawing>,
         cameras: Vec<(Option<u64>, Camera)>,
         onion: Onion,
+        listening: f64,
+        exported: Option<crate::export::Exported>,
     },
 }
 
@@ -99,10 +102,12 @@ impl Stored {
     pub(crate) fn into_record(self, ids: &mut Allocator, palette: &[ToolColor]) -> Record {
         match self {
             Stored::Drawing(snapshot) => Record::from_snapshot(snapshot, ids, palette),
-            Stored::Film { id, name, film, drawings, cameras, onion } => {
+            Stored::Film { id, name, film, drawings, cameras, onion, listening, exported } => {
                 let mut record = Record::from_film(id, name, film, drawings, ids, palette);
                 record.set_cameras(cameras);
                 record.set_onion(onion);
+                record.set_listening(listening);
+                record.set_exported(exported);
                 record.set_dirty(false);
                 record
             }
@@ -110,8 +115,12 @@ impl Stored {
     }
 }
 
-/// The version the `.smx` holding a film is written as.
-const FILM_FORMAT: u64 = 2;
+/// The version the `.smx` holding a film is written as. Version 3 added
+/// the Sound tracks: a version-2 reader would drop them on its next save, so
+/// it refuses the file instead.
+const FILM_FORMAT: u64 = 3;
+/// The film's first version, which still opens.
+const FILM_FORMAT_2: u64 = 2;
 
 /// Reads either version of a storyboard file.
 pub(crate) fn stored_from_text(text: &str) -> Option<Stored> {
@@ -123,7 +132,7 @@ fn stored_from_value(value: &Value) -> Option<Stored> {
     let object = value.as_object()?;
     match object.get("format_version")?.as_u64()? {
         1 => Some(Stored::Drawing(drawing_from_value(value)?)),
-        FILM_FORMAT => {
+        FILM_FORMAT_2 | FILM_FORMAT => {
             let film = Film::from_value(object.get("film")?)?;
             let mut drawings = HashMap::new();
             for (key, drawing) in object.get("drawings")?.as_object()? {
@@ -152,13 +161,15 @@ fn stored_from_value(value: &Value) -> Option<Stored> {
                 drawings,
                 cameras,
                 onion: Onion::from_value(object.get("onion")),
+                listening: object.get("listening_volume").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.0, 1.0),
+                exported: object.get("exports").and_then(|exports| exports.get("animatic")).and_then(crate::export::Exported::from_value),
             })
         }
         _ => None,
     }
 }
 
-/// The version-2 value of a storyboard: its film, the drawings it names, and
+/// The version-3 value of a storyboard: its film, the drawings it names, and
 /// the view of the film and of each clip.
 pub(crate) fn storyboard_value(storyboard: &Record, name: &str) -> Value {
     let mut drawings = Map::new();
@@ -181,6 +192,8 @@ pub(crate) fn storyboard_value(storyboard: &Record, name: &str) -> Value {
         "drawings": drawings,
         "cameras": cameras,
         "onion": storyboard.onion().to_value(),
+        "listening_volume": storyboard.listening(),
+        "exports": { "animatic": storyboard.exported().map(crate::export::Exported::to_value) },
     })
 }
 
@@ -408,5 +421,60 @@ pub(crate) fn flush_emergency() {
     };
     for (path, bytes) in files {
         let _ = write_atomic_bytes(&path, &bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A storyboard as version 2 wrote it: a film with only its Shots track.
+    fn version_2() -> String {
+        let mut session = crate::session::Session::new();
+        session.add_clip(None, 24);
+        let mut value = storyboard_value(session.active_storyboard(), "Old");
+        value["format_version"] = serde_json::json!(2);
+        let object = value.as_object_mut().unwrap();
+        object.remove("listening_volume");
+        object.remove("exports");
+        let tracks = object["film"]["tracks"].as_array_mut().unwrap();
+        tracks.truncate(1);
+        let shots = tracks[0].as_object_mut().unwrap();
+        shots.remove("locked");
+        shots.remove("visible");
+        value.to_string()
+    }
+
+    #[test]
+    fn a_version_2_storyboard_opens_unchanged_and_clean() {
+        let stored = stored_from_text(&version_2()).expect("version 2 opens");
+        let mut ids = Allocator::new();
+        let record = stored.into_record(&mut ids, &[]);
+        assert!(!record.is_dirty(), "opening it marks it changed, so it would be rewritten");
+        let film = record.film();
+        assert_eq!(film.clips.len(), 1);
+        assert!(film.sound_tracks.is_empty() && film.shots_visible && !film.shots_locked);
+        assert_eq!(record.listening(), 1.0);
+        assert!(record.exported().is_none());
+    }
+
+    #[test]
+    fn a_version_3_storyboard_keeps_its_sound_and_export() {
+        let mut session = crate::session::Session::new();
+        session.add_clip(None, 24);
+        let mut film = session.film().clone();
+        film.place_sound(None, 4, "sounds/a.wav", "a.wav", 30).unwrap();
+        film.shots_locked = true;
+        let record = session.active_storyboard();
+        let mut value = storyboard_value(record, "New");
+        value["film"] = film.to_value();
+        value["listening_volume"] = serde_json::json!(0.4);
+        value["exports"] = serde_json::json!({ "animatic": { "file": "exports/New — animatic.mp4", "bytes": "ab", "sources": [{ "item": "cut", "fingerprint": "cd" }] } });
+        let Some(Stored::Film { film: read, listening, exported, .. }) = stored_from_text(&value.to_string()) else {
+            panic!("version 3 does not open");
+        };
+        assert_eq!(read, film);
+        assert_eq!(listening, 0.4);
+        assert_eq!(exported.unwrap().sources, vec![("cut".to_string(), "cd".to_string())]);
     }
 }

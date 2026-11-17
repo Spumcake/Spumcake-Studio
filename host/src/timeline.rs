@@ -883,10 +883,13 @@ fn preview(timeline: &Timeline, g: &Geo, view: &View, press: &Press, pos: Pos2, 
             }
             let one_row = moved.iter().all(|(r, _)| *r == row);
             let over = g.row_near(pos.y).unwrap_or(row);
+            // An item lands only on a row that takes its kind, so a sound
+            // never lands on a row of drawings.
             let target = (one_row
                 && over != row
                 && !timeline.rows[over].read_only
-                && matches!(timeline.rows[over].content, RowContent::Items { .. }))
+                && matches!(timeline.rows[over].content, RowContent::Items { .. })
+                && timeline.rows[over].takes(pressed))
             .then_some(over);
             let mut landing = Landing { shift, snap: snapped, over: target.unwrap_or(row), ..Default::default() };
             for (r, i) in &moved {
@@ -913,9 +916,16 @@ fn preview(timeline: &Timeline, g: &Geo, view: &View, press: &Press, pos: Pos2, 
                 return Preview::None;
             };
             let (start, length) = (declared.start as i64, declared.length as i64);
-            let clamp = |delta: i64| match edge {
-                Edge::Start => delta.clamp(-start, length - 1),
-                Edge::End => delta.max(1 - length),
+            // An edge stops at the item's own limits too, such as its
+            // sound's ends.
+            let clamp = |delta: i64| {
+                declared.limit_edge(
+                    edge,
+                    match edge {
+                        Edge::Start => delta.clamp(-start, length - 1),
+                        Edge::End => delta.max(1 - length),
+                    },
+                )
             };
             let mut delta = clamp(raw);
             let moving_edge = match edge {
@@ -1287,7 +1297,13 @@ fn paint(
                     if lifted {
                         dashed_rect(&rows_painter, place, BLUE);
                     } else {
-                        paint_item(ui, &rows_painter, item, place);
+                        // While the playhead is dragged, a waveform under it is brighter.
+                        let scrub = view
+                            .press
+                            .as_ref()
+                            .filter(|press| matches!(press.target, Target::Seek))
+                            .map(|press| g.playhead_x(press.last_seek.unwrap_or(timeline.playhead)));
+                        paint_item_scrubbed(ui, &rows_painter, item, place, scrub);
                     }
                     item_response(ui, &rows_painter, g, item, place, base.with(("item", row, index)), view.press.is_none(), out);
                 }
@@ -1476,6 +1492,16 @@ fn row_names(ui: &mut egui::Ui, painter: &Painter, row: &TimelineRow, place: Rec
 /// An item: its fill and edge in its style, its thumbnail, icon, label,
 /// progress, waveform, and end mark.
 fn paint_item(ui: &egui::Ui, painter: &Painter, item: &TimelineItem, place: Rect) {
+    paint_item_scrubbed(ui, painter, item, place, None);
+}
+
+/// How far either side of the playhead a waveform is drawn brighter while
+/// the playhead is dragged, in points.
+const SCRUB_REACH: f32 = 12.0;
+
+/// As `paint_item`; `scrub` is where the dragged playhead is, so the
+/// waveform under it shows the sound being heard.
+fn paint_item_scrubbed(ui: &egui::Ui, painter: &Painter, item: &TimelineItem, place: Rect, scrub: Option<f32>) {
     let radius = 6.0;
     let declared = rgb(item.fill);
     let (fill, text) = match item.style {
@@ -1549,6 +1575,7 @@ fn paint_item(ui: &egui::Ui, painter: &Painter, item: &TimelineItem, place: Rect
     if !item.waveform.is_empty() {
         // The peaks are spread over the whole item and drawn after its words.
         let color = mix(declared, Color32::BLACK, 0.45);
+        let bright = mix(declared, Color32::BLACK, 0.1);
         let half = (place.height() - 10.0) / 2.0;
         let count = item.waveform.len() as f32;
         let mut px = x.max(place.left() + 4.0);
@@ -1557,7 +1584,8 @@ fn paint_item(ui: &egui::Ui, painter: &Painter, item: &TimelineItem, place: Rect
             let to = (((px + 1.5 - place.left()) / place.width() * count).ceil() as usize).clamp(from + 1, item.waveform.len());
             let peak = item.waveform[from.min(item.waveform.len() - 1)..to].iter().copied().fold(0.0_f32, f32::max).clamp(0.0, 1.0);
             let reach = (peak * half).max(0.5);
-            inner.line_segment([pos2(px, cy - reach), pos2(px, cy + reach)], (1.0, color));
+            let heard = scrub.is_some_and(|at| (px - at).abs() <= SCRUB_REACH);
+            inner.line_segment([pos2(px, cy - reach), pos2(px, cy + reach)], if heard { (1.5, bright) } else { (1.0, color) });
             px += 1.5;
         }
     }
@@ -2051,6 +2079,44 @@ mod tests {
             gestures(&outs),
             vec![&TimelineGesture::Resize { pick: item_pick(), edge: Edge::End, frames: 3 }]
         );
+    }
+
+    /// Catches an item previewed as landing on a row that does not take its
+    /// kind, such as a sound dragged onto a row of drawings.
+    #[test]
+    fn an_item_lands_only_on_a_row_that_takes_its_kind() {
+        for (accepts, lands) in [("drawing", false), ("sound", true)] {
+            let mut driver = Driver::new();
+            if let RowContent::Items { items } = &mut driver.timeline.rows[0].content {
+                items[0].kind = Some("sound".into());
+            }
+            let mut other = driver.timeline.rows[0].clone();
+            other.id = "r3".into();
+            other.accepts = Some(accepts.into());
+            other.content = RowContent::Items { items: Vec::new() };
+            driver.timeline.rows.push(other);
+            driver.frame(Vec::new());
+            let outs = driver.drag(driver.place(15.0, 0), driver.place(15.0, 2));
+            let row = gestures(&outs).iter().find_map(|gesture| match gesture {
+                TimelineGesture::Move { row, .. } => Some(row.clone()),
+                _ => None,
+            });
+            assert_eq!(row.flatten().is_some(), lands, "a sound over a row that takes {accepts}");
+        }
+    }
+
+    /// Catches an edge that passes the item's own limit, such as dragging a
+    /// sound's end past where its sound ends.
+    #[test]
+    fn an_edge_stops_at_the_items_limit() {
+        let mut driver = Driver::new();
+        if let RowContent::Items { items } = &mut driver.timeline.rows[0].content {
+            items[0].latest_end = Some(22);
+        }
+        driver.frame(Vec::new());
+        let edge = driver.place(20.0, 0) - vec2(2.0, 0.0);
+        let outs = driver.drag(edge, edge + vec2(6.0 * (driver.place(1.0, 0).x - driver.place(0.0, 0).x), 0.0));
+        assert_eq!(gestures(&outs), vec![&TimelineGesture::Resize { pick: item_pick(), edge: Edge::End, frames: 2 }]);
     }
 
     /// Catches a playhead that seeks only on release, or never lets go.

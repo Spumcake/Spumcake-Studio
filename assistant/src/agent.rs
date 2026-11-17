@@ -839,8 +839,8 @@ mod compaction {
             messages.push(call(&format!("c{n}"), "inpainter__project__read_file"));
             messages.push(output(&format!("c{n}"), &"x".repeat(15_000)));
         }
-        messages.push(call("look", "inpainter__project__look_at_file"));
-        messages.push(output("look", "looked"));
+        messages.push(call("seen", "inpainter__project__look_at_file"));
+        messages.push(output("seen", "looked"));
         messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": format!("{IMAGES_LEAD}`look_at_file` returned:") }, image_part("image/png", &"A".repeat(1_400_000))] }));
         compact_request(&mut messages);
         assert!(messages[1]["content"].as_str().unwrap().contains(&skill), "the skill's body was cut");

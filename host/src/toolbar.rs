@@ -664,6 +664,7 @@ fn option_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>, squee
             widgets::outlined(ui.painter(), rect, 6.0, fill, edge);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, text);
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, *enabled, label));
+            note_item_rect(ui.ctx(), action, rect);
             if *enabled && response.clicked() {
                 chosen.push(action.clone());
             }
@@ -911,6 +912,7 @@ fn split_popover(
     paint_icon(ui.painter(), arrow.center(), CHEVRON_ICON, 12.0, color(open || opener.hovered()));
     pressed.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, tip));
     opener.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, enabled, tip));
+    note_item_rect(ui.ctx(), action, rect);
     if enabled && pressed.clicked() {
         chosen.push(action.clone());
     }
@@ -946,6 +948,23 @@ fn split_popover(
 /// it can be pressed on its own.
 const SPLIT_CHEVRON_W: f32 = 20.0;
 
+fn item_rects_id() -> egui::Id {
+    egui::Id::new("toolbar-item-rects")
+}
+
+/// Keeps where the item that sends `action` was drawn, by the action's id.
+fn note_item_rect(ctx: &egui::Context, action: &Action, rect: Rect) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<std::collections::HashMap<String, Rect>>(item_rects_id()).insert(action.id.clone(), rect);
+    });
+}
+
+/// Where the button or push that sends the action `id` was last drawn,
+/// so a card it opens, such as the published versions, can sit under it.
+pub(crate) fn item_rect(ctx: &egui::Context, id: &str) -> Option<Rect> {
+    ctx.data(|data| data.get_temp::<std::collections::HashMap<String, Rect>>(item_rects_id()).and_then(|rects| rects.get(id).copied()))
+}
+
 /// The edits made in popovers since the last call.
 pub(crate) fn take_popover_edits(ctx: &egui::Context) -> Vec<crate::panel::Sent> {
     ctx.data_mut(|data| data.remove_temp::<Vec<crate::panel::Sent>>(popover_edits_id()).unwrap_or_default())
@@ -968,6 +987,9 @@ fn item_ui(ui: &mut egui::Ui, item: &ToolItem, chosen: &mut Vec<Action>) {
             menu,
         } => {
             let response = icon_button(ui, icon, Some(tip), *enabled, *selected);
+            if let Some(action) = action {
+                note_item_rect(ui.ctx(), action, response.rect);
+            }
             if response.clicked()
                 && *enabled
                 && let Some(action) = action

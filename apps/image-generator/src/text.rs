@@ -14,8 +14,10 @@ use crate::layered::Pixels;
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont, VariableFont, point};
 use serde::{Deserialize, Serialize};
 
-/// Inter, its roman and italic variable files, bold through the weight axis.
-const INTER: &[u8] = include_bytes!("../assets/fonts/Inter-Variable.ttf");
+/// Inter, its roman and italic variable files, bold through the weight
+/// axis. The roman ships in `layers`, which both workspaces draw their
+/// labels with; the italic is this application's own.
+const INTER: &[u8] = layers::label::INTER;
 const INTER_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic-Variable.ttf");
 /// Hack, egui's monospace face. It has no bold or italic of its own, so they
 /// are drawn by thickening and slanting it.

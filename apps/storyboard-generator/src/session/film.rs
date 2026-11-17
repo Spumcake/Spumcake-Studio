@@ -13,6 +13,10 @@ use crate::record::View;
 pub struct Picked {
     pub clips: Vec<u64>,
     pub cells: Option<Cells>,
+    /// Sounds on the Sound tracks.
+    pub sounds: Vec<u64>,
+    /// A Sound track whose page the panel shows, after Rename.
+    pub track: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,7 +85,7 @@ impl Session {
         self.picked.get(&self.active_id()).cloned().unwrap_or_default()
     }
 
-    fn set_picked(&mut self, picked: Picked) {
+    pub(super) fn set_picked(&mut self, picked: Picked) {
         let id = self.active_id();
         self.picked.insert(id, picked);
     }
@@ -89,11 +93,11 @@ impl Session {
     /// Whether the drawing tools work: inside a clip, on a layer that shows
     /// and is not locked. Everywhere else they are greyed out.
     pub fn can_draw(&self) -> bool {
-        self.active_storyboard().can_draw()
+        self.active_storyboard().can_draw() && !self.showing_frames()
     }
 
     /// One change to the film, as one undo step.
-    fn change_film(&mut self, change: impl FnOnce(&mut Film) -> Option<Vec<NewDrawing>>) -> bool {
+    pub(super) fn change_film(&mut self, change: impl FnOnce(&mut Film) -> Option<Vec<NewDrawing>>) -> bool {
         self.settle();
         let palette = self.brush_palette.clone();
         let index = self.active;
@@ -110,6 +114,8 @@ impl Session {
         let view = self.view();
         let mut picked = self.picked();
         picked.clips.retain(|id| film.clip(*id).is_some());
+        picked.sounds.retain(|id| film.sound(*id).is_some());
+        picked.track = picked.track.filter(|id| film.sound_track(*id).is_some());
         if let Some(cells) = picked.cells.as_mut() {
             let clip = view.clip.and_then(|clip| film.clip(clip));
             cells.layers.retain(|layer| clip.is_some_and(|clip| clip.layer(*layer).is_some()));
@@ -143,6 +149,9 @@ impl Session {
 
     /// A new clip at `start`, or after the last. Returns its id.
     pub fn add_clip(&mut self, start: Option<u32>, length: u32) -> Option<u64> {
+        if self.film().shots_locked {
+            return None;
+        }
         let mut made = None;
         self.change_film(|film| {
             let (id, drawings) = film.add_clip(start, length);
@@ -150,12 +159,15 @@ impl Session {
             Some(drawings)
         });
         if let Some(id) = made {
-            self.set_picked(Picked { clips: vec![id], cells: None });
+            self.set_picked(Picked { clips: vec![id], ..Picked::default() });
         }
         made
     }
 
     pub fn duplicate_clip(&mut self, clip: u64) -> Option<u64> {
+        if self.film().shots_locked {
+            return None;
+        }
         let mut made = None;
         self.change_film(|film| {
             let (id, drawings) = film.duplicate_clip(clip)?;
@@ -166,15 +178,15 @@ impl Session {
     }
 
     pub fn delete_clip(&mut self, clip: u64) -> bool {
-        self.change_film(|film| film.delete_clip(clip).then(Vec::new))
+        self.change_film(|film| (!film.shots_locked && film.delete_clip(clip)).then(Vec::new))
     }
 
     pub fn resize_clip(&mut self, clip: u64, end: bool, frames: i64) -> bool {
-        self.change_film(|film| film.resize_clip(clip, end, frames).then(Vec::new))
+        self.change_film(|film| (!film.shots_locked && film.resize_clip(clip, end, frames)).then(Vec::new))
     }
 
     pub fn move_clips(&mut self, clips: &[u64], frames: i64, push: bool) -> bool {
-        self.change_film(|film| film.move_clips(clips, frames, push).then(Vec::new))
+        self.change_film(|film| (!film.shots_locked && film.move_clips(clips, frames, push)).then(Vec::new))
     }
 
     pub fn set_clip_text(&mut self, clip: u64, which: ClipText, text: &str) -> bool {
@@ -232,7 +244,7 @@ impl Session {
     }
 
     pub fn select_clips(&mut self, clips: Vec<u64>) {
-        self.set_picked(Picked { clips, cells: None });
+        self.set_picked(Picked { clips, ..Picked::default() });
     }
 
     /// Opens a clip on its sheet, at its first frame and first layer.
@@ -264,7 +276,7 @@ impl Session {
             film_frame: start + view.frame,
             layer: None,
         });
-        self.set_picked(Picked { clips: vec![clip], cells: None });
+        self.set_picked(Picked { clips: vec![clip], ..Picked::default() });
         true
     }
 
@@ -293,7 +305,7 @@ impl Session {
     pub fn select_cells(&mut self, layers: Vec<u64>, start: u32, end: u32) {
         let (start, end) = (start.min(end), start.max(end));
         let cells = (!layers.is_empty()).then_some(Cells { layers, start, end });
-        self.set_picked(Picked { clips: Vec::new(), cells });
+        self.set_picked(Picked { cells, ..Picked::default() });
     }
 
     fn in_clip<R>(&mut self, change: impl FnOnce(&mut Film, u64) -> Option<R>) -> Option<R> {
@@ -419,7 +431,7 @@ impl Session {
         if changed && let Some(mut cells) = self.picked().cells {
             cells.start = (i64::from(cells.start) + frames).max(0) as u32;
             cells.end = (i64::from(cells.end) + frames).max(0) as u32;
-            self.set_picked(Picked { clips: Vec::new(), cells: Some(cells) });
+            self.set_picked(Picked { cells: Some(cells), ..Picked::default() });
         }
         changed
     }

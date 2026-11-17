@@ -241,6 +241,6 @@ impl HostWindow {
         let Some(id) = crate::prompt_page::cell_of_request(&folder, &request).and_then(|item| item.item) else { return };
         let Some((app, tab)) = self.cell_home(&id) else { return };
         self.prompt_page.forget();
-        self.send(app, HostMessage::CellBecameStep { tab, cell: id, step });
+        self.send(app, HostMessage::CellBecameStep { tab, cell: id, step, artifact: None });
     }
 }

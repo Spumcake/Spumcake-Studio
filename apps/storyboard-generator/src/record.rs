@@ -64,6 +64,11 @@ pub struct Record {
     cameras: HashMap<Option<u64>, Camera>,
     /// The onion skin's settings, a view aid kept with the storyboard.
     onion: Onion,
+    /// How loud the film plays here, 0 to 1. Kept with the storyboard,
+    /// never in the export, and never an undo step.
+    listening: f64,
+    /// What the last finished animatic export was made from.
+    exported: Option<crate::export::Exported>,
     id: DrawingId,
     name: String,
     generated_name: String,
@@ -105,6 +110,8 @@ impl Record {
             view: View::default(),
             cameras: HashMap::new(),
             onion: Onion::default(),
+            listening: 1.0,
+            exported: None,
             id,
             generated_name: name.clone(),
             name,
@@ -176,6 +183,33 @@ impl Record {
         self.onion = onion;
         self.dirty = true;
         true
+    }
+
+    pub fn listening(&self) -> f64 {
+        self.listening
+    }
+
+    /// Saved with the storyboard, never an undo step.
+    pub fn set_listening(&mut self, volume: f64) -> bool {
+        let volume = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { return false };
+        if volume == self.listening {
+            return false;
+        }
+        self.listening = volume;
+        self.dirty = true;
+        true
+    }
+
+    pub fn exported(&self) -> Option<&crate::export::Exported> {
+        self.exported.as_ref()
+    }
+
+    /// Kept beside the film, so undo never takes it back.
+    pub fn set_exported(&mut self, exported: Option<crate::export::Exported>) {
+        if self.exported != exported {
+            self.exported = exported;
+            self.dirty = true;
+        }
     }
 
     /// A drawing of this storyboard, the one being worked on included.
