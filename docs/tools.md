@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-110 tools.
+111 tools.
 
 ## The host
 
@@ -27,10 +27,11 @@ Read the project and the skills, look at its images, write by hand where the age
 - **`inpainter__project__read_skill`**: Read a skill, unchanged, with its folder and its repository, which its relative links resolve in. Takes `name` (string, required).
 - **`inpainter__project__run_command`**: Run a command in the project, such as a Spumcake-Skills script (request.py and pipeline.py may be named by their file name alone), a builder, or a script of the agent's own, after the user approves it. Its output is answered when it ends. A command that spends is refused: send it with send_request or rerun_step. Takes `command` (array, required), `why` (string, required).
 - **`inpainter__project__send_request`**: Send one request to a model with request.py, from its spec: its plan, worked out offline, is shown to the user with its cost, its prompt as sent, and every reference in order, and it runs only on their yes, exactly as approved. Answers with what request.py tell says. Takes `spec` (string, required), `stand_in` (boolean).
-- **`inpainter__project__rerun_step`**: Make a take of the first step of a pipeline that is out of date, or the first a change reaches, with pipeline.py rerun: its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `fact` (string), `stand_in` (boolean).
+- **`inpainter__project__rerun_step`**: Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `chain` (string), `fact` (string), `stand_in` (boolean), `step` (string).
 - **`inpainter__project__web_search`**: Search the web, or its images, with Brave Search, for research such as a skill's references. All the searches one research request needs are asked for together: the user approves them with their cost first. Answers each search's results, with each one's title, address, and the page it is on. Takes `searches` (array, required), `why` (string, required).
 - **`inpainter__project__fetch_page`**: Read a web page's text, to learn what an image found is, who made it, and the use its licence allows. Costs nothing and needs no approval. Takes `url` (string, required).
 - **`inpainter__project__download_file`**: Download one file found in research, after the user approves it: the file, the page it is on, and its licence are shown. It waits in Studio's own folder until you file it into sources/ with send_request and a spec of request.py's research kind, whose outputs are the files and whose sources give each file's address, page, and the use allowed. Takes `licence` (string, required), `page` (string, required), `url` (string, required).
+- **`inpainter__project__publish_take`**: Put a take into the chain: publish it as a canon artifact through the publish card, which shows the user the version it writes and what a commit takes along, and runs only on their yes. Read pipeline.py touches --artifact "<artifact>" --json first and tell the user what it reaches. A take made from inputs that are no longer canon is refused. Takes `artifact` (string, required), `take` (string, required), `with` (array).
 
 ## Image Generator
 

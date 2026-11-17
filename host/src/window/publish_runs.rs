@@ -482,6 +482,7 @@ mod tests {
         skills("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);
         skills("pipeline.py", &["step", "001", "the diner", "layout", "--order", "1", "--skill", "build-previs", "--artifact", "the diner: layout"]);
         std::fs::write(folder.join("work/layout.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(folder.join("work/Layout.ipx"), b"IPX1\n{}\n").unwrap();
         let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
         let asked = |from: Vec<String>| Asked::Publish { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: String::from("the diner: layout"), source: String::from("work/layout.png"), from, with: Vec::new() };
         assert_eq!(prepare(&place, &asked(vec![String::from("library/never-published.png")])), Err(String::from(NOT_CANON)));
