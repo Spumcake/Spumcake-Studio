@@ -1,4 +1,4 @@
-//! The runner's side of publishing from a workspace, in a Skills project,
+//! The runner's side of publishing from a workspace,
 //! as the Studio session manager laid it out on 2026-11-16: it takes what
 //! `publishing.rs` keeps in `Publishing::asked`, fills the publish card or
 //! answers the history, and carries out each card the user confirmed, all
@@ -144,11 +144,13 @@ fn git(folder: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Whether the project is kept in git, so a publish can be committed: it
-/// is inside a repository's work tree, and that repository does not ignore
-/// it, as one holding the project only by chance would.
+/// Whether the project is kept in git, so a publish can be committed: its
+/// repository tracks a file in the project's folder, as spumcake-benchmarks
+/// tracks Last order's. A repository that only happens to hold the folder,
+/// ignoring it or never having added it, is not the project's.
 fn in_git(folder: &Path) -> bool {
-    git(folder, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true") && git(folder, &["check-ignore", "-q", "."]).is_err()
+    git(folder, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
+        && git(folder, &["ls-files", "--", "."]).is_ok_and(|tracked| !tracked.trim().is_empty())
 }
 
 /// The run log's lines not yet committed, which a commit takes along, each
@@ -342,18 +344,53 @@ fn sources_of(place: &Place, artifact: &str, request: Option<&str>, file: &str, 
     Ok(sources)
 }
 
+/// The sources a version had, with the roles it really had, as Skills'
+/// own history works them out, from the run log or canon.sql as it stood
+/// at that version's commit. None when no record holds them.
+fn version_sources(place: &Place, artifact: &str, file: &str) -> Option<Vec<(String, String)>> {
+    let printed = place.script("pipeline.py", &["history", &place.pipeline, artifact, "--json"]).ok()?;
+    let listed: Value = serde_json::from_str(&printed).ok()?;
+    let version = listed.as_array()?.iter().find(|version| version.get("file").and_then(Value::as_str) == Some(file))?;
+    let sources = version.get("made_from")?.as_array()?;
+    Some(
+        sources
+            .iter()
+            .filter_map(|source| {
+                let name = source.get("source").and_then(Value::as_str)?.to_string();
+                let role = source.get("role").and_then(Value::as_str).filter(|role| !role.trim().is_empty()).unwrap_or("input").to_string();
+                Some((name, role))
+            })
+            .collect(),
+    )
+}
+
 /// The sources a file was published with before, from the run log's last
-/// publish of it as this artifact, with the roles canon gives them now or
-/// "input": a revert keeps what was named when it was first published.
+/// publish of it as this artifact, with their roles as the log records
+/// them, or, in an older log, as canon gives them now or "input": a revert
+/// keeps what was named when it was first published.
 fn logged_sources(place: &Place, artifact: &str, file: &str) -> Vec<(String, String)> {
     let log = std::fs::read_to_string(place.folder.join("pipeline").join(&place.pipeline).join("runs.jsonl")).unwrap_or_default();
-    let names: Vec<String> = log
+    let Some(event) = log
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|event| event.get("event").and_then(Value::as_str) == Some("publish") && event.get("artifact").and_then(Value::as_str) == Some(artifact) && event.get("file").and_then(Value::as_str) == Some(file))
         .last()
-        .and_then(|event| event.get("made_from").and_then(Value::as_array).map(|names| names.iter().filter_map(Value::as_str).map(String::from).collect()))
-        .unwrap_or_default();
+    else {
+        return Vec::new();
+    };
+    // Skills writes each source with its role from 07f09ad on.
+    if let Some(sources) = event.get("sources").and_then(Value::as_array) {
+        return sources
+            .iter()
+            .filter_map(|source| {
+                let name = source.get("source").and_then(Value::as_str)?.to_string();
+                let role = source.get("role").and_then(Value::as_str).filter(|role| !role.trim().is_empty()).unwrap_or("input").to_string();
+                Some((name, role))
+            })
+            .collect();
+    }
+    // An older log names its sources only: their roles are canon's now.
+    let names: Vec<String> = event.get("made_from").and_then(Value::as_array).map(|names| names.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default();
     let query = format!("SELECT json_array(source, role) FROM made_from WHERE artifact={}", quoted(artifact));
     let roles: Vec<(String, String)> = place
         .script("pipeline.py", &["sql", &place.pipeline, &query, "--read-only"])
@@ -450,7 +487,9 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
         }
         Asked::Revert { artifact, file, .. } => {
             let request = versions(place, artifact)?.into_iter().find(|version| &version.file == file).and_then(|version| version.request);
-            let named = logged_sources(place, artifact, file);
+            // The roles that version really had, from Skills' history,
+            // or else the run log.
+            let named = version_sources(place, artifact, file).unwrap_or_else(|| logged_sources(place, artifact, file));
             let made_from = sources_of(place, artifact, request.as_deref(), file, &named)?;
             (artifact.clone(), file.clone(), request, made_from, Vec::new())
         }
@@ -497,10 +536,10 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
 }
 
 impl HostWindow {
-    /// Where publishing runs: the open Skills project's folder, scripts,
+    /// Where publishing runs: the open project's folder, scripts,
     /// and living pipeline.
     fn publish_place(&mut self) -> Option<Place> {
-        let (folder, env): (PathBuf, ScriptEnv) = self.skills_project()?;
+        let (folder, env): (PathBuf, ScriptEnv) = self.project_scripts()?;
         let pipeline = crate::prompt_page::living_pipeline(&folder)?;
         Some(Place { scripts: env.scripts?, vars: env.vars, folder, pipeline })
     }
@@ -552,10 +591,10 @@ impl HostWindow {
         }
         for (app, (id, _tab, step)) in runs {
             let Some(place) = self.publish_place() else {
-                self.send(app, HostMessage::StepRan { id, take: None, error: Some(String::from("Only a Skills project with a pipeline runs its steps.")) });
+                self.send(app, HostMessage::StepRan { id, take: None, error: Some(String::from("This project has no pipeline yet, so it has no step to run.")) });
                 continue;
             };
-            let Some((folder, env)) = self.skills_project() else { continue };
+            let Some((folder, env)) = self.project_scripts() else { continue };
             let input = serde_json::json!({ "pipeline": place.pipeline, "chain": step.chain, "step": step.step });
             if let crate::runner::Begun::Answered(answer) = self.runner.begin(&folder, env, &step_call(app, &id), "", crate::runner::RERUN_STEP, &input) {
                 self.answer_step_run(answer);
@@ -753,6 +792,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// Catches a commit made into a repository that only happens to hold the
+    /// project: one that has never added it, or ignores it, is not its own.
+    #[test]
+    fn only_a_repository_that_keeps_the_project_is_committed_to() {
+        let outer = std::env::temp_dir().join(format!("in-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outer);
+        std::fs::create_dir_all(outer.join("proj")).unwrap();
+        std::fs::write(outer.join("proj/brief.md"), "a brief").unwrap();
+        let run = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(&outer).output().unwrap().status.success(), "git {args:?}");
+        run(&["init", "-q"]);
+        assert!(!in_git(&outer.join("proj")), "a folder its repository never added was taken as kept in git");
+        run(&["add", "proj/brief.md"]);
+        assert!(in_git(&outer.join("proj")), "a tracked project was not taken as kept in git");
+        let _ = std::fs::remove_dir_all(&outer);
+    }
+
     /// Catches a step run answered with the wrong file, or with none when a
     /// request still waits at its endpoint.
     #[test]
@@ -795,7 +850,9 @@ mod tests {
             run("python3", &all)
         };
         run("git", &["init", "-q"]);
-        run("git", &["-c", "user.name=Check", "-c", "user.email=check@example.org", "commit", "-q", "--allow-empty", "-m", "start"]);
+        std::fs::write(folder.join("README.md"), "A scratch project.").unwrap();
+        run("git", &["add", "README.md"]);
+        run("git", &["-c", "user.name=Check", "-c", "user.email=check@example.org", "commit", "-q", "-m", "start"]);
         skills("pipeline.py", &["new", "001"]);
         skills("pipeline.py", &["element", "001", "the diner", "--kind", "place"]);
         skills("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);

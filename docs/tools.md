@@ -14,7 +14,7 @@ Write a prompt and run it as a cell in the conversation, and find the project's 
 - **`inpainter__prompt__list_out_of_date`**: List every item of the project that is out of date, because something it was made from changed: each with its file, its id, its name, its workspace, and what changed, those made from others after the others. Takes nothing.
 - **`inpainter__prompt__edit_image`**: Open the image an Image cell in the conversation shows as new work, in its own tab, ready to paint. The cell is unchanged. Takes `cell` (string).
 
-## The host, in a Skills project
+## The host, in a project
 
 ### Project (`project`)
 

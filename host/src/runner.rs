@@ -1,6 +1,6 @@
 //! The script runner: Spumcake-Skills' scripts, and any other command the
-//! assistant asks for, run in a Skills project after the user approves
-//! each one, as the Studio-as-a-setup contract says.
+//! assistant asks for, run in the project after the user approves each
+//! one, as the Studio-as-a-setup contract says.
 //!
 //! A command that spends, `request.py run` or `pipeline.py rerun` without
 //! `--stand-in`, never runs as a plain command: it is asked for with its
@@ -244,7 +244,7 @@ pub(crate) fn write_setup(data: &Path) -> Option<PathBuf> {
 fn resolve(command: &[String], env: &ScriptEnv) -> Result<Vec<String>, String> {
     let first = command.first().ok_or("No command was given.")?;
     let script = |name: &str| -> Result<String, String> {
-        let folder = env.scripts.as_ref().ok_or("No Spumcake-Skills checkout is in the Skill folders, so its scripts cannot run. Add it in Settings.")?;
+        let folder = env.scripts.as_ref().ok_or(crate::skills_checkout::MISSING)?;
         Ok(folder.join(name).display().to_string())
     };
     Ok(match first.as_str() {
@@ -610,14 +610,14 @@ impl Runner {
         self.asking.as_ref()
     }
 
-    /// Takes the programs a Skills project needs as found, for checks on a
+    /// Takes the programs a project's scripts need as found, for checks on a
     /// computer that may lack one the check does not run.
     #[cfg(test)]
     pub(crate) fn assume_prerequisites(&mut self, folder: &Path) {
         self.checked = Some((folder.to_path_buf(), Vec::new()));
     }
 
-    /// The programs a Skills project's scripts need, with any missing.
+    /// The programs a project's scripts need, with any missing.
     fn missing(&mut self, folder: &Path) -> Vec<String> {
         if let Some((known, missing)) = &self.checked
             && known == folder

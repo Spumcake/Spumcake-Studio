@@ -141,9 +141,8 @@ pub struct Declared {
     pub resources: VecDeque<(String, String, Vec<String>, Option<String>)>,
     /// Canon queries it asked the host to read: the id and the query.
     pub canon_reads: VecDeque<(String, String)>,
-    /// Step edits it asked for: the id, the tab, the step, its script, and
-    /// its references.
-    pub step_edits: VecDeque<(String, String, protocol::StepRef, Option<String>, Option<String>)>,
+    /// Step edits it asked for: the id, the tab, the step, and what to set.
+    pub step_edits: VecDeque<(String, String, protocol::StepRef, crate::window::StepFields)>,
     /// Steps it asked to run again: the id, the tab, and the step. Chat
     /// Assistant Work's runner takes them.
     pub step_runs: VecDeque<(String, String, protocol::StepRef)>,
@@ -669,7 +668,9 @@ impl Running {
             AppMessage::CanonHistory { tab, artifact } => declared.canon_histories.push_back((tab, artifact)),
             AppMessage::Revert { tab, artifact, file } => declared.reverts.push_back((tab, artifact, file)),
             AppMessage::ReadCanon { id, query } => declared.canon_reads.push_back((id, query)),
-            AppMessage::EditStep { id, tab, step, script, refs } => declared.step_edits.push_back((id, tab, step, script, refs)),
+            AppMessage::EditStep { id, tab, step, script, refs, order, skill, artifact } => {
+                declared.step_edits.push_back((id, tab, step, crate::window::StepFields { script, refs, order, skill, artifact }))
+            }
             AppMessage::RunStep { id, tab, step } => declared.step_runs.push_back((id, tab, step)),
             AppMessage::OpenIn { path, media_type } => declared.open_ins.push_back((path, media_type)),
             AppMessage::Deliver { tab, artifact, file, uses, size, frame_rate, format } => {

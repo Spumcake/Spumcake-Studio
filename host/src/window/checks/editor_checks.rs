@@ -110,8 +110,9 @@ fn a_brush_drag_paints_undoes_and_comes_back_from_the_project() {
     window.app.write_project(true);
     keep_ticking(&mut window);
     let folder = window.app.project.as_ref().unwrap().folder.clone();
-    let kept = std::fs::read_dir(&folder).unwrap().flatten().any(|entry| entry.path().extension().is_some_and(|ext| ext == "ipx"));
-    assert!(kept, "no image file was kept in the project");
+    // Every project keeps its workspaces' files in work/, as Last order does.
+    let kept = std::fs::read_dir(folder.join("work")).into_iter().flatten().flatten().any(|entry| entry.path().extension().is_some_and(|ext| ext == "ipx"));
+    assert!(kept, "no image file was kept in the project's work/");
     drop(window);
 
     let stand_in = StandIn::start(Vec::new());

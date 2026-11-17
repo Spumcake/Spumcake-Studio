@@ -35,14 +35,14 @@ fn tool_text(request: &Value) -> String {
         .to_string()
 }
 
-/// Catches the assistant blind to a Skills project: with the stand-in model
+/// Catches the assistant blind to the project: with the stand-in model
 /// it reads a request's record, looks at its output, and reads a skill;
 /// writing into `library/` is refused; the host offers no tool that
 /// generates around `request.py`; and every skill is listed as rendering
 /// through `request.py`.
 #[test]
-fn the_assistant_reads_a_skills_project_and_its_skills() {
-    let dir = scratch("skills-project");
+fn the_assistant_reads_the_project_and_its_skills() {
+    let dir = scratch("project-skills");
     let host_tool = |name: &str| protocol::tool_key(crate::route::HOST_ID, "project", name);
     let stand_in = StandIn::start(vec![
         call_reply(&host_tool("read_file"), json!({"path": "requests/2026-11-14_13-30-keyframe-the-line.html"})),
@@ -66,9 +66,9 @@ fn the_assistant_reads_a_skills_project_and_its_skills() {
     let requests = stand_in.requests();
 
     let tools = offered(&requests[0]);
-    for generating in ["run_text_prompt", "edit_image", "list_out_of_date"] {
-        assert!(!tools.iter().any(|tool| tool.ends_with(generating)), "{generating} is offered in a Skills project: {tools:?}");
-    }
+    // The conversation's own prompt tools stay offered beside the
+    // project's, as the owner set on 2026-11-17.
+    assert!(tools.iter().any(|tool| tool.ends_with("run_text_prompt")), "the conversation's prompt tools are gone from a project: {tools:?}");
     for name in ["list_files", "read_file", "look_at_file", "write_file", "read_skill"] {
         assert!(tools.contains(&host_tool(name)), "{name} is not offered: {tools:?}");
     }
