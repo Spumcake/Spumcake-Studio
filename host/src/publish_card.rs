@@ -9,9 +9,6 @@
 //! The host draws what the runner gives it and names no workspace: the
 //! file, the canon name, the next version, and the lines that ride along.
 
-// Drawn once the window opens these cards; until then only the tests do.
-#![allow(dead_code)]
-
 use crate::typescale as ts;
 use crate::widgets::{self, BORDER, MUTED, TEXT};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
@@ -264,7 +261,8 @@ pub(crate) mod tests {
     /// its texts and the choice.
     fn draw(ctx: &egui::Context, view: &PublishCardView, events: Vec<egui::Event>) -> (Vec<(String, Rect)>, Option<PublishCardEvent>) {
         let mut chosen = None;
-        let output = ctx.run_ui(screen(events), |ui| chosen = show(ui.ctx(), view));
+        let mut output = ctx.run_ui(screen(events), |ui| chosen = show(ui.ctx(), view));
+        output.textures_delta.clear();
         (texts(&output.shapes), chosen)
     }
 

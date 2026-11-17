@@ -23,6 +23,7 @@ use std::time::Instant;
 
 mod flows;
 mod prompt_runs;
+mod publishing;
 mod settings;
 #[cfg(test)]
 mod checks;
@@ -159,6 +160,8 @@ struct HostWindow {
     runner: crate::runner::Runner,
     /// The Prompt page's runner duties in a Skills project.
     prompt_page: crate::prompt_page::PromptPage,
+    /// What workspaces asked to publish, and the cards for it.
+    publishing: publishing::Publishing,
     /// Connection tests and model lists, by endpoint.
     probes: crate::endpoints::Probes,
     /// The assistant's endpoint and prompt as last sent, so a change in
@@ -286,6 +289,7 @@ impl HostWindow {
             keys: crate::keys::Keys::default(),
             runner: crate::runner::Runner::default(),
             prompt_page: crate::prompt_page::PromptPage::default(),
+            publishing: publishing::Publishing::default(),
             probes: crate::endpoints::Probes::default(),
             configured: None,
             level: None,
@@ -401,6 +405,7 @@ impl HostWindow {
         if action.id == "window.maximize" {
             return;
         }
+        self.publishing.last_tool = Some(action.id.clone());
         let viewport = self.viewport;
         let mut out = Vec::new();
         {
@@ -728,6 +733,7 @@ impl eframe::App for HostWindow {
         self.take_cell_requests();
         self.take_items();
         self.take_reports();
+        self.take_publishing();
         // An Image cell's image shows Edit when an application edits it,
         // and waits while the assistant works, as every control does.
         let editable = if self.locked() { Vec::new() } else { self.edited_types() };
@@ -822,6 +828,7 @@ impl eframe::App for HostWindow {
                 self.assistant.send(Command::Result(answer));
             }
         }
+        self.show_publishing(&ctx);
         self.draw_model_menu(&ctx);
         if bar_pressed {
             self.toggle_workspace();

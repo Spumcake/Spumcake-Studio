@@ -8,9 +8,6 @@
 //!
 //! The host draws what the runner read and names no workspace.
 
-// Drawn once the window opens these cards; until then only the tests do.
-#![allow(dead_code)]
-
 use crate::typescale as ts;
 use crate::widgets::{self, BORDER, MUTED, TEXT};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -277,7 +274,8 @@ mod tests {
         let history = history();
         let mut chosen = Vec::new();
         let mut draw = |events: Vec<egui::Event>, chosen: &mut Vec<Action>| {
-            let output = ctx.run_ui(screen(events), |ui| chosen.extend(show(ui.ctx(), anchor, &history)));
+            let mut output = ctx.run_ui(screen(events), |ui| chosen.extend(show(ui.ctx(), anchor, &history)));
+            output.textures_delta.clear();
             texts(&output.shapes)
         };
         draw(Vec::new(), &mut chosen);

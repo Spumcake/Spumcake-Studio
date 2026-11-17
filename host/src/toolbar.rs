@@ -961,7 +961,6 @@ fn note_item_rect(ctx: &egui::Context, action: &Action, rect: Rect) {
 
 /// Where the button or push that sends the action `id` was last drawn,
 /// so a card it opens, such as the published versions, can sit under it.
-#[allow(dead_code)]
 pub(crate) fn item_rect(ctx: &egui::Context, id: &str) -> Option<Rect> {
     ctx.data(|data| data.get_temp::<std::collections::HashMap<String, Rect>>(item_rects_id()).and_then(|rects| rects.get(id).copied()))
 }
