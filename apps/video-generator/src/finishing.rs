@@ -32,8 +32,9 @@ pub const COMPARE: &str = "Compare with the source";
 /// made from, the parts its settings say, and that take again, as
 /// vg-before-after captions both sides "Take 3".
 pub const LABEL: &str = "Take {source}{parts}, from Take {source}";
-/// The reference's role, and the model's input it fills.
-const ROLE: &str = "Reference";
+/// The take's role, as Spumcake-Skills' prompt roles name the input a
+/// finishing model reworks, and the model's input it fills.
+const ROLE: &str = "structure";
 const FIELD: &str = "video_url";
 
 /// Which finishing request.
@@ -51,7 +52,9 @@ impl Finish {
         }
     }
 
-    /// Its settings, as Last order's finishing requests sent them: a
+    /// Its settings, as Last order's finishing requests sent them and
+    /// Spumcake-Skills' finishing skill lists them, with fal's own
+    /// `enable_safety_checker` as Last order sent it: a
     /// retime to 60 frames a second with Apollo; an upscale with Gaia CG
     /// by the factor that takes a take `width` wide to 3840.
     pub fn settings(self, width: u32) -> Value {
@@ -80,7 +83,7 @@ pub fn is_finishing(model: &str) -> bool {
 
 /// A new draft cell of kind video for `finish` on the take at `path`, of
 /// `media_type`, `width` wide: no prompt, the take its one reference with
-/// the role Reference filling `video_url`, and the request's settings.
+/// the role structure filling `video_url`, and the request's settings.
 pub fn draft(finish: Finish, path: &str, media_type: &str, width: u32, size: (u32, u32)) -> Cell {
     let mut cell = crate::gallery::empty_draft(size);
     cell.model = Some(finish.model().to_string());
@@ -140,7 +143,7 @@ mod tests {
             model: model.into(),
             model_name: String::new(),
             prompt: String::new(),
-            references: references.iter().map(|path| protocol::SentReference { path: path.to_string(), role: Some("Reference".into()) }).collect(),
+            references: references.iter().map(|path| protocol::SentReference { path: path.to_string(), role: Some("structure".into()) }).collect(),
             left_out: Vec::new(),
             state: protocol::RoundState::Done,
             started: None,
@@ -167,7 +170,7 @@ mod tests {
         );
         assert_eq!(
             retime.input,
-            [CellPart::Path { path: "takes/7.mp4".into(), media_type: "video/mp4".into(), role: Some("Reference".into()), field: Some("video_url".into()) }]
+            [CellPart::Path { path: "takes/7.mp4".into(), media_type: "video/mp4".into(), role: Some("structure".into()), field: Some("video_url".into()) }]
         );
         let upscale = draft(Finish::Upscale, "takes/7.mp4", "video/mp4", 1280, (1280, 720));
         assert_eq!(upscale.model.as_deref(), Some(UPSCALE_MODEL));

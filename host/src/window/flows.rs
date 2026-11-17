@@ -1425,6 +1425,10 @@ impl HostWindow {
         for started in std::mem::take(&mut self.apps) {
             started.running.shutdown();
         }
+        // Whether the folder is a Skills project, as every workspace is
+        // told it, and kept to tell them again when it changes.
+        let skills = folder.is_some_and(crate::skills_setup::is_skills_project);
+        self.project_skills = folder.map(|folder| (folder.to_path_buf(), skills, std::time::Instant::now()));
         self.apps = specs
             .into_iter()
             .enumerate()
@@ -1445,7 +1449,7 @@ impl HostWindow {
                 if let Some(folder) = folder {
                     running.send(&HostMessage::Project {
                         folder: folder.display().to_string(),
-                        skills: false,
+                        skills,
                     });
                 }
                 Started {

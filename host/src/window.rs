@@ -167,6 +167,9 @@ struct HostWindow {
     prompt_page: crate::prompt_page::PromptPage,
     /// What workspaces asked to publish, and the cards for it.
     publishing: publishing::Publishing,
+    /// The open project's folder, whether it is a Skills project as the
+    /// workspaces were last told, and when that was last looked at.
+    project_skills: Option<(PathBuf, bool, std::time::Instant)>,
     /// The Prompt page's reference previews, asked of the workspaces.
     previews: previews::Previews,
     publish_runs: publish_runs::Runs,
@@ -306,6 +309,7 @@ impl HostWindow {
             runner: crate::runner::Runner::default(),
             prompt_page: crate::prompt_page::PromptPage::default(),
             publishing: publishing::Publishing::default(),
+            project_skills: None,
             previews: previews::Previews::default(),
             publish_runs: publish_runs::Runs::default(),
             canon_answers: canon_steps::Answers::default(),
@@ -753,6 +757,7 @@ impl eframe::App for HostWindow {
         self.take_items();
         self.take_reports();
         self.take_open_ins();
+        self.tell_skills_project();
         self.take_publishing();
         self.run_publishing();
         self.take_canon_steps();
