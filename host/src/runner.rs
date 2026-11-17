@@ -83,11 +83,13 @@ pub(crate) fn tools() -> Vec<Tool> {
         },
         Tool {
             name: RERUN_STEP.into(),
-            description: "Make a take of the first step of a pipeline that is out of date, or the first a change reaches, with pipeline.py rerun: its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first.".into(),
+            description: "Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first.".into(),
             input: json!({
                 "type": "object",
                 "properties": {
                     "pipeline": { "type": "string", "description": "The pipeline's number, such as 002." },
+                    "chain": { "type": "string", "description": "With step, the chain of the one step to make a take of." },
+                    "step": { "type": "string", "description": "With chain, the one step to make a take of, out of date or not." },
                     "fact": { "type": "string", "description": "A changed fact, as \"<element>: <fact>\", to rerun what it reaches." },
                     "artifact": { "type": "string", "description": "A changed artifact, as \"<element>: <role>\", to rerun what it reaches." },
                     "stand_in": { "type": "boolean", "description": "Run it on the stand-in, which spends nothing." }
@@ -257,8 +259,12 @@ fn resolve(command: &[String], env: &ScriptEnv) -> Result<Vec<String>, String> {
 /// ends in a script's name, or another file named like one, such as one
 /// the agent wrote, never does.
 fn script_of(argv: &[String], scripts: Option<&Path>, cwd: &Path) -> Option<(&'static str, String)> {
-    // Python itself, by its own names, such as python3 or python3.12.
-    let program = Path::new(argv.first()?).file_name()?.to_string_lossy().to_string();
+    // Python itself, by its own bare names, such as python3 or python3.12,
+    // found on the PATH: never a file in the project named like it.
+    let program = argv.first()?;
+    if program.contains(['/', '\\']) {
+        return None;
+    }
     let version = program.strip_prefix("python").unwrap_or("x");
     if !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
         return None;
@@ -281,6 +287,13 @@ pub(crate) fn spends(argv: &[String]) -> bool {
         (pair[0].ends_with("request.py") && pair[1] == "run" && !stand_in)
             || (pair[0].ends_with("pipeline.py") && pair[1] == "rerun" && !stand_in && !plan_only)
     })
+}
+
+/// Whether a command publishes into canon, which only the publish card
+/// does. A command given to a shell is read as the words it runs.
+pub(crate) fn publishes(argv: &[String]) -> bool {
+    let words: Vec<String> = argv.iter().flat_map(|arg| arg.split_whitespace().map(|word| word.trim_matches(['"', '\'', ';']).to_string())).collect();
+    words.windows(2).any(|pair| pair[0].ends_with("pipeline.py") && pair[1] == "publish")
 }
 
 /// Whether a command only reads, and so runs without asking, as the owner
@@ -484,6 +497,24 @@ fn planned(argv: &[String], cwd: &Path, vars: &[(String, String)], stand_in: boo
     Ok((plan, hash))
 }
 
+/// Whether an environment variable holds a secret, by its name, as
+/// Spumcake-Skills' own `keyless_env` judges it.
+fn secret(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    ["KEY", "KEY_ID", "SECRET", "TOKEN", "PASSWORD", "CREDENTIALS"].iter().any(|end| name.ends_with(end))
+}
+
+/// Takes every secret Studio's own process holds, such as a key loaded
+/// from its `.env` at start, out of what a command inherits.
+pub(crate) fn strip_keys(command: &mut Command) -> &mut Command {
+    for (name, _) in std::env::vars_os() {
+        if secret(&name.to_string_lossy()) {
+            command.env_remove(&name);
+        }
+    }
+    command
+}
+
 /// What searches cost, for the card's title.
 pub(crate) fn searches_cost(count: usize) -> String {
     format!("about ${:.3}", count as f64 * SEARCH_PRICE)
@@ -646,6 +677,9 @@ impl Runner {
                 if spends(&argv) {
                     return Begun::Answered(failed(call, "This command spends money, so it is never run as a plain command. Send a request with send_request and its spec, or a step with rerun_step, so the user approves its plan."));
                 }
+                if publishes(&argv) {
+                    return Begun::Answered(failed(call, "Publishing goes through the publish card, never a plain command: put the take into the chain with publish_take."));
+                }
                 // A command that only reads runs at once, with no question.
                 if only_reads(&argv, env.scripts.as_deref(), folder) {
                     return match self.start(call, tool, argv, Vec::new(), String::new(), false) {
@@ -687,6 +721,11 @@ impl Runner {
                         asked.push(format!("--{key}"));
                         asked.push(text(key));
                     }
+                }
+                // One named step, whose result ends its output as one line
+                // of JSON naming the take.
+                if !text("chain").is_empty() && !text("step").is_empty() {
+                    asked.extend([String::from("--step"), text("chain"), text("step"), String::from("--json")]);
                 }
                 if stand_in {
                     asked.push(String::from("--stand-in"));
@@ -901,7 +940,11 @@ impl Runner {
         // Keys go only to Skills' own scripts; any other command gets the
         // setup file alone.
         let skills = runs_skills(&argv, self.scripts.as_deref(), &self.cwd);
-        let mut child = Command::new(&argv[0])
+        let mut command = Command::new(&argv[0]);
+        if !skills {
+            strip_keys(&mut command);
+        }
+        let mut child = command
             .args(&argv[1..])
             .current_dir(&self.cwd)
             .envs(self.env.iter().filter(|(name, _)| skills || !name.ends_with("_KEY")).map(|(name, value)| (name.as_str(), value.as_str())))
@@ -1207,6 +1250,9 @@ mod tests {
         std::fs::write(project.join("brief/request.py"), "").unwrap();
         assert!(!reads(&["python3", "brief/request.py", "show", "f.png"]), "a lookalike script ran without asking");
         assert!(!runs_skills(&argv(&["python3", "brief/request.py", "show"]), Some(&scripts), &project), "a lookalike script got the keys");
+        // Nor is a program in the project named like Python.
+        assert!(!runs_skills(&argv(&["agent/python3", &*own("request.py"), "show"]), Some(&scripts), &project), "a lookalike interpreter got the keys");
+        assert!(secret("OPENROUTER_API_KEY") && secret("fal_key_id") && secret("GITHUB_TOKEN") && !secret("SKILLS_SETUP") && !secret("PATH"));
         let _ = std::fs::remove_dir_all(&folder);
     }
 
@@ -1214,6 +1260,9 @@ mod tests {
     /// shell, and a plan with no hash run unbound.
     #[test]
     fn a_spend_through_a_shell_and_a_plan_with_no_hash_are_refused() {
+        assert!(publishes(&argv(&["python3", "/s/scripts/pipeline.py", "publish", "002", "the diner: layout"])), "a publish ran past the publish card");
+        assert!(publishes(&argv(&["sh", "-c", "python3 pipeline.py publish 002 x"])));
+        assert!(!publishes(&argv(&["python3", "/s/scripts/pipeline.py", "touches", "002"])));
         assert!(spends(&argv(&["sh", "-c", "python3 /s/scripts/request.py run agent/spec.json"])));
         assert!(spends(&argv(&["bash", "-c", "cd x; python3 pipeline.py rerun 002"])));
         assert!(!spends(&argv(&["sh", "-c", "python3 /s/scripts/request.py run agent/spec.json --stand-in"])));

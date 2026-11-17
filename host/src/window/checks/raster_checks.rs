@@ -62,6 +62,7 @@ fn view(dir: &Path, tool: RasterTool) -> RasterView {
         bounds: Some([0.0, 0.0, 40.0, 20.0]),
         camera: Some(DocumentCamera { origin: ORIGIN, zoom: ZOOM, rotation: 0.0, flip: false }),
         camera_owner: protocol::RasterCamera::Host,
+        transport: None,
         film: None,
         text: None,
     }
@@ -212,6 +213,7 @@ fn properties(rows: Vec<LayerRow>) -> Properties {
             reorder: Action::new("reorder"),
             sort_color: Action::new("sort_color"),
             nest: true,
+            plain: false,
             flags: FlagIcons {
                 eye_open: String::from("eye"),
                 eye_closed: String::from("eye-closed"),

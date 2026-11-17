@@ -55,6 +55,10 @@ pub struct RasterView {
     /// no strip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub film: Option<Film>,
+    /// A transport row above the filmstrip, such as a video take's, with
+    /// its own clock: the workspace's, so its frames follow its sound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<crate::Transport>,
 }
 
 /// Who moves a raster tab's view.
@@ -188,12 +192,17 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// A timed mark in a sound, such as a beat, in seconds from its start.
+/// A timed mark, such as a beat in a sound or a cue on a transport's
+/// scrubber, in seconds from its start.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cue {
     pub at: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// The mark's colour, such as the door cue's orange or a note's red.
+    /// The host's own colour when none is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<[u8; 3]>,
 }
 
 /// What the host's pointer does on a raster tab.
@@ -382,6 +391,7 @@ mod tests {
             bounds: Some([0.0, 0.0, 1920.0, 1080.0]),
             camera: Some(DocumentCamera { origin: [0.0, 0.0], zoom: 0.5, rotation: 0.0, flip: false }),
             camera_owner: RasterCamera::Workspace,
+            transport: None,
             film: Some(Film {
                 items: vec![FilmItem {
                     name: "Beach".into(),
@@ -401,6 +411,17 @@ mod tests {
             }),
         };
         let mut view = view;
+        view.transport = Some(crate::Transport {
+            length: 8.0,
+            fps: 24.0,
+            time: 3.0,
+            playing: false,
+            clock: crate::TransportClock::Workspace,
+            cues: Vec::new(),
+            rows: Vec::new(),
+            play: crate::Action::new("take_play"),
+            step: crate::Action::new("take_step"),
+        });
         let film = view.film.as_mut().unwrap();
         let tile = film.items[0].clone();
         film.items.push(FilmItem { badge: "8.0 s".into(), mark: Some("canon".into()), chosen: true, ..tile.clone() });

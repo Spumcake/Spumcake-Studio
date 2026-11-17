@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 /// The workspaces the conventions guide names: id, name, and whether it is
 /// hidden.
 const WORKSPACES: &[(&str, &str, bool)] = &[
+    ("3d-viewport", "3D Viewport", false),
     ("image-generator", "Image Generator", false),
     ("recipe-creation", "Recipe Creation", false),
     ("storyboard-generator", "Storyboard Generator", false),
@@ -84,7 +85,10 @@ fn retired(word: &str) -> bool {
 
 /// Catches a workspace renamed in its manifest alone: its folder, Cargo
 /// package, program, manifest `executable`, and id are one, and its id,
-/// name, and hiding are the guide's.
+/// name, and hiding are the guide's. Cargo refuses a package name that
+/// starts with a digit, so such a workspace names its program with `[[bin]]`
+/// and its package by the scaffolding skill's rule, `3d-viewport` as
+/// `viewport-3d`, as the Studio session manager set on 2026-11-16.
 #[test]
 fn every_workspace_is_named_as_the_guide_says_through_and_through() {
     let apps = root().join("apps");
@@ -94,10 +98,17 @@ fn every_workspace_is_named_as_the_guide_says_through_and_through() {
         let manifest: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(entry.path().join("manifest.json")).unwrap()).unwrap();
         let cargo = std::fs::read_to_string(entry.path().join("Cargo.toml")).unwrap();
-        let package = cargo
+        let names: Vec<&str> = cargo
             .lines()
-            .find_map(|line| line.strip_prefix("name = \"").and_then(|rest| rest.strip_suffix('"')))
-            .unwrap_or_default();
+            .filter_map(|line| line.strip_prefix("name = \"").and_then(|rest| rest.strip_suffix('"')))
+            .collect();
+        let package = names.first().copied().unwrap_or_default();
+        let program = if cargo.contains("[[bin]]") { names.get(1).copied().unwrap_or_default() } else { package };
+        if folder.starts_with(|c: char| c.is_ascii_digit()) {
+            let (digits, rest) = folder.split_once('-').unwrap_or((folder.as_str(), ""));
+            assert_eq!(package, format!("{rest}-{digits}"), "{folder}: its package is not its folder's name turned round");
+        }
+        let package = if folder.starts_with(|c: char| c.is_ascii_digit()) { program } else { package };
         let id = manifest["id"].as_str().unwrap_or_default();
         assert_eq!(
             [id, manifest["executable"].as_str().unwrap_or_default(), package],

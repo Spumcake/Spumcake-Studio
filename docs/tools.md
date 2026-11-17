@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-115 tools.
+114 tools.
 
 ## The host
 
@@ -27,10 +27,21 @@ Read the project and the skills, look at its images, write by hand where the age
 - **`inpainter__project__read_skill`**: Read a skill, unchanged, with its folder and its repository, which its relative links resolve in. Takes `name` (string, required).
 - **`inpainter__project__run_command`**: Run a command in the project, such as a Spumcake-Skills script (request.py and pipeline.py may be named by their file name alone), a builder, or a script of the agent's own, after the user approves it. Its output is answered when it ends. A command that spends is refused: send it with send_request or rerun_step. Takes `command` (array, required), `why` (string, required).
 - **`inpainter__project__send_request`**: Send one request to a model with request.py, from its spec: its plan, worked out offline, is shown to the user with its cost, its prompt as sent, and every reference in order, and it runs only on their yes, exactly as approved. Answers with what request.py tell says. Takes `spec` (string, required), `stand_in` (boolean).
-- **`inpainter__project__rerun_step`**: Make a take of the first step of a pipeline that is out of date, or the first a change reaches, with pipeline.py rerun: its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `fact` (string), `stand_in` (boolean).
+- **`inpainter__project__rerun_step`**: Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first. Takes `pipeline` (string, required), `artifact` (string), `chain` (string), `fact` (string), `stand_in` (boolean), `step` (string).
 - **`inpainter__project__web_search`**: Search the web, or its images, with Brave Search, for research such as a skill's references. All the searches one research request needs are asked for together: the user approves them with their cost first. Answers each search's results, with each one's title, address, and the page it is on. Takes `searches` (array, required), `why` (string, required).
 - **`inpainter__project__fetch_page`**: Read a web page's text, to learn what an image found is, who made it, and the use its licence allows. Costs nothing and needs no approval. Takes `url` (string, required).
 - **`inpainter__project__download_file`**: Download one file found in research, after the user approves it: the file, the page it is on, and its licence are shown. It waits in Studio's own folder until you file it into sources/ with send_request and a spec of request.py's research kind, whose outputs are the files and whose sources give each file's address, page, and the use allowed. Takes `licence` (string, required), `page` (string, required), `url` (string, required).
+- **`inpainter__project__publish_take`**: Put a take into the chain: publish it as a canon artifact through the publish card, which shows the user the version it writes and what a commit takes along, and runs only on their yes. Read pipeline.py touches --artifact "<artifact>" --json first and tell the user what it reaches. A take made from inputs that are no longer canon is refused. Takes `artifact` (string, required), `take` (string, required), `from` (array), `with` (array).
+
+## 3D Viewport
+
+### 3D Viewport (`view`)
+
+Look at a place's pre-vis in 3D: through its builder's cameras, or with a camera's published pre-vis render beside or over it.
+
+- **`3d-viewport__view__list_views`**: Every view of the open place, and which is chosen. Takes nothing.
+- **`3d-viewport__view__look_through`**: Choose a view of the camera list by its name, as list_views gives it. Takes `view` (string, required).
+- **`3d-viewport__view__set_look`**: Draw the scene grey, colour-coded by kind, or simple (white faces and grey edges). Takes `look` (string, required).
 
 ## Image Generator
 
@@ -115,11 +126,6 @@ Make and time the film's clips and its sound, and inside a clip its layers, keyf
 - **`storyboard-generator__clips__export_animatic`**: Export the animatic: the film with its sound, as a video in the project's exports folder. Returns the animatic's item and file at once; list_items says when it is done. Takes nothing.
 - **`storyboard-generator__clips__cancel_export`**: Cancel the export under way. Takes nothing.
 - **`storyboard-generator__clips__list_items`**: Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed. Takes nothing.
-- **`storyboard-generator__clips__insert_image_key`**: Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does. Takes `image` (string, required).
-- **`storyboard-generator__clips__publish_hold`**: In a Skills project, publish the open clip's hold under the playhead, drawing and all, as the rough board "<shot>: rough board", as Publish hold does, so the animatic can use it. The user approves it on the publish card. Takes nothing.
-- **`storyboard-generator__clips__open_animatic`**: In a Skills project, open the project's animatic as a storyboard: the assembly its build-animatic step names, with its keyframes as image keys and its sound. It opens when the project answers; read_film then shows it. Takes `step` (string).
-- **`storyboard-generator__clips__save_timing`**: In a Skills project, save the open animatic's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published. Takes nothing.
-- **`storyboard-generator__clips__follow_retime`**: Take the timing the project's animatic step now names, after it was retimed in another tool, as one undo step, as Follow does. Takes nothing.
 - **`storyboard-generator__clips__render_again`**: Render an item again from what made it: the animatic is exported again. Takes `item` (string, required).
 
 ### Read and look at a storyboard (`look`)
