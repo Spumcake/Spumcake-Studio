@@ -94,7 +94,7 @@ impl HostWindow {
             match asked {
                 Asked::Publish { app, tab, artifact, source: file, .. } | Asked::Revert { app, tab, artifact, file } => {
                     let error = Some(String::from("Only a Skills project has canon to publish into."));
-                    self.send(app, HostMessage::Published { tab, artifact, file, version: None, error });
+                    self.answer_published(app, tab, artifact, file, None, error);
                 }
                 Asked::History { app, tab, artifact } => self.send(app, HostMessage::History { tab, artifact, versions: Vec::new() }),
             }
@@ -104,9 +104,6 @@ impl HostWindow {
     /// The runner's answer to a confirmed card: the workspace hears it and
     /// says the publish with its version, and a refusal shows with "Ask the
     /// assistant".
-    // Called by the runner's publish, which comes with Chat Assistant Work's
-    // publishing slice.
-    #[allow(dead_code)]
     pub(crate) fn answer_published(&mut self, app: usize, tab: String, artifact: String, file: String, version: Option<u32>, error: Option<String>) {
         if let Some(sentence) = &error {
             self.publishing.refused = Some(Refusal { app, tab: tab.clone(), artifact: artifact.clone(), file: file.clone(), sentence: sentence.clone() });

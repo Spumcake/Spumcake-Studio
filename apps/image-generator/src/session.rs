@@ -28,7 +28,9 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod publish;
 mod requests;
+use publish::notices;
 use requests::{forget_files, layer_png};
 
 /// How many files of rows sent while a stroke is drawn are kept for each
@@ -241,6 +243,13 @@ pub struct Image {
     /// A written-out layer's fingerprint, by its image and layer, and the
     /// pixels' generation it was taken at.
     layer_prints: std::collections::HashMap<(u64, u64), (u64, String)>,
+    /// Publishing, while the program runs and never in the file: the
+    /// takes beneath the last edit refused, which "Ask the assistant"
+    /// names; the image a `publish` was sent for; and each image
+    /// published, by its number, and the canon file it became.
+    refused: Vec<String>,
+    publishing: Option<u64>,
+    published: std::collections::HashMap<u64, String>,
 }
 
 impl Image {
@@ -697,7 +706,18 @@ impl Session {
                 }
             }
             HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
-            HostMessage::CellBecameStep { tab, cell, step, .. } => self.cell_became_step(&tab, &cell, &step, &mut out),
+            HostMessage::CellBecameStep { tab, cell, step, artifact } => {
+                self.cell_became_step(&tab, &cell, &step, &mut out);
+                if let Some(artifact) = artifact {
+                    self.keep_artifact(&cell, artifact, &mut out);
+                }
+            }
+            // A refusal's error is the host's card's to show, and publishes
+            // nothing, whatever file it names.
+            HostMessage::Published { tab, file, version, error, .. } => {
+                let file = if error.is_some() { String::new() } else { file };
+                self.published(&tab, file, version, &mut out);
+            }
             _ => {}
         }
         if self.finish_writes(false) {
@@ -885,6 +905,9 @@ impl Session {
             marked: Vec::new(),
             written_out: Vec::new(),
             layer_prints: std::collections::HashMap::new(),
+            refused: Vec::new(),
+            publishing: None,
+            published: std::collections::HashMap::new(),
         });
         self.active = self.images.len() - 1;
         if self.tools.tool == ToolKind::Crop {
@@ -1085,13 +1108,36 @@ impl Session {
                     self.write_out(node, out);
                 }
             }
+            // Publishing: Publish, its refusal's Ask the assistant, a
+            // notice closed, the canon seal, and the Open and Revert to this
+            // of the host's history card, which `history` fills.
+            "publish" => self.publish(out),
+            "publish_ask" => {
+                self.ask_about_inputs(out);
+                return;
+            }
+            "canon_history" => {
+                self.canon_history(out);
+                return;
+            }
+            "history_open" | "history_revert" => {
+                let Some(file) = arg.get("file").and_then(Value::as_str).map(str::to_string) else {
+                    return;
+                };
+                if id == "history_open" {
+                    self.edit_take(&file, out);
+                } else {
+                    self.revert(&file, out);
+                    return;
+                }
+            }
             "film_new" => {
                 self.film(|gallery| gallery.add(&protocol::untitled(ITEM), new_doc(), None));
             }
             // The written-out notice's close mark.
             "notice_close" => {
                 if let Some(image) = self.active_image() {
-                    out.push(AppMessage::Notices { tab: image.id.clone(), notices: Vec::new(), corner: protocol::NoticeCorner::BottomLeft });
+                    out.push(notices(&image.id, None));
                 }
             }
             "film_open" => {

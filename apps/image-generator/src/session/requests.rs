@@ -35,6 +35,12 @@ impl Session {
         let image = &mut self.images[index];
         let seen = image.frame().uid;
         let order: Vec<String> = image.gallery.cells.iter().map(|own| own.id.clone()).collect();
+        // The artifact the cell's step publishes, as its newest round says
+        // it, kept with the cell while the program runs: it is the chain's,
+        // never the file's.
+        if let Some(artifact) = rounds.iter().rev().find_map(|round| round.artifact.clone()) {
+            image.gallery.artifacts.insert(cell.to_string(), artifact);
+        }
         for gone in image.rounds.set(cell, rounds, &order) {
             forget_files(&cache, &image.id, gone);
         }

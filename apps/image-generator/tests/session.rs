@@ -1428,3 +1428,255 @@ fn a_draft_becomes_its_step_and_a_skills_project_files_what_leaves() {
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+// Publishing.
+
+const ARTIFACT: &str = "shot 12: keyframe";
+
+/// A Skills project whose cell's round 1 made the take r1-1, canon or not,
+/// for the artifact "shot 12: keyframe"; the program, and the strip once
+/// it shows the round.
+fn publishing(label: &str, canon: bool) -> (PathBuf, Program) {
+    let folder = skills_project(label);
+    let mut program = Program::start(false);
+    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    let cell = cell_of(&program);
+    let mut first = round("q1", 1, vec![take("library/r1-1.png", canon)]);
+    first.artifact = Some(ARTIFACT.into());
+    send_takes(&mut program, &cell, vec![first]);
+    strip(&program, |film| !film.groups.is_empty());
+    (folder, program)
+}
+
+/// The toolbar's trailing items, from the next toolbar `pick` takes.
+fn trailing(program: &Program, mut pick: impl FnMut(&[protocol::ToolItem]) -> bool) -> Vec<protocol::ToolItem> {
+    program.wait(|message| match message {
+        AppMessage::Toolbar(toolbar) => pick(&toolbar.trailing).then(|| toolbar.trailing.clone()),
+        _ => None,
+    })
+}
+
+fn publish_button(items: &[protocol::ToolItem]) -> Option<bool> {
+    items.iter().find_map(|item| match item {
+        protocol::ToolItem::Push { label, enabled, .. } if label == "Publish" => Some(*enabled),
+        _ => None,
+    })
+}
+
+/// Everything the program answers until the host's ping is answered.
+fn until_pong(program: &mut Program) -> Vec<AppMessage> {
+    program.send(HostMessage::Ping);
+    let mut seen = Vec::new();
+    program.wait(|message| {
+        seen.push(message.clone());
+        matches!(message, AppMessage::Pong).then_some(())
+    });
+    seen
+}
+
+/// Edits the take r1-1 into an image of the gallery and paints on it.
+fn edit_and_paint(program: &mut Program) {
+    program.command("take_edit", json!({ "take": "library/r1-1.png" }));
+    program.wait(|message| match message {
+        AppMessage::Raster(view) if (view.width, view.height) == (160, 90) => Some(()),
+        _ => None,
+    });
+    program.command("tool", json!({ "tool": "brush" }));
+    program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Stroke { points: vec![[80.0, 45.0, 1.0], [81.0, 45.0, 1.0]] } });
+    layer_rows(program, |rows| rows.first().is_some_and(|row| row.mark.as_deref() == Some("edit-pencil")));
+}
+
+/// Catches a raw take entering the chain through the workspace: shown on
+/// its own, it has no Publish, its menu offers only the assistant's way
+/// in, and a `publish` sent anyway sends nothing.
+#[test]
+fn a_raw_take_is_never_published() {
+    let (folder, mut program) = publishing("publish-raw", true);
+    program.command("film_select", json!({ "value": 0 }));
+    let (view, _) = strip(&program, |film| film.shown == 0);
+    let menu: Vec<&str> = view.film.as_ref().unwrap().items[0].menu.iter().map(|row| row.label.as_str()).collect();
+    assert!(menu.contains(&"Ask the assistant to use this take") && !menu.contains(&"Publish"), "{menu:?}");
+    let items = trailing(&program, |_| true);
+    assert_eq!(publish_button(&items), None, "a raw take offers Publish");
+    program.command("publish", json!({}));
+    assert!(!until_pong(&mut program).iter().any(|message| matches!(message, AppMessage::Publish { .. })), "a raw take was published");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches an edit published while the take beneath it is not canon,
+/// however little was painted: Publish sends nothing, and a notice says
+/// so with Ask the assistant, which names the take.
+#[test]
+fn an_edit_of_a_take_not_canon_is_refused() {
+    let (folder, mut program) = publishing("publish-refused", false);
+    edit_and_paint(&mut program);
+    let items = trailing(&program, |items| publish_button(items) == Some(true));
+    assert!(publish_button(&items).unwrap());
+    program.command("publish", json!({}));
+    let seen = until_pong(&mut program);
+    assert!(!seen.iter().any(|message| matches!(message, AppMessage::Publish { .. })), "an edit on a take not canon was published");
+    let notice = seen
+        .iter()
+        .find_map(|message| match message {
+            AppMessage::Notices { notices, .. } => notices.first().cloned(),
+            _ => None,
+        })
+        .expect("no notice");
+    assert_eq!(notice.text, "Its inputs aren't canon.");
+    let ask = notice.actions.iter().find(|action| action.label == "Ask the assistant").expect("no Ask the assistant");
+    program.command(&ask.action.id.clone(), json!({}));
+    let (text, items) = program.wait(|message| match message {
+        AppMessage::AskAssistant { text, items } => Some((text.clone(), items.clone())),
+        _ => None,
+    });
+    assert_eq!(text, "Put take 1 of round 1, library/r1-1.png, into the chain.");
+    assert_eq!(items, [protocol::ItemRef { path: "library/r1-1.png".into(), item: None }]);
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// The refusal's notice after `publish`, with nothing else sent.
+fn refusal(program: &mut Program) -> protocol::Notice {
+    trailing(program, |items| publish_button(items) == Some(true));
+    program.command("publish", json!({}));
+    let seen = until_pong(program);
+    assert!(!seen.iter().any(|message| matches!(message, AppMessage::Publish { .. })), "an edit on inputs not canon was published");
+    seen.iter()
+        .find_map(|message| match message {
+            AppMessage::Notices { notices, .. } => notices.first().cloned(),
+            _ => None,
+        })
+        .expect("no notice")
+}
+
+/// Catches an edit with nothing painted let through while its take is
+/// not canon: a layer of its own added, empty, is an edit, and its
+/// refusal names the take.
+#[test]
+fn an_edit_with_nothing_painted_is_refused() {
+    let (folder, mut program) = publishing("publish-unpainted", false);
+    program.command("take_edit", json!({ "take": "library/r1-1.png" }));
+    layer_rows(&program, |rows| rows.len() == 1);
+    program.command("add_layer", json!({}));
+    let notice = refusal(&mut program);
+    assert_eq!((notice.text.as_str(), notice.detail.as_str()), ("Its inputs aren't canon.", "r1-1.png"));
+    assert!(notice.actions.iter().any(|action| action.label == "Ask the assistant"));
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches an input outside the project, which cannot be canon, let
+/// through or left out of what the edit was made from: Publish is
+/// refused, naming it, with no Ask the assistant, as only a take can be
+/// put into the chain by asking.
+#[test]
+fn an_edit_with_a_file_outside_the_project_is_refused() {
+    let (folder, mut program) = publishing("publish-outside", true);
+    let outside = scratch("publish-outside-file").join("plate.png");
+    write_png(&outside, 160, 90, &flat(PLATE, 160, 90));
+    program.command("take_edit", json!({ "take": "library/r1-1.png" }));
+    layer_rows(&program, |rows| rows.len() == 1);
+    program.command("open_layer", json!({}));
+    let asked = program.wait(|message| match message {
+        AppMessage::File { id, kind: protocol::FileKind::Open, .. } => Some(id.clone()),
+        _ => None,
+    });
+    program.send(HostMessage::FileResult { id: asked, path: Some(outside.display().to_string()) });
+    layer_rows(&program, |rows| rows.len() == 2);
+    program.command("add_layer", json!({}));
+    let notice = refusal(&mut program);
+    assert_eq!((notice.text.as_str(), notice.detail.as_str()), ("Its inputs aren't canon.", "plate.png"));
+    assert!(notice.actions.is_empty(), "a file outside the project offered Ask the assistant");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+    let _ = std::fs::remove_dir_all(outside.parent().unwrap());
+}
+
+/// Catches an edit on canon takes that cannot be published, or one
+/// published without what it was made from: Publish sends `publish` for
+/// the artifact, its source a PNG under the project's renders, the same
+/// file for the same edit, and `from` the
+/// tab's file then the take's; the card's Cancel, `published` with no
+/// file, and the runner's refusal, `published` with an error, show
+/// nothing and leave the seal off; a publish then published
+/// shows its version and marks the seal canon; the seal asks for the
+/// artifact's versions, and Revert to this asks to revert.
+#[test]
+fn an_edit_on_canon_takes_is_published() {
+    let (folder, mut program) = publishing("publish-canon", true);
+    edit_and_paint(&mut program);
+    trailing(&program, |items| publish_button(items) == Some(true));
+    program.command("publish", json!({}));
+    let (artifact, source, from, with) = program.wait(|message| match message {
+        AppMessage::Publish { tab, artifact, source, from, with } if tab == "1" => Some((artifact.clone(), source.clone(), from.clone(), with.clone())),
+        _ => None,
+    });
+    assert_eq!(artifact, ARTIFACT);
+    assert_eq!(from, ["work/Untitled Image.ipx", "library/r1-1.png"]);
+    assert!(with.is_empty());
+    assert!(source.starts_with(".spumcake/renders/") && source.ends_with(".png"), "{source}");
+    assert!(image::open(folder.join(&source)).is_ok(), "the source was not written");
+    let work = || std::fs::read_dir(folder.join("work")).unwrap().count();
+    let in_work = work();
+
+    // The card's Cancel: nothing published, nothing said.
+    program.send(HostMessage::Published { tab: "1".into(), artifact: ARTIFACT.into(), file: String::new(), version: None, error: None });
+    let seen = until_pong(&mut program);
+    assert!(
+        !seen.iter().any(|message| matches!(message, AppMessage::Notices { notices, .. } if !notices.is_empty())),
+        "a Cancel showed a notice"
+    );
+    let sealed = |items: &[protocol::ToolItem]| items.iter().any(|item| matches!(item, protocol::ToolItem::Button { icon, selected: true, .. } if icon == "badge-check"));
+    assert!(
+        !seen.iter().any(|message| matches!(message, AppMessage::Toolbar(toolbar) if sealed(toolbar.trailing.as_slice()))),
+        "a Cancel marked the seal canon"
+    );
+    // The runner's refusal names the file it refused, and publishes
+    // nothing: the host's card says why.
+    // The same edit again is the same file, and nothing joins `work/`.
+    program.command("publish", json!({}));
+    let again = program.wait(|message| match message {
+        AppMessage::Publish { source, .. } => Some(source.clone()),
+        _ => None,
+    });
+    assert_eq!(again, source);
+    assert_eq!(work(), in_work, "publishing wrote into work/");
+    let error = Some(String::from("The pipeline refused it."));
+    program.send(HostMessage::Published { tab: "1".into(), artifact: ARTIFACT.into(), file: source.clone(), version: None, error });
+    let seen = until_pong(&mut program);
+    assert!(
+        !seen.iter().any(|message| matches!(message, AppMessage::Notices { notices, .. } if !notices.is_empty())),
+        "a refusal showed a notice"
+    );
+    assert!(
+        !seen.iter().any(|message| matches!(message, AppMessage::Toolbar(toolbar) if sealed(toolbar.trailing.as_slice()))),
+        "a refusal marked the seal canon"
+    );
+    program.command("publish", json!({}));
+    program.wait(|message| matches!(message, AppMessage::Publish { .. }).then_some(()));
+    program.send(HostMessage::Published { tab: "1".into(), artifact: ARTIFACT.into(), file: "library/keyframe-shot-12.png".into(), version: Some(3), error: None });
+    let published = program.wait(|message| match message {
+        AppMessage::Notices { notices, .. } => notices.first().map(|notice| notice.text.clone()),
+        _ => None,
+    });
+    assert_eq!(published, "Published library/keyframe-shot-12.png, version 3.");
+    let items = trailing(&program, |items| {
+        items.iter().any(|item| matches!(item, protocol::ToolItem::Button { icon, selected: true, tip, .. } if icon == "badge-check" && tip == "Published versions"))
+    });
+    assert!(publish_button(&items).is_some());
+    program.command("canon_history", json!({}));
+    let asked = program.wait(|message| match message {
+        AppMessage::CanonHistory { tab, artifact } if tab == "1" => Some(artifact.clone()),
+        _ => None,
+    });
+    assert_eq!(asked, ARTIFACT);
+    program.command("history_revert", json!({ "file": "library/keyframe-shot-12-v1.png" }));
+    let (artifact, file) = program.wait(|message| match message {
+        AppMessage::Revert { tab, artifact, file } if tab == "1" => Some((artifact.clone(), file.clone())),
+        _ => None,
+    });
+    assert_eq!((artifact.as_str(), file.as_str()), (ARTIFACT, "library/keyframe-shot-12-v1.png"));
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
