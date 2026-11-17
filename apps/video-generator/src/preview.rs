@@ -1,13 +1,27 @@
 //! The previews the host asks for with `preview`, as a video reference's
 //! row shows it: the video's first frame, small, and its length for the
-//! thumbnail's corner, "8.0 s". The host never decodes a video itself.
+//! thumbnail's corner, "8.0 s"; and a sound's waveform with its length,
+//! and a WAV's cue points. The host never decodes a video or a sound
+//! itself.
 
-use protocol::{AppMessage, Thumbnail};
+use protocol::{AppMessage, Cue, Thumbnail};
 use std::path::{Path, PathBuf};
 
 /// The media types this workspace edits, as `edits` declares them, one for
 /// each of the video files a take can be.
 pub const VIDEO_TYPES: [&str; 6] = ["video/mp4", "video/quicktime", "video/x-m4v", "video/x-matroska", "video/webm", "video/x-msvideo"];
+
+/// The sounds this workspace previews, as `previews` declares them beside
+/// its videos; it edits none of them.
+pub const AUDIO_TYPES: [&str; 3] = ["audio/wav", "audio/mpeg", "audio/flac"];
+
+/// Every type `previews` declares: the videos, then the sounds.
+pub fn previewed_types() -> Vec<String> {
+    VIDEO_TYPES.iter().chain(AUDIO_TYPES.iter()).map(|kind| kind.to_string()).collect()
+}
+
+/// A sound's preview, a waveform as the transport row draws one.
+const SOUND_SIZE: [u32; 2] = [160, 32];
 
 /// The largest a preview is, as the Image Generator's: a reference row's
 /// thumbnail, drawn sharp at twice its size.
@@ -19,10 +33,16 @@ const PREVIEW_SIZE: [u32; 2] = [160, 96];
 /// revision.
 pub fn preview(id: String, path: &str, media_type: &str, root: &Path, cache: &Path, revision: &mut u64) -> AppMessage {
     let failed = |id: String, error: String| AppMessage::Previewed { id, thumbnail: None, badge: String::new(), cues: Vec::new(), error: Some(error) };
-    if !media_type.starts_with("video/") {
-        return failed(id, "Only videos are previewed here.".into());
+    if !media_type.starts_with("video/") && !media_type.starts_with("audio/") {
+        return failed(id, "Only videos and sounds are previewed here.".into());
     }
     let file = if Path::new(path).is_absolute() { PathBuf::from(path) } else { root.join(path) };
+    if media_type.starts_with("audio/") {
+        return match sound(&file, path, cache, revision) {
+            Ok((thumbnail, badge, cues)) => AppMessage::Previewed { id, thumbnail: Some(thumbnail), badge, cues, error: None },
+            Err(error) => failed(id, error),
+        };
+    }
     let mut video = match media::Video::open(&file) {
         Ok(video) => video,
         Err(error) => return failed(id, error.0),
@@ -49,6 +69,30 @@ pub fn preview(id: String, path: &str, media_type: &str, root: &Path, cache: &Pa
         }
         Err(error) => failed(id, error.0),
     }
+}
+
+/// A sound's preview: its waveform, `SOUND_SIZE`, drawn from its peaks as
+/// the transport row's is and written as a raw image in `cache`, named by
+/// the path; its length, "8.0 s"; and, for a WAV, its cue points, each at
+/// its time with its label. Decoded on the message loop, once for each
+/// `preview`.
+fn sound(file: &Path, path: &str, cache: &Path, revision: &mut u64) -> Result<(Thumbnail, String, Vec<Cue>), String> {
+    let heard = media::Sound::open(file, crate::waveform::RATE).map_err(|error| error.0)?;
+    let peaks = crate::waveform::peaks(&heard, SOUND_SIZE[0] as usize);
+    let image = crate::waveform::draw_sized(&peaks, SOUND_SIZE[0], SOUND_SIZE[1]);
+    std::fs::create_dir_all(cache).map_err(|error| error.to_string())?;
+    let name = format!("preview-{}.rgba", protocol::fingerprint(path.as_bytes()));
+    let written = media::write_frame(cache, &name, &image.data, (image.width, image.height)).map_err(|error| error.0)?;
+    *revision += 1;
+    let thumbnail = Thumbnail { path: written.display().to_string(), width: image.width, height: image.height, revision: *revision };
+    let seconds = heard.len() as f64 / f64::from(heard.rate.max(1));
+    let cues = std::fs::read(file)
+        .map(|bytes| crate::waveform::wav_cues(&bytes))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(at, label)| Cue { at, label, colour: None })
+        .collect();
+    Ok((thumbnail, format!("{seconds:.1} s"), cues))
 }
 
 /// A video's length, as a thumbnail's corner shows it: "8.0 s".

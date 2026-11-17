@@ -148,8 +148,9 @@ impl Session {
         Some(over)
     }
 
-    /// Each pin of the take shown as a cue on the transport row: its bare
-    /// number, as the host writes the time beside it, in the notes' red.
+    /// Each pin of the take shown as a cue on the transport row: its
+    /// number and time, "1 — 3.4 s", as vg-notes-at-time shows them, since
+    /// the host draws a cue's label alone, in the notes' red.
     pub fn note_cues(&self) -> Vec<Cue> {
         let Some(target) = self.notes_target() else {
             return Vec::new();
@@ -157,7 +158,7 @@ impl Session {
         let [r, g, b, _] = layers::notes::RED;
         let mut pins: Vec<&Pin> = target.over.notes.pins.iter().filter(|pin| pin.at.is_some()).collect();
         pins.sort_by(|a, b| a.at.partial_cmp(&b.at).unwrap_or(std::cmp::Ordering::Equal).then(a.number.cmp(&b.number)));
-        pins.iter().map(|pin| Cue { at: pin.at.unwrap_or(0.0), label: pin.number.to_string(), colour: Some([r, g, b]) }).collect()
+        pins.iter().map(|pin| Cue { at: pin.at.unwrap_or(0.0), label: pin.moment().unwrap_or_default(), colour: Some([r, g, b]) }).collect()
     }
 
     /// The pin's words being typed, as the host draws them.

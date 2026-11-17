@@ -36,6 +36,15 @@ pub struct Mark {
     pub at: Option<f64>,
 }
 
+impl Pin {
+    /// A pin at a time as vg-notes-at-time names it, on its cue and its
+    /// card: its number and its time to a tenth, "1 — 3.4 s". None without
+    /// a time.
+    pub fn moment(&self) -> Option<String> {
+        self.at.map(|at| format!("{} — {at:.1} s", self.number))
+    }
+}
+
 /// One image's notes.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Notes {
@@ -196,6 +205,15 @@ fn cover(image: &mut Rgba, x: u32, y: u32, coverage: f32, colour: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a pin's moment written other than as vg-notes-at-time shows
+    /// it, "1 — 3.4 s", or one given to a pin with no time.
+    #[test]
+    fn a_pin_at_a_time_reads_as_its_moment() {
+        let pin = |at: Option<f64>| Pin { number: 1, x: 0.0, y: 0.0, text: String::new(), at };
+        assert_eq!(pin(Some(3.42)).moment().as_deref(), Some("1 — 3.4 s"));
+        assert_eq!(pin(None).moment(), None);
+    }
 
     /// Catches pins numbered again after one is removed, or words sent out
     /// of order or with empty notes: the next number is past the highest,

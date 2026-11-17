@@ -1,13 +1,18 @@
 //! The shot's animatic, as vg-frame-from and vg-take-over-animatic show
 //! it: the Start frame taken from the Prompt page's Motion reference at
 //! the time shown, and a round's take shown over the animatic, its line
-//! art in white and its pre-vis edges in cyan, with the toolbar's pre-vis
-//! check.
+//! art in white and its pre-vis edges in cyan, or over a Start frame its
+//! edges only, with the toolbar's pre-vis check, captioned "Over the
+//! animatic · <the tab's name>".
 
 use super::*;
 use crate::decode::Key;
-use crate::view::Animatic;
-use protocol::{Cell, CellPart, ItemRef};
+use crate::view::{Animatic, Caption};
+use protocol::{Cell, CellPart, ItemRef, Round};
+
+/// The words under a take shown over its animatic, before the tab's
+/// name, as vg-take-over-animatic shows them, pending the owner's word.
+pub const OVER_ANIMATIC: &str = "Over the animatic";
 
 /// The role of the reference a Start frame is taken from, and of the
 /// Start frame, as the Prompt page's roles name them.
@@ -18,6 +23,35 @@ const START: &str = "Start frame";
 /// before the person's own words, "Start frame, the keeper".
 fn role_is(role: Option<&str>, label: &str) -> bool {
     role.is_some_and(|role| role == label || role.strip_prefix(label).is_some_and(|rest| rest.starts_with(',')))
+}
+
+/// What a round's take is shown over: its round's Motion reference, with
+/// its line art; or else its Start frame, with its edges only. A round's
+/// roles may be free words, as Last order's requests name them: a Motion
+/// reference is one whose role is Motion reference, or else the round's
+/// first video whose role is none of the menu's other words; a Start
+/// frame is one whose role is Start frame or begins "the start frame".
+pub fn round_animatic(round: &Round) -> Option<(String, bool)> {
+    let references = &round.references;
+    let menu = |role: Option<&str>| crate::rounds::ROLES.iter().any(|word| role_is(role, word));
+    let video = |path: &str| {
+        let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).unwrap_or("").to_lowercase();
+        VIDEO_EXTENSIONS.contains(&extension.as_str())
+    };
+    let motion = references
+        .iter()
+        .find(|reference| role_is(reference.role.as_deref(), MOTION))
+        .or_else(|| references.iter().find(|reference| video(&reference.path) && !menu(reference.role.as_deref())));
+    if let Some(reference) = motion {
+        return Some((reference.path.clone(), true));
+    }
+    references
+        .iter()
+        .find(|reference| {
+            role_is(reference.role.as_deref(), START)
+                || reference.role.as_deref().is_some_and(|role| role.trim_start().to_lowercase().starts_with("the start frame"))
+        })
+        .map(|reference| (reference.path.clone(), false))
 }
 
 /// A cell's Motion reference: the first reference whose role is Motion
@@ -169,14 +203,16 @@ impl Session {
             .is_some_and(|cell| cell.step.is_none() && motion_reference(cell).is_some())
     }
 
-    /// The animatic a round's take shown is laid over: its round's Motion
-    /// reference, or else its Start frame. None for a take not in a round,
-    /// or a round with neither.
-    pub fn animatic_of(&self, tab: &Tab) -> Option<String> {
+    /// The animatic a round's take shown is laid over, as
+    /// `round_animatic` finds it, and whether its line art is drawn. None
+    /// for a take not in a round, a round with neither, its round shown
+    /// whole, or a gallery take shown first beside it.
+    pub fn animatic_of(&self, tab: &Tab) -> Option<(String, bool)> {
+        if matches!(tab.rounds.with, With::Strips | With::Own { first: true, .. }) {
+            return None;
+        }
         let tile = tab.rounds.tiles.get(tab.rounds.shown?)?;
-        let round = tab.rounds.round_of(tile)?;
-        let find = |label: &str| round.references.iter().find(|reference| role_is(reference.role.as_deref(), label)).map(|reference| reference.path.clone());
-        find(MOTION).or_else(|| find(START))
+        round_animatic(tab.rounds.round_of(tile)?)
     }
 
     /// The pre-vis check's button: the take shown over its animatic, on
@@ -196,14 +232,28 @@ impl Session {
         if !tab.over_animatic {
             return None;
         }
-        let path = self.animatic_of(tab)?;
+        let (path, lines) = self.animatic_of(tab)?;
         let place = scene.places.first()?;
         let size = place.key.as_ref().map(|key| (key.width, key.height))?;
         let time = self.time_shown();
         let file = self.project_file(&path);
         let info = self.animatic_info(&file)?;
         let index = ((time.max(0.0) * info.fps()).round() as u32).min(info.frames.saturating_sub(1));
-        Some(Animatic { place: 0, key: Key::new(file, index, size) })
+        Some(Animatic { place: 0, key: Key::new(file, index, size), lines })
+    }
+
+    /// The words under a take shown over its animatic, as
+    /// vg-take-over-animatic shows them: "Over the animatic · <the tab's
+    /// name>". The tab's name is always at hand, where a round's step has
+    /// a name only once it is in the chain.
+    pub(super) fn animatic_caption(&self, scene: &Scene) -> Option<Caption> {
+        let animatic = scene.animatic.as_ref()?;
+        let place = scene.places.get(animatic.place)?;
+        let tab = self.tabs.get(self.active)?;
+        let (left, right) = (place.rect.x.max(place.clip.x), (place.rect.x + place.rect.w as i32).min(place.clip.x + place.clip.w as i32));
+        let bottom = (place.rect.y + place.rect.h as i32).min(place.clip.y + place.clip.h as i32);
+        let at = [(left + right) as f32 / 2.0, (bottom as f32 + 6.0).min(scene.height as f32 - 16.0)];
+        Some(Caption { words: format!("{OVER_ANIMATIC} · {}", tab.label), at, centre: true, title: false })
     }
 }
 
@@ -220,5 +270,47 @@ mod tests {
         assert!(!role_is(Some("Motion references"), MOTION));
         assert!(!role_is(Some("Reference"), MOTION));
         assert!(!role_is(None, MOTION));
+    }
+
+    fn round(references: &[(&str, &str)]) -> Round {
+        Round {
+            request: "q1".into(),
+            number: 1,
+            model: "Model".into(),
+            model_name: String::new(),
+            prompt: String::new(),
+            references: references.iter().map(|(path, role)| protocol::SentReference { path: path.to_string(), role: Some(role.to_string()) }).collect(),
+            left_out: Vec::new(),
+            state: protocol::RoundState::Done,
+            started: None,
+            count: None,
+            takes: Vec::new(),
+            error: None,
+            report: None,
+            artifact: None,
+        }
+    }
+
+    /// Catches Last order's free-worded roles missed: its final shot's
+    /// request names its animatic "Video 1, the motion and the acting",
+    /// drawn with its lines; without it, "the start frame" is the Start
+    /// frame, drawn with its edges only; a take sent back as a Reference
+    /// is no animatic; and a round with neither has none.
+    #[test]
+    fn last_orders_roles_find_the_animatic() {
+        let last_order = [
+            ("shots/12/start.png", "the start frame"),
+            ("shots/12/end.png", "the end frame"),
+            ("cast/otis.png", "Image 1, Otis, who he is"),
+            ("animatic/12.mp4", "Video 1, the motion and the acting"),
+            ("sound/12.wav", "the soundtrack: rain on the roof"),
+        ];
+        assert_eq!(round_animatic(&round(&last_order)), Some(("animatic/12.mp4".to_string(), true)));
+        let without: Vec<(&str, &str)> = last_order.iter().copied().filter(|(path, _)| !path.ends_with(".mp4")).collect();
+        assert_eq!(round_animatic(&round(&without)), Some(("shots/12/start.png".to_string(), false)));
+        let menu_words = [("takes/7.mp4", "Reference"), ("keys/a.png", "Start frame, the keeper"), ("walk.mov", "Motion reference, the walk")];
+        assert_eq!(round_animatic(&round(&menu_words)), Some(("walk.mov".to_string(), true)));
+        assert_eq!(round_animatic(&round(&menu_words[..2])), Some(("keys/a.png".to_string(), false)));
+        assert_eq!(round_animatic(&round(&[("cast/otis.png", "Image 1, Otis")])), None);
     }
 }

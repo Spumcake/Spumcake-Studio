@@ -16,7 +16,7 @@ use crate::decode::{Decoders, Key, even};
 use crate::declare;
 use crate::files::{self, ViewFile};
 use crate::gallery::{Gallery, Mode};
-use crate::rounds::Rounds;
+use crate::rounds::{Rounds, With};
 use crate::view::{self, Look, Scene};
 use layers::link::Link;
 use protocol::{
@@ -130,17 +130,64 @@ impl Tab {
         self.frame.min(shown.as_ref().unwrap_or(&self.gallery).take().map_or(0, |take| take.last_frame()))
     }
 
-    /// A take of a round shown in the working area, as a gallery of that
-    /// one take, for the view to draw as any take; none while the
-    /// gallery's own takes are shown.
+    /// A take of a round shown in the working area, as a gallery for the
+    /// view to draw as any: that one take; or it beside another take, of a
+    /// round or of the gallery, side by side; or its round's takes as frame
+    /// strips. None while the gallery's own takes are shown. It is never
+    /// the tab's gallery, so nothing of it is a step or kept.
     pub fn round_view(&self) -> Option<Gallery> {
-        let tile = self.rounds.tiles.get(self.rounds.shown?)?;
+        let rounds = &self.rounds;
+        let tile = rounds.tiles.get(rounds.shown?)?;
+        let shown = self.round_take(tile)?;
+        let own = |uid: u64| self.gallery.takes.iter().find(|take| take.uid == uid).map(|take| (take.name.clone(), take.link.clone(), take.file.clone(), take.info));
+        let pair = match &rounds.with {
+            With::Alone => return Some(Gallery::new(vec![shown], 0)),
+            With::Strips => {
+                let tiles = rounds.round_tiles(tile);
+                let at = tiles.iter().position(|index| Some(*index) == rounds.shown).unwrap_or(0);
+                let mut gallery = Gallery::new(tiles.iter().filter_map(|index| self.round_take(&rounds.tiles[*index])).collect(), at);
+                gallery.mode = Mode::Strips;
+                return Some(gallery);
+            }
+            With::Tile(path) => [Some(shown), rounds.tile_of(path).and_then(|other| self.round_take(&rounds.tiles[other]))],
+            With::Own { uid, first: false } => [Some(shown), own(*uid)],
+            With::Own { uid, first: true } => [own(*uid), Some(shown)],
+        };
+        let takes: Vec<_> = pair.into_iter().flatten().collect();
+        let mut gallery = Gallery::new(takes, 0);
+        if let Some(other) = gallery.uid_at(1) {
+            gallery.mode = Mode::Side { other };
+        }
+        Some(gallery)
+    }
+
+    /// A round's take as the round view holds it: "Take N · <model name>",
+    /// its link, known by its sha256 as a gallery take's is, so its sound
+    /// and notes are found, its file, and what it is.
+    fn round_take(&self, tile: &crate::rounds::Tile) -> Option<(String, Link, PathBuf, Option<media::Info>)> {
         let file = tile.file.as_ref()?;
         let read = self.rounds.read(&file.path)?;
-        // Its sound and its notes are known by its sha256, as a gallery
-        // take's are.
         let link = Link { path: file.path.clone(), sha256: read.sha256.clone() };
-        Some(Gallery::new(vec![(format!("Take {}", tile.take + 1), link, read.file.clone(), read.info)], 0))
+        let model = self.rounds.round_of(tile).map_or("", crate::rounds::model_name);
+        let name = if model.is_empty() { format!("Take {}", tile.take + 1) } else { format!("Take {} · {model}", tile.take + 1) };
+        Some((name, link, read.file.clone(), read.info))
+    }
+
+    /// The words over a round shown whole as frame strips: its line,
+    /// "Round N · <model name> · N takes", and each reference by its order
+    /// and role, as the Image Generator's round grid and references sheet
+    /// write them.
+    pub fn round_sheet(&self) -> Option<view::Sheet> {
+        if self.rounds.with != With::Strips {
+            return None;
+        }
+        let tile = self.rounds.tiles.get(self.rounds.shown?)?;
+        let round = self.rounds.round_of(tile)?;
+        let count = self.rounds.round_tiles(tile).len();
+        let title = format!("Round {} · {} · {}", round.number, crate::rounds::model_name(round), layers::words::takes_word(count));
+        let references =
+            round.references.iter().enumerate().map(|(index, reference)| layers::words::sheet_label(index, reference, &crate::rounds::ROLES)).collect();
+        Some(view::Sheet { title, references })
     }
 }
 
@@ -256,6 +303,8 @@ impl Session {
         messages.push(AppMessage::Tools { groups: crate::assist::tool_groups() });
         // The host asks for a video reference's preview here.
         messages.push(AppMessage::Edits { media_types: crate::preview::VIDEO_TYPES.iter().map(|kind| kind.to_string()).collect() });
+        // It previews sounds too, which it never edits.
+        messages.push(AppMessage::Previews { media_types: crate::preview::previewed_types() });
         messages.push(AppMessage::End);
         if !self.tabs.is_empty() {
             messages.extend(self.emit());
@@ -319,6 +368,9 @@ impl Session {
                 }
                 self.project = Some(folder);
                 out.extend(self.emit());
+                for index in 0..self.tabs.len() {
+                    self.restore_items(index);
+                }
                 out.extend(self.items_due());
             }
             // A video's file from outside the project opens nothing.
@@ -668,13 +720,49 @@ impl Session {
         let in_project = self.project.is_some();
         let tab = self.tabs.get_mut(self.active)?;
         // Whatever the gallery does shows a take of its own.
-        tab.rounds.shown = None;
+        tab.rounds.show(None);
         let (edits, shown) = (tab.gallery.edits, tab.gallery.take().map(|take| take.uid));
         let result = change(&mut tab.gallery);
         if tab.gallery.edits != edits || (in_project && tab.gallery.take().map(|take| take.uid) != shown) {
             tab.dirty = true;
         }
         Some(result)
+    }
+
+    /// A Ctrl- or Shift-click on the strip's tile `index`, counting the
+    /// rounds' tiles first, when a round's take is the one shown or the one
+    /// clicked: the take clicked beside the one shown, as vg-takes-compare
+    /// shows, a round's or the gallery's, from one time. Two of the
+    /// gallery's own takes are its own view, a step, as before. Returns
+    /// whether it was taken.
+    fn beside(&mut self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let tiles = tab.rounds.tiles.len();
+        let with = match (tab.rounds.shown, index < tiles) {
+            (Some(shown), true) if shown == index => return true,
+            (Some(_), true) => tab.rounds.tiles[index].path().map(|path| (None, With::Tile(path.to_string()))),
+            (Some(_), false) => tab.gallery.uid_at(index - tiles).map(|uid| (None, With::Own { uid, first: false })),
+            // A gallery take shown, and a round's take clicked: the
+            // gallery's on the left, as the one shown.
+            (None, true) => tab
+                .gallery
+                .take()
+                .filter(|_| tab.rounds.tiles[index].file.is_some())
+                .map(|take| (Some(index), With::Own { uid: take.uid, first: true })),
+            (None, false) => return false,
+        };
+        let Some((show, with)) = with else {
+            return true;
+        };
+        self.stop_playing();
+        let tab = &mut self.tabs[self.active];
+        if let Some(show) = show {
+            tab.rounds.shown = Some(show);
+        }
+        tab.rounds.with = with;
+        true
     }
 
     /// Undo, or redo with `redo`: a step of a take's notes keeps the take
@@ -879,13 +967,19 @@ impl Session {
                     return;
                 };
                 let tiles = self.active_tab().map_or(0, |tab| tab.rounds.tiles.len());
+                let extend = arg.get("extend").and_then(Value::as_bool).unwrap_or(false);
+                // With `extend`, a take beside the one shown, when a round's
+                // take is either: a view only, never a step or kept.
+                if extend && self.beside(index) {
+                    out.extend(self.emit());
+                    return;
+                }
                 if index < tiles {
                     self.select_take(index);
                     out.extend(self.emit());
                     return;
                 }
                 let index = index - tiles;
-                let extend = arg.get("extend").and_then(Value::as_bool).unwrap_or(false);
                 self.change(|gallery| match gallery.uid_at(index) {
                     Some(other) if extend && index != gallery.shown => gallery.set_view(Mode::Side { other }, gallery.shown),
                     Some(_) if extend => Ok(()),
@@ -968,6 +1062,16 @@ impl Session {
             // The grid button: every take as frame strips, or the shown
             // take alone again.
             "view_strips" => {
+                // A round's take shown: its round whole, or the take again,
+                // a view only, never a step.
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && tab.rounds.shown.is_some()
+                {
+                    tab.rounds.with = if tab.rounds.with == With::Strips { With::Alone } else { With::Strips };
+                    self.stop_playing();
+                    out.extend(self.emit());
+                    return;
+                }
                 self.change(|gallery| {
                     let mode = if gallery.view() == Mode::Strips { Mode::Single } else { Mode::Strips };
                     gallery.set_view(mode, gallery.shown)
@@ -1116,6 +1220,9 @@ impl Session {
                     let index = self.push_tab(gallery, Some(path), None);
                     self.tabs[index].frame = read.frame;
                     self.declare_new(out);
+                    // What its drafts name of its own items, declared again.
+                    self.restore_items(index);
+                    out.extend(self.items_due());
                 }
                 Err(reason) => out.push(notice("This video could not be opened", &reason)),
             }
@@ -1349,12 +1456,17 @@ impl Session {
             return Vec::new();
         };
         let shown = tab.round_view();
-        let mut scene = view::scene(shown.as_ref().unwrap_or(&tab.gallery), size, tab.look());
+        // A round shown whole has its line and references over its strips.
+        let sheet = tab.round_sheet();
+        let mut scene = view::scene_with(shown.as_ref().unwrap_or(&tab.gallery), size, tab.look(), sheet.as_ref());
         // The notes at the time shown, drawn over the take's frame.
         scene.notes = self.notes_over();
         // The pre-vis check's animatic frame at the same time, asked for
         // with the take's.
         scene.animatic = self.animatic_over(&scene);
+        if let Some(caption) = self.animatic_caption(&scene) {
+            scene.captions.push(caption);
+        }
         let keys = scene.keys();
         if scene.live {
             self.decoders.want(&keys, &[]);

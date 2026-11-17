@@ -63,7 +63,7 @@ impl Session {
             return;
         };
         if tab.rounds.tiles.get(tile).is_some_and(|chosen| chosen.file.is_some()) {
-            tab.rounds.shown = Some(tile);
+            tab.rounds.show(Some(tile));
         }
     }
 
@@ -232,6 +232,47 @@ impl Session {
             }
         }
         out
+    }
+
+    /// A tab's file read again: each marked image and each Start frame
+    /// taken from the animatic that one of its cells still names, whose
+    /// render is still in the project under `protocol::render_path`, is
+    /// declared again with `items`, so what a draft names is listed after
+    /// a restart.
+    pub(super) fn restore_items(&mut self, index: usize) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(relative) = self.tabs.get(index).and_then(|tab| tab.path.clone()).and_then(|path| self.relative(&path)) else {
+            return;
+        };
+        let tab = &mut self.tabs[index];
+        let named: Vec<ItemRef> = tab
+            .gallery
+            .cells
+            .iter()
+            .flat_map(|cell| cell.input.iter())
+            .filter_map(|part| match part {
+                CellPart::Item { item, .. } if item.path == relative => Some(item.clone()),
+                _ => None,
+            })
+            .collect();
+        for item in named {
+            let Some(id) = item.item.as_deref() else {
+                continue;
+            };
+            let found = id.strip_prefix(MARKED_ITEM).map(|fingerprint| (true, fingerprint)).or_else(|| id.strip_prefix(ANIMATIC_ITEM).map(|fingerprint| (false, fingerprint)));
+            let Some((marked, fingerprint)) = found else {
+                continue;
+            };
+            if !project.join(protocol::render_path(OWNER, &item, None, fingerprint, "png")).is_file() {
+                continue;
+            }
+            let list = if marked { &mut tab.marked } else { &mut tab.frames_taken };
+            if !list.iter().any(|(own, _)| own == id) {
+                list.push((id.to_string(), fingerprint.to_string()));
+            }
+        }
     }
 
     /// `render`: a take is its own file, as it was made; a marked frame

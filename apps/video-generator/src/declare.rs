@@ -4,7 +4,7 @@
 //! wherever a video needs nothing more.
 
 use crate::gallery::Mode;
-use crate::rounds;
+use crate::rounds::{self, With};
 use crate::session::{Session, Tab, Tool};
 use protocol::{
     Action, Binding, CellSetting, Chord, Film, FilmGroup, FilmItem, Keys, MenuEntry, PanelCell, PanelPage, Properties, ReferenceRole,
@@ -48,7 +48,10 @@ pub fn toolbar(session: &Session) -> Toolbar {
     let tab = session.active_tab();
     let can_undo = tab.is_some_and(|tab| tab.gallery.can_undo());
     let can_redo = tab.is_some_and(|tab| tab.gallery.can_redo());
-    let strips = tab.is_some_and(|tab| tab.gallery.view() == Mode::Strips);
+    // The grid shows the gallery's takes as frame strips, or a round's
+    // take's round whole, as vg-frame-strips shows.
+    let strips = tab.is_some_and(|tab| tab.round_view().as_ref().unwrap_or(&tab.gallery).view() == Mode::Strips);
+    let grid = tab.is_some_and(|tab| !tab.gallery.takes.is_empty() || tab.rounds.shown.is_some());
     let mut items = vec![
         button("folder", "Open (Ctrl+O)", Action::new("open"), true, false),
         ToolItem::Separator,
@@ -64,7 +67,7 @@ pub fn toolbar(session: &Session) -> Toolbar {
     items.extend([
         ToolItem::Separator,
         // Its tip is the guide's word for what it shows whole.
-        button("view-grid", "Round", Action::new("view_strips"), tab.is_some_and(|tab| !tab.gallery.takes.is_empty()), strips),
+        button("view-grid", "Round", Action::new("view_strips"), grid, strips),
     ]);
     let zoom = tab.and_then(|tab| tab.zoom);
     let label = match zoom {
@@ -177,7 +180,8 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
                 // The take's length, as vg-filmstrip-rounds' badge shows it.
                 badge: read.and_then(|read| read.info).map(|info| crate::preview::length(&info)).unwrap_or_default(),
                 mark: tile.file.as_ref().filter(|file| file.canon).map(|_| String::from("badge-check")),
-                chosen: rounds.shown == Some(index),
+                // The take shown, and one beside it.
+                chosen: rounds.shown == Some(index) || tile.path().is_some_and(|path| rounds.with == With::Tile(path.to_string())),
                 pending: tile.pending.clone(),
             }
         })
@@ -206,7 +210,8 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
                 // The take's length, as vg-gallery-anchor's badge shows it.
                 badge: take.seconds().map(|seconds| format!("{seconds:.1} s")).unwrap_or_default(),
                 mark: None,
-                chosen: false,
+                // Beside a round's take shown.
+                chosen: rounds.shown.is_some() && matches!(rounds.with, With::Own { uid, .. } if uid == take.uid),
                 pending: None,
             }
         });

@@ -615,7 +615,7 @@ pub fn model_name(round: &Round) -> &str {
 }
 
 fn takes_word(count: usize) -> String {
-    if count == 1 { String::from("1 take") } else { format!("{count} takes") }
+    layers::words::takes_word(count)
 }
 
 /// A file's name, without its folders.
@@ -632,32 +632,13 @@ fn reference_name(reference: &SentReference) -> String {
 /// shows them: its order and role, "1st, control: the room's layout.", or
 /// its order and file.
 pub fn sheet_label(index: usize, reference: &SentReference) -> String {
-    let what = match reference.role.as_deref().map(str::trim).filter(|role| !role.is_empty()) {
-        Some(role) => match role.split_once(", ") {
-            Some((word, words)) => format!("{}: {words}", lower_role(word)),
-            None => lower_role(role),
-        },
-        None => file_name(&reference.path).to_string(),
-    };
-    format!("{}, {what}.", ordinal(index + 1))
+    layers::words::sheet_label(index, reference, &ROLES)
 }
 
-/// A role's menu word in the middle of a sentence: one of the menu's own
-/// roles lower case, and any other word as it was written.
-fn lower_role(word: &str) -> String {
-    if ROLES.contains(&word) { word.to_lowercase() } else { word.to_string() }
-}
-
-/// "1st", "2nd", "3rd", "4th", … "11th", "21st".
+/// "1st", "2nd", "3rd", "4th", … "11th", "21st", as `layers::words` has it.
+#[cfg(test)]
 fn ordinal(number: usize) -> String {
-    let suffix = match (number % 10, number % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{number}{suffix}")
+    layers::words::ordinal(number)
 }
 
 /// A prompt's first words, with "…" when there are more.

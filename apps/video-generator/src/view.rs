@@ -28,6 +28,11 @@ pub const STRIP_FRAMES: u32 = 8;
 pub const TIME_ROOM: u32 = 18;
 const CAPTION: f32 = 12.0;
 const CAPTION_COLOUR: [u8; 4] = [110, 110, 118, 255];
+/// A round's line over its strips, as the Image Generator's round grid
+/// writes it, and the room it takes.
+const TITLE: f32 = 15.0;
+const TITLE_COLOUR: [u8; 4] = [70, 70, 76, 255];
+const TITLE_ROOM: u32 = 30;
 /// The working area's white, as the host draws around an image.
 const GROUND: [u8; 4] = [255, 255, 255, 255];
 /// A take whose file could not be read: the host's light checker grey.
@@ -68,20 +73,34 @@ pub struct Scene {
     pub animatic: Option<Animatic>,
 }
 
-/// The animatic's frame over a place: which place, and the frame's key.
+/// The animatic's frame over a place: which place, the frame's key, and
+/// whether its line art is drawn in white over its edges, as over a
+/// Motion reference, or only its edges, as over a Start frame, whose
+/// darks are no line art.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Animatic {
     pub place: usize,
     pub key: Key,
+    pub lines: bool,
 }
 
 /// Words drawn over the view in gray: their line's top at `at[1]`, and
-/// their left end, or with `centre` their middle, at `at[0]`.
+/// their left end, or with `centre` their middle, at `at[0]`; with
+/// `title`, larger, as a round's line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Caption {
     pub words: String,
     pub at: [f32; 2],
     pub centre: bool,
+    pub title: bool,
+}
+
+/// The words over a round shown whole as frame strips: its line, and each
+/// reference by its order and role, in a narrow column at the left.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sheet {
+    pub title: String,
+    pub references: Vec<String>,
 }
 
 impl Scene {
@@ -103,8 +122,15 @@ pub struct Look {
 
 /// The scene a gallery shows in an image of `size`.
 pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
+    scene_with(gallery, size, look, None)
+}
+
+/// The scene a gallery shows, and over frame strips a round's `sheet`:
+/// its line above them, and its references in a column at their left, as
+/// vg-frame-strips shows a round whole.
+pub fn scene_with(gallery: &Gallery, size: (u32, u32), look: Look, sheet: Option<&Sheet>) -> Scene {
     let (width, height) = size;
-    let area = Rect {
+    let mut area = Rect {
         x: MARGIN as i32,
         y: MARGIN as i32,
         w: width.saturating_sub(2 * MARGIN).max(2),
@@ -137,7 +163,7 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
                 let (place, focus) = shown(take, cell, look, widest, frames[index]);
                 // Its name, small, over it.
                 let top = place.rect.y.max(place.clip.y) as f32 - CAPTION - 8.0;
-                scene.captions.push(Caption { words: take.name.clone(), at: [place.rect.x.max(place.clip.x) as f32, top.max(2.0)], centre: false });
+                scene.captions.push(Caption { words: take.name.clone(), at: [place.rect.x.max(place.clip.x) as f32, top.max(2.0)], centre: false, title: false });
                 scene.places.push(place);
                 if index == 0 {
                     scene.focus = focus;
@@ -146,6 +172,9 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
         }
         Mode::Strips => {
             scene.live = false;
+            if let Some(sheet) = sheet {
+                lay_sheet(&mut scene, &mut area, sheet);
+            }
             let count = gallery.takes.len() as u32;
             let aspect = gallery.takes.iter().find_map(|take| take.info.map(aspect_of)).unwrap_or(WIDE);
             let cells = strip_cells(area, count, aspect);
@@ -161,13 +190,57 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
                     if let Some(seconds) = take.seconds() {
                         let at = f64::from(column + 1) * seconds / f64::from(STRIP_FRAMES);
                         let under = [cell.x as f32 + cell.w as f32 / 2.0, (cell.y + cell.h as i32) as f32 + 3.0];
-                        scene.captions.push(Caption { words: format!("{at:.1} s"), at: under, centre: true });
+                        scene.captions.push(Caption { words: format!("{at:.1} s"), at: under, centre: true, title: false });
                     }
                 }
             }
         }
     }
     scene
+}
+
+/// A round's sheet over its strips: its line at the top, then its
+/// references in a column at the left, each wrapped to it, the strips'
+/// area made smaller by both.
+fn lay_sheet(scene: &mut Scene, area: &mut Rect, sheet: &Sheet) {
+    scene.captions.push(Caption { words: sheet.title.clone(), at: [area.x as f32, area.y as f32], centre: false, title: true });
+    area.y += TITLE_ROOM as i32;
+    area.h = area.h.saturating_sub(TITLE_ROOM).max(2);
+    if sheet.references.is_empty() {
+        return;
+    }
+    let column = (scene.width as f32 * 0.16).clamp(110.0, 220.0);
+    let line = (layers::label::height(CAPTION) * 1.25).round();
+    let mut y = area.y as f32;
+    for reference in &sheet.references {
+        for words in wrap(reference, column) {
+            scene.captions.push(Caption { words, at: [area.x as f32, y], centre: false, title: false });
+            y += line;
+        }
+        y += 8.0;
+    }
+    let room = column as u32 + 2 * SIDE_GAP;
+    area.x += room as i32;
+    area.w = area.w.saturating_sub(room).max(2);
+}
+
+/// Words broken at spaces into lines no wider than `most` at the
+/// captions' size; a word wider than a line has it to itself.
+fn wrap(words: &str, most: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in words.split_whitespace() {
+        let longer = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && layers::label::measure(&longer, CAPTION, false) > most {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = longer;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// The frame strips' cells, row by row: eight across the area, each row
@@ -269,11 +342,17 @@ pub fn compose(scene: &Scene, frames: &std::collections::HashMap<Key, Rgba>) -> 
         let frame = place.key.as_ref().and_then(|key| frames.get(key));
         // The take over its animatic: the animatic's edges and lines over
         // the take's frame, before it is placed.
-        let over = scene.animatic.as_ref().filter(|animatic| animatic.place == index).and_then(|animatic| frames.get(&animatic.key));
+        let over = scene.animatic.as_ref().filter(|animatic| animatic.place == index).and_then(|animatic| Some((frames.get(&animatic.key)?, animatic.lines)));
         let overlaid = match (frame, over) {
-            (Some(frame), Some(animatic)) => {
+            (Some(frame), Some((animatic, true))) => {
                 let mut frame = frame.clone();
                 layers::edges::over_animatic(&mut frame, animatic);
+                Some(frame)
+            }
+            // A Start frame: its edges only, as the pre-vis check draws.
+            (Some(frame), Some((animatic, false))) => {
+                let mut frame = frame.clone();
+                layers::edges::check(&mut frame, animatic, layers::edges::CYAN);
                 Some(frame)
             }
             _ => None,
@@ -287,7 +366,11 @@ pub fn compose(scene: &Scene, frames: &std::collections::HashMap<Key, Rgba>) -> 
         }
     }
     for caption in &scene.captions {
-        let look = layers::label::Look { size: CAPTION, colour: CAPTION_COLOUR, bold: false };
+        let look = if caption.title {
+            layers::label::Look { size: TITLE, colour: TITLE_COLOUR, bold: false }
+        } else {
+            layers::label::Look { size: CAPTION, colour: CAPTION_COLOUR, bold: false }
+        };
         let anchor = if caption.centre { layers::label::Anchor::Centre } else { layers::label::Anchor::Left };
         layers::label::draw(&mut image, &caption.words, caption.at, look, anchor);
     }
@@ -441,6 +524,63 @@ mod tests {
         assert_eq!(low.rect.x - low.clip.x, high.rect.x - high.clip.x);
         assert_eq!(low.rect.y - low.clip.y, high.rect.y - high.clip.y);
         assert!(side.focus.is_some());
+    }
+
+    /// Catches a Start frame's darks drawn as line art, or its edges left
+    /// out: over a colour keyframe, only its edges are drawn, in cyan, and
+    /// its dark middle leaves the take as it is; over a Motion reference,
+    /// the same dark is a white line.
+    #[test]
+    fn over_a_start_frame_only_its_edges_are_drawn() {
+        let take = Key::new(PathBuf::from("/scratch/take.mp4"), 0, (16, 16));
+        let art = Key::new(PathBuf::from("/scratch/start.png"), 0, (16, 16));
+        let rect = Rect { x: 0, y: 0, w: 16, h: 16 };
+        let mut frames = HashMap::new();
+        frames.insert(take.clone(), Rgba::new(16, 16, [100, 100, 100, 255]));
+        let mut start = Rgba::new(16, 16, [230, 230, 230, 255]);
+        for y in 4..12 {
+            for x in 4..12 {
+                start.set(x, y, [10, 10, 10, 255]);
+            }
+        }
+        frames.insert(art.clone(), start);
+        let mut scene = Scene {
+            width: 16,
+            height: 16,
+            places: vec![Place { key: Some(take), rect, clip: rect }],
+            live: true,
+            focus: None,
+            captions: Vec::new(),
+            notes: None,
+            animatic: Some(Animatic { place: 0, key: art, lines: false }),
+        };
+        let edges = compose(&scene, &frames);
+        assert_eq!(edges.pixel(8, 8), [100, 100, 100, 255], "a Start frame's darks were drawn as line art");
+        let edge = edges.pixel(3, 8);
+        assert!(edge[0] < 40 && edge[2] > 200, "the Start frame's edge is not cyan: {edge:?}");
+        if let Some(animatic) = scene.animatic.as_mut() {
+            animatic.lines = true;
+        }
+        assert_eq!(compose(&scene, &frames).pixel(8, 8), [255, 255, 255, 255], "a Motion reference's line is not white");
+    }
+
+    /// Catches a round shown whole without its line or its references, or
+    /// its strips laid over them: the line is at the top, the references
+    /// in a column at the left, and the strips start right of it and
+    /// below the line.
+    #[test]
+    fn a_round_whole_has_its_line_and_references() {
+        let mut gallery = gallery(&[("a", info(128, 72, 48)), ("b", info(128, 72, 48))]);
+        gallery.set_view(Mode::Strips, 0).unwrap();
+        let sheet = Sheet { title: "Round 2 · Model A · 2 takes".into(), references: vec!["1st, start frame: the keeper.".into()] };
+        let scene = scene_with(&gallery, (1200, 800), FIT, Some(&sheet));
+        assert!(scene.captions.iter().any(|caption| caption.title && caption.words == sheet.title && caption.at == [MARGIN as f32, MARGIN as f32]));
+        let reference = scene.captions.iter().find(|caption| caption.words.starts_with("1st")).expect("the reference is not written");
+        assert_eq!(reference.at[0], MARGIN as f32);
+        let first = scene.places[0].rect;
+        assert!(first.x as f32 > reference.at[0] + 110.0, "the strips are over the references' column");
+        assert!(first.y >= (MARGIN + TITLE_ROOM) as i32, "the strips are over the round's line");
+        assert_eq!(scene.places.len(), 16);
     }
 
     /// Catches a frame drawn outside its place, or a missing one drawn as

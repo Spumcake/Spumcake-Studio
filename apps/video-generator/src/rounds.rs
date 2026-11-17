@@ -61,6 +61,20 @@ pub struct Read {
     pub sha256: String,
 }
 
+/// What a round's take shown is shown with: alone; beside another take,
+/// of this round or another, by its path, or of the gallery, by its uid,
+/// on the left with `first`; or its round whole as frame strips, as
+/// vg-frame-strips and vg-takes-compare show. A view of the working area,
+/// never a step of the gallery's history, and never kept.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum With {
+    #[default]
+    Alone,
+    Tile(String),
+    Own { uid: u64, first: bool },
+    Strips,
+}
+
 #[derive(Debug, Default)]
 pub struct Rounds {
     /// Each cell's rounds, oldest first, as the host last sent them, in
@@ -71,6 +85,8 @@ pub struct Rounds {
     /// The tile shown in the working area in place of a take of the
     /// gallery.
     pub shown: Option<usize>,
+    /// What the take shown is shown with.
+    pub with: With,
     reads: HashMap<String, Read>,
 }
 
@@ -128,6 +144,14 @@ impl Rounds {
         }
         self.tiles = tiles;
         self.shown = shown.and_then(|path| self.tiles.iter().position(|tile| tile.path() == Some(path.as_str())));
+        // A take beside it stays while its file is still among them.
+        let gone = match &self.with {
+            With::Tile(path) => self.tile_of(path).is_none(),
+            _ => false,
+        };
+        if self.shown.is_none() || gone {
+            self.with = With::Alone;
+        }
         self.reads.retain(|path, _| self.tiles.iter().any(|tile| tile.path() == Some(path.as_str())));
     }
 
@@ -163,6 +187,22 @@ impl Rounds {
     pub fn round_of(&self, tile: &Tile) -> Option<&Round> {
         let (_, rounds) = self.by_cell.iter().find(|(cell, _)| *cell == tile.cell)?;
         rounds.iter().find(|round| round.request == tile.request)
+    }
+
+    /// Shows the tile at `index` alone, or nothing of the rounds with none.
+    pub fn show(&mut self, index: Option<usize>) {
+        self.shown = index;
+        self.with = With::Alone;
+    }
+
+    /// The tiles of a tile's round, in order, that have their take.
+    pub fn round_tiles(&self, tile: &Tile) -> Vec<usize> {
+        (0..self.tiles.len())
+            .filter(|index| {
+                let other = &self.tiles[*index];
+                other.cell == tile.cell && other.request == tile.request && other.file.is_some()
+            })
+            .collect()
     }
 
     /// The tile of the take at `path`.

@@ -79,9 +79,15 @@ impl NotesOver {
     }
 
     /// The open pin's card, in the view's pixels.
+    /// Its words start with the pin's moment, "1 — 3.4 s · ", when it has
+    /// a time, as vg-notes-at-time shows; the caret stays after them.
     pub fn card(&self) -> Option<Card> {
         let pin = self.notes.pins.iter().find(|pin| Some(pin.number) == self.open)?;
-        Some(card(&self.pin_in_view(pin), self.radius() * self.scale(), self.clip))
+        let mut shown = self.pin_in_view(pin);
+        if let Some(moment) = pin.moment() {
+            shown.text = format!("{moment} · {}", pin.text);
+        }
+        Some(card(&shown, self.radius() * self.scale(), self.clip))
     }
 
     /// The open pin's words, as the host draws them being typed: the
@@ -267,6 +273,7 @@ mod tests {
         assert_eq!(image.pixel(250, 10 + 2 * 60), [255, 255, 255, 255], "a mark reached past the part shown");
         let open = over(Some(1));
         let card = open.card().unwrap();
+        assert!(card.lines.concat().starts_with("1 — 0.5 s · less rain"), "the card does not start with the pin's moment");
         let inside = [(card.rect[0] + 3.0) as u32, (card.rect[1] + 2.0) as u32];
         assert_eq!(image.pixel(inside[0], inside[1]), [255, 255, 255, 255]);
         let mut drawn = Rgba::new(300, 200, [0, 0, 0, 255]);
