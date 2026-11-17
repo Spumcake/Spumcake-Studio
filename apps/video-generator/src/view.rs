@@ -61,6 +61,18 @@ pub struct Scene {
     /// The notes over the take shown that show at the time shown, drawn
     /// over its frame; the session sets them.
     pub notes: Option<crate::notes::NotesOver>,
+    /// The animatic's frame at the same time, decoded at the take's size,
+    /// whose lines and edges are laid over the frame of the place it
+    /// names, as the pre-vis check shows a take over its animatic; the
+    /// session sets it.
+    pub animatic: Option<Animatic>,
+}
+
+/// The animatic's frame over a place: which place, and the frame's key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animatic {
+    pub place: usize,
+    pub key: Key,
 }
 
 /// Words drawn over the view in gray: their line's top at `at[1]`, and
@@ -73,8 +85,9 @@ pub struct Caption {
 }
 
 impl Scene {
+    /// Every frame the scene draws: each place's, then the animatic's.
     pub fn keys(&self) -> Vec<Key> {
-        self.places.iter().filter_map(|place| place.key.clone()).collect()
+        self.places.iter().filter_map(|place| place.key.clone()).chain(self.animatic.as_ref().map(|animatic| animatic.key.clone())).collect()
     }
 }
 
@@ -97,7 +110,7 @@ pub fn scene(gallery: &Gallery, size: (u32, u32), look: Look) -> Scene {
         w: width.saturating_sub(2 * MARGIN).max(2),
         h: height.saturating_sub(2 * MARGIN).max(2),
     };
-    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None, captions: Vec::new(), notes: None };
+    let mut scene = Scene { width, height, places: Vec::new(), live: true, focus: None, captions: Vec::new(), notes: None, animatic: None };
     match gallery.view() {
         Mode::Single => {
             if let Some(take) = gallery.take() {
@@ -252,8 +265,20 @@ fn centred(cell: Rect, w: u32, h: u32) -> Rect {
 /// never to be, leaves its place empty.
 pub fn compose(scene: &Scene, frames: &std::collections::HashMap<Key, Rgba>) -> Rgba {
     let mut image = Rgba::new(scene.width, scene.height, GROUND);
-    for place in &scene.places {
-        match place.key.as_ref().and_then(|key| frames.get(key)) {
+    for (index, place) in scene.places.iter().enumerate() {
+        let frame = place.key.as_ref().and_then(|key| frames.get(key));
+        // The take over its animatic: the animatic's edges and lines over
+        // the take's frame, before it is placed.
+        let over = scene.animatic.as_ref().filter(|animatic| animatic.place == index).and_then(|animatic| frames.get(&animatic.key));
+        let overlaid = match (frame, over) {
+            (Some(frame), Some(animatic)) => {
+                let mut frame = frame.clone();
+                layers::edges::over_animatic(&mut frame, animatic);
+                Some(frame)
+            }
+            _ => None,
+        };
+        match overlaid.as_ref().or(frame) {
             Some(frame) if (frame.width, frame.height) == (place.rect.w, place.rect.h) && inside(place.rect, place.clip) => {
                 layout::place(&mut image, frame, place.rect);
             }
@@ -436,6 +461,7 @@ mod tests {
             focus: None,
             captions: Vec::new(),
             notes: None,
+            animatic: None,
         };
         let image = compose(&scene, &frames);
         assert_eq!(image.pixel(5, 5), GROUND);

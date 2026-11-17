@@ -222,6 +222,9 @@ impl Session {
             for (id, fingerprint) in &tab.marked {
                 items.push(Item { id: id.clone(), name: NOTES_WORDS.into(), media_types: vec![String::from("image/png")], fingerprint: fingerprint.clone(), made: None });
             }
+            for (id, fingerprint) in &tab.frames_taken {
+                items.push(Item { id: id.clone(), name: String::from("Start frame"), media_types: vec![String::from("image/png")], fingerprint: fingerprint.clone(), made: None });
+            }
             let now: (String, Vec<Item>) = (path, items);
             if tab.items_sent.as_ref() != Some(&now) {
                 out.push(AppMessage::Items { path: now.0.clone(), items: now.1.clone() });
@@ -232,7 +235,8 @@ impl Session {
     }
 
     /// `render`: a take is its own file, as it was made; a marked frame
-    /// was rendered when its next round was made.
+    /// was rendered when its next round was made, and a Start frame taken
+    /// from the animatic when it was taken.
     pub(super) fn render(&mut self, id: String, item: &ItemRef, media_type: &str) -> AppMessage {
         let failed = |id: String, error: &str| AppMessage::Rendered { id, path: None, fingerprint: None, error: Some(error.to_string()) };
         let found = (0..self.tabs.len())
@@ -248,6 +252,15 @@ impl Session {
                 ("image/png", true) => AppMessage::Rendered { id, path: Some(relative), fingerprint: Some(fingerprint.to_string()), error: None },
                 ("image/png", false) => failed(id, "The marked image is gone. Make the next round from the take again."),
                 _ => failed(id, "A marked image is rendered only as PNG."),
+            };
+        }
+        if let Some(fingerprint) = own.strip_prefix(ANIMATIC_ITEM) {
+            let relative = protocol::render_path(OWNER, item, None, fingerprint, "png");
+            let kept = self.project.as_ref().is_some_and(|project| project.join(&relative).is_file());
+            return match (media_type, kept) {
+                ("image/png", true) => AppMessage::Rendered { id, path: Some(relative), fingerprint: Some(fingerprint.to_string()), error: None },
+                ("image/png", false) => failed(id, "The Start frame is gone. Take it from the animatic again."),
+                _ => failed(id, "A Start frame is rendered only as PNG."),
             };
         }
         match self.tabs[index].rounds.take_by_item(own) {

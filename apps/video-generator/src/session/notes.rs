@@ -14,7 +14,6 @@
 use super::*;
 use crate::notes::{MARK_WIDTH, NotesOver};
 use layers::notes::{Mark, Notes, Pin};
-#[cfg(feature = "transport")]
 use protocol::Cue;
 use protocol::{TextEditing, TextInput, TextKey};
 
@@ -151,7 +150,6 @@ impl Session {
 
     /// Each pin of the take shown as a cue on the transport row: its bare
     /// number, as the host writes the time beside it, in the notes' red.
-    #[cfg(feature = "transport")]
     pub fn note_cues(&self) -> Vec<Cue> {
         let Some(target) = self.notes_target() else {
             return Vec::new();

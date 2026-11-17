@@ -10,7 +10,6 @@ use protocol::{
     Action, Binding, CellSetting, Chord, Film, FilmGroup, FilmItem, Keys, MenuEntry, PanelCell, PanelPage, Properties, ReferenceRole,
     RowKind, TabEntry, Tabs, Thumbnail, ToolItem, Toolbar,
 };
-#[cfg(feature = "transport")]
 use protocol::{Transport, TransportClock, TransportRow};
 use serde_json::json;
 
@@ -72,7 +71,15 @@ pub fn toolbar(session: &Session) -> Toolbar {
         Some(zoom) => format!("{}%", (zoom * 100.0).round()),
         None => String::from("Fit"),
     };
+    // The pre-vis check, as the Image Generator's: a round's take shown
+    // over its animatic, as vg-take-over-animatic shows; off for a take not
+    // in a round, or a round with neither a Motion reference nor a Start
+    // frame.
+    let animatic = tab.is_some_and(|tab| session.animatic_of(tab).is_some());
+    let over = tab.is_some_and(|tab| tab.over_animatic) && animatic;
     let trailing = vec![
+        ToolItem::Separator,
+        button("cube", "Pre-vis check", Action::new("previs_toggle"), animatic, over),
         ToolItem::Separator,
         ToolItem::Menu {
             icon: String::new(),
@@ -223,7 +230,6 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
 /// moves it; its sound's waveform as a row, "Sound", when it has one; and
 /// each pin of its notes as a cue at its time, as vg-notes-at-time shows.
 /// Frame strips have none.
-#[cfg(feature = "transport")]
 pub fn transport(session: &Session, tab: &Tab) -> Option<Transport> {
     let shown = tab.round_view();
     let gallery = shown.as_ref().unwrap_or(&tab.gallery);
@@ -282,15 +288,16 @@ pub fn properties(session: &Session) -> Option<Properties> {
         layers: None,
         sections: Vec::new(),
         pages: vec![page("Layers", 0, false), page("Properties", 1, false), page("Adjustments", 2, false), page("Prompt", 3, true)],
-        cell: tab.gallery.current_cell().map(|cell| prompt_cell(&cell.id)),
+        cell: tab.gallery.current_cell().map(|cell| prompt_cell(&cell.id, session.has_animatic())),
     })
 }
 
 /// The Prompt page's cell, as vg-request-inputs shows it: the host draws
 /// the card and runs it; this names the cell, the roles a reference can
 /// have, Start frame and End frame each a row of its own, the references
-/// it takes, and the settings Size, Length in seconds, and Seed.
-pub fn prompt_cell(cell: &str) -> PanelCell {
+/// it takes, a reference's menu, and the settings Size, Length in seconds,
+/// and Seed.
+pub fn prompt_cell(cell: &str, animatic: bool) -> PanelCell {
     PanelCell {
         cell: cell.to_string(),
         hint: HINT.into(),
@@ -299,7 +306,7 @@ pub fn prompt_cell(cell: &str) -> PanelCell {
             .map(|label| ReferenceRole { label: label.to_string(), field: None, slot: rounds::SLOTS.contains(label) })
             .collect(),
         reference_types: rounds::REFERENCE_TYPES.iter().map(|kind| kind.to_string()).collect(),
-        reference_menu: Vec::new(),
+        reference_menu: reference_menu(animatic),
         settings: vec![
             CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Text },
             CellSetting { key: "length".into(), label: "Length".into(), kind: RowKind::Field { min: 1.0, max: 20.0, places: 0 } },
@@ -307,6 +314,19 @@ pub fn prompt_cell(cell: &str) -> PanelCell {
         ],
         menu: Vec::new(),
     }
+}
+
+/// The rows a reference's menu adds between the host's Choose… and Clear,
+/// as vg-frame-from shows them: the animatic's frame at the playhead, put
+/// in the Start frame, off while the draft has no Motion reference, with a
+/// tip saying why; and Open in the Image Generator, for an image.
+fn reference_menu(animatic: bool) -> Vec<MenuEntry> {
+    let mut take = row("The animatic's frame at the playhead", Action::new("frame_from_animatic"));
+    take.enabled = animatic;
+    if !animatic {
+        take.tip = Some(crate::session::NO_ANIMATIC.into());
+    }
+    vec![take, row("Open in the Image Generator", Action::new("frame_open_image"))]
 }
 
 pub fn tabs(session: &Session) -> Option<Tabs> {

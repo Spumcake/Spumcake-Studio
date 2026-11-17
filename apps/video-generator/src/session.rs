@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod animatic;
 mod notes;
 mod play;
 mod requests;
@@ -54,6 +55,12 @@ const MARKED_ITEM: &str = "marked ";
 /// The words a next round's prompt gives a take's notes, and the role of
 /// the marked frame it sends, as the Image Generator's.
 const NOTES_WORDS: &str = "Notes on the last round";
+/// How an item of a tab's file names a Start frame taken from the
+/// animatic: this, then its fingerprint.
+const ANIMATIC_ITEM: &str = "animatic ";
+/// The tip of the reference menu's row taking the animatic's frame while
+/// the cell has no Motion reference, pending the owner's word.
+pub const NO_ANIMATIC: &str = "Add the shot's animatic as a Motion reference first.";
 /// The video files a take can be.
 const VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "mkv", "webm", "avi"];
 
@@ -96,6 +103,12 @@ pub struct Tab {
     /// The marked frames its next rounds sent, by item id, with their
     /// fingerprints, while the program runs.
     marked: Vec<(String, String)>,
+    /// The Start frames taken from the animatic, by item id, with their
+    /// fingerprints, while the program runs.
+    frames_taken: Vec<(String, String)>,
+    /// The pre-vis check: a round's take shown over its animatic. For the
+    /// tab while the program runs, never kept.
+    pub over_animatic: bool,
 }
 
 /// An image written for the host: what it shows, how many of its frames
@@ -176,6 +189,8 @@ pub struct Session {
     pub tools: Tools,
     typing: Option<notes::Typing>,
     marking: Option<notes::Marking>,
+    /// What each animatic's file is, read once.
+    animatics: HashMap<PathBuf, Option<media::Info>>,
     /// Tab ids still to ask about while quitting, after the one asked.
     quit_rest: Vec<String>,
     quitting: bool,
@@ -223,6 +238,7 @@ impl Session {
             playback: play::Playback::default(),
             tools: Tools::default(),
             typing: None,
+            animatics: HashMap::new(),
             marking: None,
             quit_rest: Vec::new(),
             quitting: false,
@@ -400,7 +416,7 @@ impl Session {
                     out.extend(self.raster());
                 }
             }
-            // The host's transport row, when it comes, shows a frame.
+            // A frame asked for by the host.
             HostMessage::Seek { tab, frame, .. } => {
                 self.activate(&tab);
                 self.set_frame(|_, _| i64::from(frame));
@@ -408,7 +424,6 @@ impl Session {
             }
             // The transport row's scrub: a time, played as that frame's
             // slice of sound.
-            #[cfg(feature = "transport")]
             HostMessage::TransportTime { tab, time } => {
                 self.activate(&tab);
                 self.transport_time(time);
@@ -629,6 +644,8 @@ impl Session {
             items_sent: None,
             artifacts: HashMap::new(),
             marked: Vec::new(),
+            frames_taken: Vec::new(),
+            over_animatic: false,
         });
         self.active = self.tabs.len() - 1;
         self.active
@@ -824,6 +841,21 @@ impl Session {
                     self.choose_tool(tool);
                 }
             }
+            // The Start frame row's menu: the animatic's frame at the
+            // playhead, whichever reference's menu sent it.
+            "frame_from_animatic" => {
+                self.frame_from_animatic(out);
+                return;
+            }
+            // Open in the Image Generator, sent with the reference's place.
+            "frame_open_image" => {
+                if let Some(reference) = number("value") {
+                    self.frame_open_image(reference as usize, out);
+                }
+                return;
+            }
+            // The pre-vis check: the take shown over its animatic.
+            "previs_toggle" => self.previs_toggle(),
             "notes_mode" => {
                 if let Some(index) = number("value") {
                     self.tools.draw = index >= 1.0;
@@ -1320,6 +1352,9 @@ impl Session {
         let mut scene = view::scene(shown.as_ref().unwrap_or(&tab.gallery), size, tab.look());
         // The notes at the time shown, drawn over the take's frame.
         scene.notes = self.notes_over();
+        // The pre-vis check's animatic frame at the same time, asked for
+        // with the take's.
+        scene.animatic = self.animatic_over(&scene);
         let keys = scene.keys();
         if scene.live {
             self.decoders.want(&keys, &[]);
@@ -1370,9 +1405,7 @@ impl Session {
             bounds: None,
             camera,
             camera_owner: RasterCamera::Workspace,
-            transport: None,
             film: Some(declare::film(self, &self.tabs[index])),
-            #[cfg(feature = "transport")]
             transport: declare::transport(self, &self.tabs[index]),
             text: self.text_editing(),
         };

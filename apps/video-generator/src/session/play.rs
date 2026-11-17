@@ -110,7 +110,6 @@ impl Session {
     }
 
     /// The time the Player's clock gives while playing, in seconds.
-    #[cfg_attr(not(feature = "transport"), allow(dead_code))]
     pub fn play_time(&self) -> Option<f64> {
         if !self.playback.playing {
             return None;
@@ -226,7 +225,6 @@ impl Session {
 
     /// A scrub of the transport, to `time` in seconds, heard as that frame's
     /// slice of sound.
-    #[cfg_attr(not(feature = "transport"), allow(dead_code))]
     pub(super) fn transport_time(&mut self, time: f64) {
         if !time.is_finite() {
             return;
@@ -303,7 +301,6 @@ impl Session {
 
     /// The waveform of the take that plays, at `width`, once written; none
     /// for a take with no sound.
-    #[cfg_attr(not(feature = "transport"), allow(dead_code))]
     pub fn wave(&self, width: u32) -> Option<Thumbnail> {
         let take = self.playing_take()?;
         self.playback.waves.get(&(take.key, width)).cloned()

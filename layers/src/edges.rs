@@ -4,6 +4,11 @@
 //! script finds them, so Studio and a harness show the same lines: the
 //! render made grey, Pillow's 3 × 3 `FIND_EDGES` filter, and every value
 //! above 18 an edge, which is mixed 85% toward the colour.
+//!
+//! A take over its animatic, as the same script lays a shot's animatic
+//! over its render: the animatic's edges in cyan, as the pre-vis check
+//! draws them, then its line art, every pixel darker than 128 in grey,
+//! drawn in white over them (`line_art`, `over_animatic`).
 
 use crate::Rgba;
 
@@ -13,6 +18,11 @@ pub const CYAN: [u8; 3] = [0, 220, 255];
 pub const STRENGTH: f32 = 0.85;
 /// Above this, a filtered value is an edge.
 pub const THRESHOLD: u8 = 18;
+/// The line art's white, `overlay.py`'s `--line-colour` default.
+pub const WHITE: [u8; 3] = [255, 255, 255];
+/// Under this in grey, a pixel of the line art is a line, as `overlay.py`
+/// finds its lines.
+pub const DARK: u8 = 128;
 
 /// The image in grey, as Pillow's `convert("L")` makes it.
 pub fn grey(image: &Rgba) -> Vec<u8> {
@@ -68,6 +78,26 @@ pub fn check(image: &mut Rgba, previs: &Rgba, colour: [u8; 3]) {
     let previs = crate::layout::fit_exactly(previs, image.width, image.height);
     let edges = find(&grey(&previs), previs.width, previs.height);
     draw(image, &edges, colour, STRENGTH);
+}
+
+/// The line art's lines over an image: every pixel of `art`, found at the
+/// image's size, darker than `DARK` in grey, drawn in `colour`, as
+/// `overlay.py` composites its lines.
+pub fn line_art(image: &mut Rgba, art: &Rgba, colour: [u8; 3]) {
+    let art = crate::layout::fit_exactly(art, image.width, image.height);
+    for (pixel, value) in image.data.chunks_exact_mut(4).zip(grey(&art)) {
+        if value < DARK {
+            pixel[..3].copy_from_slice(&colour);
+        }
+    }
+}
+
+/// A take's frame over the animatic's frame at the same time, as
+/// `overlay.py` lays them with one animatic as both its line art and its
+/// pre-vis: the animatic's edges in cyan, then its lines in white.
+pub fn over_animatic(image: &mut Rgba, animatic: &Rgba) {
+    check(image, animatic, CYAN);
+    line_art(image, animatic, WHITE);
 }
 
 /// The pre-vis blended over the image at `opacity`, from 0 to 1.

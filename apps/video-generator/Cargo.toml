@@ -5,11 +5,6 @@ edition = "2024"
 rust-version = "1.95"
 publish = false
 
-[features]
-# The transport row: `RasterView.transport`, `transport_time`, and
-# `Cue.colour`, which come to dev with the 3D Viewport's merge. On after it.
-transport = []
-
 [dependencies]
 protocol = { path = "../../protocol" }
 serde = { version = "=1.0.229", features = ["derive"] }

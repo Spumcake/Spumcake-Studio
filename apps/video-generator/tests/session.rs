@@ -799,12 +799,10 @@ fn the_prompt_page_is_declared_with_its_roles_and_settings() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// Playing a take with its sound, through the transport row, which reaches
-// dev with the 3D Viewport's merge: these run with the `transport` feature.
+// Playing a take with its sound, through the transport row.
 
 /// A take with sound: one second, 24 frames of dawn's first colour, and a
 /// tone.
-#[cfg(feature = "transport")]
 fn write_sounding_video(path: &Path) {
     let settings = media::Settings { width: SIZE.0, height: SIZE.1, rate: (24, 1), keyframes: 12, sound: Some((48_000, 2)) };
     let mut encoder = media::Encoder::create(path, settings).expect("an encoder");
@@ -823,7 +821,6 @@ fn write_sounding_video(path: &Path) {
 }
 
 /// The transport the view declares.
-#[cfg(feature = "transport")]
 fn transport(view: &RasterView) -> Option<protocol::Transport> {
     view.transport.clone()
 }
@@ -835,7 +832,6 @@ fn transport(view: &RasterView) -> Option<protocol::Transport> {
 /// frame has moved on from 0 and the image is that frame; a step moves one
 /// frame; a scrub to one second shows frame 24; and the take, which has no
 /// sound, has no row.
-#[cfg(feature = "transport")]
 #[test]
 fn a_take_plays_pauses_steps_and_scrubs() {
     let (dir, first, _) = project("play");
@@ -879,7 +875,6 @@ fn a_take_plays_pauses_steps_and_scrubs() {
 
 /// Catches two takes side by side at different times: a scrub shows both
 /// at the frame of the one clock, each its own frame there.
-#[cfg(feature = "transport")]
 #[test]
 fn side_by_side_shows_one_time() {
     let (dir, first, second) = project("play-side");
@@ -904,7 +899,6 @@ fn side_by_side_shows_one_time() {
 /// Catches a take with sound that shows no waveform: its sound, decoded
 /// off the loop, becomes one row, "Sound", an image the working area's
 /// width.
-#[cfg(feature = "transport")]
 #[test]
 fn a_take_with_sound_has_its_waveform() {
     let dir = scratch("waveform");
@@ -928,31 +922,25 @@ fn a_take_with_sound_has_its_waveform() {
 
 // Notes at a time, as vg-notes-at-time shows them.
 
-#[cfg(feature = "transport")]
 const RED: [u8; 3] = [226, 36, 36];
 /// A point of the pin's red disc put at the take's middle, below its
 /// white number.
-#[cfg(feature = "transport")]
 const PIN: (u32, u32) = (ALONE.0, ALONE.1 + 6);
 
-#[cfg(feature = "transport")]
 fn gesture(program: &mut Program, gesture: protocol::RasterGesture) {
     program.send(HostMessage::RasterGesture { tab: "1".into(), gesture });
 }
 
-#[cfg(feature = "transport")]
 fn text(program: &mut Program, input: protocol::TextInput) {
     program.send(HostMessage::RasterText { tab: "1".into(), input });
 }
 
 /// The transport's cues, as (time, label, colour).
-#[cfg(feature = "transport")]
 fn cues(view: &RasterView) -> Vec<(f64, String, Option<[u8; 3]>)> {
     transport(view).map(|transport| transport.cues.iter().map(|cue| (cue.at, cue.label.clone(), cue.colour)).collect()).unwrap_or_default()
 }
 
 /// A program in a project with Dawn shown alone at one second, frame 24.
-#[cfg(feature = "transport")]
 fn at_one_second(label: &str) -> (PathBuf, PathBuf, Program) {
     let (dir, first, _) = project(label);
     let mut program = Program::start(false);
@@ -967,7 +955,6 @@ fn at_one_second(label: &str) -> (PathBuf, PathBuf, Program) {
 
 /// Pins a note with `words` at the take's middle, with the notes tool's
 /// Pin, and waits for its cue.
-#[cfg(feature = "transport")]
 fn pin(program: &mut Program, words: &str) {
     program.command("tool", json!({ "tool": "notes" }));
     gesture(program, protocol::RasterGesture::Click { at: [f64::from(ALONE.0), f64::from(ALONE.1)] });
@@ -981,7 +968,6 @@ fn pin(program: &mut Program, words: &str) {
 /// at one second is a cue there, numbered, in the notes' red, and drawn
 /// over the frame there and within half a second, but not at the start;
 /// and undo and redo take it away and put it back.
-#[cfg(feature = "transport")]
 #[test]
 fn a_pin_at_a_time_is_a_cue_and_shows_near_it() {
     let (dir, _, mut program) = at_one_second("notes-pin");
@@ -1018,7 +1004,6 @@ fn a_pin_at_a_time_is_a_cue_and_shows_near_it() {
 /// Catches a mark that is not drawn as it comes, or not kept: the notes
 /// tool's Draw shows the mark part by part, the finished mark is a step
 /// and no cue, and undo takes it away.
-#[cfg(feature = "transport")]
 #[test]
 fn a_mark_is_drawn_part_by_part() {
     let (dir, _, mut program) = at_one_second("notes-mark");
@@ -1045,7 +1030,6 @@ fn a_mark_is_drawn_part_by_part() {
 /// pin's notes are kept in the `.vgx` as `take_notes`, by the take's path
 /// and sha256, with its time and words, and come back as its cue when a
 /// new program opens the file.
-#[cfg(feature = "transport")]
 #[test]
 fn notes_are_kept_by_take_through_a_restart() {
     let (dir, first, mut program) = at_one_second("notes-kept");
@@ -1079,7 +1063,6 @@ fn notes_are_kept_by_take_through_a_restart() {
 /// the first note's time, marked, is sent with the role "Notes on the
 /// last round", declared as an item of the tab's file and rendered as a
 /// PNG of the take's size with the pin on it.
-#[cfg(feature = "transport")]
 #[test]
 fn next_round_carries_the_notes_and_the_marked_frame() {
     let (dir, mut program, cell) = requests("notes-next");
@@ -1128,6 +1111,197 @@ fn next_round_carries_the_notes_and_the_marked_frame() {
     };
     assert!(distance(pixel(SIZE.0 / 2, SIZE.1 / 2 + 6), RED) <= 6, "the pin is not on the marked frame");
     assert!(is(pixel(10, 10), dawn, DAWN_FRAMES, 24), "the marked frame is not the frame at the note's time");
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The shot's animatic, as vg-frame-from and vg-take-over-animatic show it.
+
+const ANIMATIC_FRAMES: u32 = 12;
+const LIGHT: u8 = 235;
+const DARK_LINE: u8 = 20;
+
+/// Where frame `i` of the animatic has its dark bar, six pixels wide:
+/// eight further right each frame.
+fn bar(i: u32) -> u32 {
+    8 + 8 * i
+}
+
+/// An animatic: a light frame with one dark bar, which moves each frame.
+fn write_animatic(path: &Path) {
+    let settings = media::Settings { width: SIZE.0, height: SIZE.1, rate: (24, 1), keyframes: 12, sound: None };
+    let mut encoder = media::Encoder::create(path, settings).expect("an encoder");
+    for i in 0..ANIMATIC_FRAMES {
+        let mut rgba = Vec::with_capacity((SIZE.0 * SIZE.1 * 4) as usize);
+        for _ in 0..SIZE.1 {
+            for x in 0..SIZE.0 {
+                let value = if (bar(i)..bar(i) + 6).contains(&x) { DARK_LINE } else { LIGHT };
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        encoder.frame(&rgba).expect("a frame");
+    }
+    encoder.finish().expect("the animatic");
+}
+
+/// The next reference menu the Prompt page declares that `pick` takes.
+fn reference_menu(program: &Program, what: &str, mut pick: impl FnMut(&[protocol::MenuEntry]) -> bool) -> Vec<protocol::MenuEntry> {
+    program.wait(what, |message| match message {
+        AppMessage::Properties(properties) => properties.cell.as_ref().map(|cell| cell.reference_menu.clone()).filter(|rows| pick(rows)),
+        _ => None,
+    })
+}
+
+/// The pre-vis check's button on a toolbar: whether it is on, and chosen.
+fn previs_button(toolbar: &protocol::Toolbar) -> Option<(bool, bool)> {
+    toolbar.trailing.iter().find_map(|item| match item {
+        protocol::ToolItem::Button { icon, enabled, selected, .. } if icon == "cube" => Some((*enabled, *selected)),
+        _ => None,
+    })
+}
+
+/// Catches a Start frame taken from somewhere other than the animatic at
+/// the playhead: with no Motion reference, the row is off and says why;
+/// with one, the row puts an item in the draft's Start frame whose render
+/// is the animatic's frame at the time shown, its bar where frame 6 has it;
+/// and Open in the Image Generator opens that frame, and no video.
+#[test]
+fn the_start_frame_is_the_animatics_frame_at_the_playhead() {
+    let (dir, mut program, cell) = requests("animatic-frame");
+    write_animatic(&dir.join("takes/Animatic.mp4"));
+    let rows = reference_menu(&program, "the row off", |rows| rows.first().is_some_and(|row| !row.enabled));
+    assert_eq!(rows[0].label, "The animatic's frame at the playhead");
+    assert_eq!(rows[0].tip.as_deref(), Some("Add the shot's animatic as a Motion reference first."));
+    assert_eq!(rows.get(1).map(|row| (row.label.as_str(), row.enabled)), Some(("Open in the Image Generator", true)));
+
+    program.send(HostMessage::EditCell {
+        tab: "1".into(),
+        cell: cell.clone(),
+        input: vec![
+            protocol::CellPart::Text { text: "The keeper walks in.".into() },
+            protocol::CellPart::Path { path: "takes/Animatic.mp4".into(), media_type: "video/mp4".into(), role: Some("Motion reference".into()), field: None },
+        ],
+        settings: None,
+        endpoint: None,
+        model: None,
+    });
+    let rows = reference_menu(&program, "the row on", |rows| rows.first().is_some_and(|row| row.enabled));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].tip, None);
+
+    // The playhead at a quarter second: the take's frame 6.
+    program.open_take(&dir.join("takes/Dawn.mp4"));
+    program.view("the take", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0));
+    program.command("frame", json!({ "step": 6 }));
+    program.view("frame 6", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 6));
+    program.command("frame_from_animatic", json!({ "value": 0 }));
+    let start = program.wait("the Start frame", |message| match message {
+        AppMessage::Cells { cells, .. } => cells.iter().find(|own| own.id == cell).and_then(|own| {
+            own.input.iter().find_map(|part| match part {
+                protocol::CellPart::Item { item, media_type, role, .. } if role.as_deref() == Some("Start frame") => Some((item.clone(), media_type.clone())),
+                _ => None,
+            })
+        }),
+        _ => None,
+    });
+    assert_eq!(start.1, "image/png");
+    let item = start.0;
+    assert!(item.item.as_deref().is_some_and(|id| id.starts_with("animatic ")));
+    program.wait("the Start frame's item", |message| match message {
+        AppMessage::Items { path, items } if *path == item.path => items.iter().find(|own| Some(&own.id) == item.item.as_ref()).cloned(),
+        _ => None,
+    });
+
+    program.send(HostMessage::Render { id: "r1".into(), item: item.clone(), media_type: "image/png".into(), part: None });
+    let path = program.wait("the Start frame rendered", |message| match message {
+        AppMessage::Rendered { id, path, error, .. } if id == "r1" => Some(path.clone().unwrap_or_else(|| panic!("not rendered: {error:?}"))),
+        _ => None,
+    });
+    let png = image::load_from_memory(&std::fs::read(dir.join(&path)).unwrap()).unwrap().to_rgba8();
+    assert_eq!(png.dimensions(), SIZE);
+    let grey = |x: u32| png.get_pixel(x, SIZE.1 / 2).0[1];
+    assert!(grey(bar(6) + 3) < 80, "the frame at the playhead has no bar where frame 6 has it");
+    assert!(grey(bar(0) + 3) > 200, "the frame is the animatic's first, not the one at the playhead");
+
+    // Open in the Image Generator: the Start frame, the first reference,
+    // as its PNG; the Motion reference, a video, opens nothing.
+    program.command("frame_open_image", json!({ "value": 0 }));
+    let opened = program.wait("the Start frame opened", |message| match message {
+        AppMessage::OpenIn { path, media_type } => Some((path.clone(), media_type.clone())),
+        _ => None,
+    });
+    assert_eq!(opened, (path.clone(), String::from("image/png")));
+    program.command("frame_open_image", json!({ "value": 1 }));
+    program.send(HostMessage::Ping);
+    program.wait("nothing opened for a video", |message| match message {
+        AppMessage::OpenIn { .. } => panic!("a video reference opened in the Image Generator"),
+        AppMessage::Pong => Some(()),
+        _ => None,
+    });
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Catches a take shown over the wrong frame of its animatic, or without
+/// it: the pre-vis check draws the animatic's bar at the take's time in
+/// white, with cyan beside it where its edge is, and nothing where an
+/// earlier frame had its bar.
+#[test]
+fn a_take_is_shown_over_its_animatic() {
+    let (dir, mut program, cell) = requests("animatic-over");
+    write_animatic(&dir.join("takes/Animatic.mp4"));
+    let mut first = round("q1", 1, vec![take_file("takes/Dawn.mp4", false)]);
+    first.references = vec![protocol::SentReference { path: "takes/Animatic.mp4".into(), role: Some("Motion reference, the walk".into()) }];
+    send_takes(&mut program, &cell, vec![first]);
+    film_of(&program, "the round", |film| !film.groups.is_empty());
+    program.command("film_select", json!({ "value": 0 }));
+    // The toolbar comes with the command, before the take's frame does.
+    let button = program.wait("the pre-vis check on offer", |message| match message {
+        AppMessage::Toolbar(toolbar) => previs_button(toolbar).filter(|(enabled, _)| *enabled),
+        _ => None,
+    });
+    assert_eq!(button, (true, false));
+    program.view("the round's take", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0));
+    program.command("frame", json!({ "step": 6 }));
+    program.view("frame 6", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 6));
+
+    program.command("previs_toggle", json!({}));
+    // The toolbar comes with the command, before the frames do.
+    program.wait("the pre-vis check chosen", |message| match message {
+        AppMessage::Toolbar(toolbar) => previs_button(toolbar).filter(|button| *button == (true, true)),
+        _ => None,
+    });
+    // The take's frame is 128 × 72 at its own pixels: its left edge, and
+    // its middle row.
+    let (left, row) = (ALONE.0 - SIZE.0 / 2, ALONE.1);
+    let white = |pixel: [u8; 3]| pixel.iter().all(|value| *value > 230);
+    let cyan = |pixel: [u8; 3]| pixel[0] < 90 && pixel[2] > 200;
+    program.view("the take over its animatic", |_, image| {
+        let x = left + bar(6);
+        (x..x + 6).any(|x| white(image.at(x, row)))
+            && (x - 4..x + 1).any(|x| cyan(image.at(x, row)))
+            && !(left + bar(0)..left + bar(0) + 6).any(|x| white(image.at(x, row)))
+    });
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Catches the pre-vis check offered with nothing to lay under a take: a
+/// round with no references has the button off.
+#[test]
+fn the_previs_check_is_off_with_no_references() {
+    let (dir, mut program, cell) = requests("animatic-none");
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take_file("takes/Dawn.mp4", false)])]);
+    film_of(&program, "the round", |film| !film.groups.is_empty());
+    program.command("film_select", json!({ "value": 0 }));
+    // The view with the take chosen, then the toolbar the same change
+    // declares.
+    film_of(&program, "the round's take chosen", |film| film.items.first().is_some_and(|item| item.chosen));
+    let button = program.wait("the toolbar", |message| match message {
+        AppMessage::Toolbar(toolbar) => previs_button(toolbar),
+        _ => None,
+    });
+    assert_eq!(button, (false, false));
     drop(program);
     let _ = std::fs::remove_dir_all(&dir);
 }
