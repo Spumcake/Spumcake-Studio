@@ -1599,13 +1599,20 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
         .model
         .map(str::to_string)
         .or_else(|| cell.model.as_deref().filter(|model| !model.is_empty()).map(|model| model.rsplit('/').next().unwrap_or(model).to_string()));
+    // The model sits beside the kind when it fits there, and otherwise on
+    // a line of its own under the header, so a long name is never cut to
+    // a letter.
     if let Some(model) = model {
         let room = Rect::from_min_max(pos2(title.right() + S.of(10.0), header.top()), pos2(button.left() - S.of(8.0), header.bottom()));
-        if room.width() > 0.0 {
+        let whole = painter.layout_no_wrap(model.clone(), card_small(), MUTED);
+        if whole.size().x <= room.width() {
+            painter.galley(pos2(room.left(), mid - whole.size().y / 2.0), whole, MUTED);
+        } else {
+            let (line, _) = ui.allocate_exact_size(vec2(width, S.of(20.0)), Sense::hover());
             let mut job = egui::text::LayoutJob::simple_singleline(model, card_small(), MUTED);
-            job.wrap = egui::text::TextWrapping::truncate_at_width(room.width());
+            job.wrap = egui::text::TextWrapping::truncate_at_width((line.right() - title.left()).max(1.0));
             let galley = painter.layout_job(job);
-            painter.galley(pos2(room.left(), mid - galley.size().y / 2.0), galley, MUTED);
+            painter.galley(pos2(title.left(), line.center().y - galley.size().y / 2.0), galley, MUTED);
         }
     }
 
@@ -2105,25 +2112,40 @@ fn paint_reference(
     if let Some(tag) = &tag {
         tag_w = tag.size().x + S.of(12.0) + S.of(8.0);
     }
+    // With a file line under the role, the "Not canon" tag goes on that
+    // line, so the role keeps the row's width; otherwise it follows the
+    // role.
+    let tag_inline = second.is_empty();
     let role_y = if second.is_empty() { row.center().y } else { row.center().y - S.of(9.0) };
+    let role_room = if tag_inline { right - left - tag_w - S.of(18.0) } else { right - left };
     let mut job = egui::text::LayoutJob::simple_singleline(main.to_string(), widgets::body(S), TEXT);
-    job.wrap = egui::text::TextWrapping::truncate_at_width((right - left - tag_w - S.of(18.0)).max(1.0));
+    job.wrap = egui::text::TextWrapping::truncate_at_width(role_room.max(1.0));
     let galley = painter.layout_job(job);
     let role_end = left + galley.size().x;
     painter.galley(pos2(left, role_y - galley.size().y / 2.0), galley, TEXT);
-    if let Some(tag) = tag {
-        let pill = Rect::from_min_size(pos2(role_end + S.of(8.0), role_y - tag.size().y / 2.0 - S.of(2.0)), tag.size() + vec2(S.of(12.0), S.of(4.0)));
+    let pill = |at_x: f32, y: f32, tag: std::sync::Arc<egui::Galley>| {
+        let pill = Rect::from_min_size(pos2(at_x, y - tag.size().y / 2.0 - S.of(2.0)), tag.size() + vec2(S.of(12.0), S.of(4.0)));
         painter.rect_filled(pill, pill.height() / 2.0, NOT_CANON_FILL);
         painter.galley(pill.center() - tag.size() / 2.0, tag, NOT_CANON_TEXT);
+    };
+    if tag_inline && let Some(tag) = tag.clone() {
+        pill(role_end + S.of(8.0), role_y, tag);
     }
     if !second.is_empty() {
+        let file_y = row.center().y + S.of(10.0);
+        let room = if tag.is_some() { right - left - tag_w } else { right - left };
         let mut job = egui::text::LayoutJob::simple_singleline(second.to_string(), card_small(), MUTED);
-        job.wrap = egui::text::TextWrapping::truncate_at_width((right - left).max(1.0));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(1.0));
         let galley = painter.layout_job(job);
-        painter.galley(pos2(left, row.center().y + S.of(10.0) - galley.size().y / 2.0), galley, MUTED);
+        let file_end = left + galley.size().x;
+        painter.galley(pos2(left, file_y - galley.size().y / 2.0), galley, MUTED);
+        if let Some(tag) = tag {
+            pill(file_end + S.of(8.0), file_y, tag);
+        }
     }
+    let role_right = if tag_inline { right - tag_w } else { right };
     ReferenceText {
-        role: Rect::from_min_max(pos2(left, role_y - S.of(10.0)), pos2(right - tag_w, role_y + S.of(10.0))),
+        role: Rect::from_min_max(pos2(left, role_y - S.of(10.0)), pos2(role_right, role_y + S.of(10.0))),
         role_end,
     }
 }
