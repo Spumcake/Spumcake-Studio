@@ -228,6 +228,42 @@ pub enum AppMessage {
         #[serde(default)]
         from: Vec<String>,
     },
+    /// Asks the host's runner to file `source`, a plain file the workspace
+    /// wrote in the project, with `request.py resource <source>` and one
+    /// `--from` for each entry of `from`, as `file_resource` does, then to
+    /// publish it as the canon artifact `artifact`, "<element>: <role>",
+    /// together with the artifacts named in `with`. The host shows the
+    /// publish card first: all of it runs on the user's one yes, then a
+    /// commit by path when the card's Commit choice is on. The answer is
+    /// `published`.
+    Publish {
+        tab: String,
+        #[serde(default)]
+        artifact: String,
+        #[serde(default)]
+        source: String,
+        #[serde(default)]
+        from: Vec<String>,
+        #[serde(default)]
+        with: Vec<String>,
+    },
+    /// Asks for every version of the canon artifact `artifact`, "<element>:
+    /// <role>". The answer is `history`.
+    CanonHistory {
+        tab: String,
+        #[serde(default)]
+        artifact: String,
+    },
+    /// Asks the host to publish `file`, an earlier version of the canon
+    /// artifact `artifact`, again, through the same publish card as
+    /// `publish`. The answer is `published`.
+    Revert {
+        tab: String,
+        #[serde(default)]
+        artifact: String,
+        #[serde(default)]
+        file: String,
+    },
 }
 
 /// The cell, and its image's path relative to the project, that new work
@@ -481,7 +517,40 @@ pub enum HostMessage {
     },
     /// A draft cell is now that chain step: keep only the pointer, as a
     /// step's cell does, with empty `input`, `versions`, and `output`.
-    CellBecameStep { tab: String, cell: String, step: StepRef },
+    /// `artifact` is the canon artifact the step makes, "<element>: <role>",
+    /// when it names one.
+    CellBecameStep {
+        tab: String,
+        cell: String,
+        step: StepRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
+    },
+    /// The answer to `publish` and `revert`: the canon artifact, and the
+    /// file now published as it, or, when the runner refused or the user
+    /// declined, the refusal's sentence in `error`.
+    Published {
+        tab: String,
+        #[serde(default)]
+        artifact: String,
+        #[serde(default)]
+        file: String,
+        /// The version number the run log gives this publish, 1 for the
+        /// artifact's first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `canon_history`: every version of that canon artifact,
+    /// newest first.
+    History {
+        tab: String,
+        #[serde(default)]
+        artifact: String,
+        #[serde(default)]
+        versions: Vec<CanonVersion>,
+    },
 }
 
 /// What a selection message does, as the drawing surface's select tool does it.
@@ -678,6 +747,9 @@ impl Declaration {
             | AppMessage::View3d { .. }
             | AppMessage::OpenReport { .. }
             | AppMessage::FileResource { .. }
+            | AppMessage::Publish { .. }
+            | AppMessage::CanonHistory { .. }
+            | AppMessage::Revert { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
             AppMessage::End => Accept::Ready,
@@ -1403,6 +1475,7 @@ mod tests {
                     takes: vec![TakeFile { path: "library/keeper-14-1.png".into(), media_type: "image/png".into(), canon: true }],
                     error: None,
                     report: Some("requests/r-14.md".into()),
+                    artifact: Some("the keeper: portrait".into()),
                 },
                 Round {
                     request: "r-15".into(),
@@ -1417,6 +1490,7 @@ mod tests {
                     takes: Vec::new(),
                     error: None,
                     report: None,
+                    artifact: None,
                 },
             ],
         });
@@ -1561,6 +1635,96 @@ mod tests {
             tab: "1".into(),
             cell: "c1".into(),
             step: StepRef { chain: "door".into(), step: "glow".into() },
+            artifact: None,
         });
+        round_trip_host(HostMessage::CellBecameStep {
+            tab: "1".into(),
+            cell: "c1".into(),
+            step: StepRef { chain: "door".into(), step: "glow".into() },
+            artifact: Some("the door: glow".into()),
+        });
+        let Ok(HostMessage::CellBecameStep { artifact, .. }) =
+            parse_host_message(r#"{"type":"cell_became_step","tab":"1","cell":"c1","step":{"chain":"door","step":"glow"}}"#)
+        else {
+            panic!("a step without an artifact did not read");
+        };
+        assert_eq!(artifact, None);
+    }
+
+    /// Publishing, a canon artifact's history, and a revert survive a round
+    /// trip, a refusal included, and each reads with only its tab.
+    #[test]
+    fn publish_history_and_revert_messages_round_trip() {
+        round_trip_app(AppMessage::Publish {
+            tab: "1".into(),
+            artifact: "the door: glow".into(),
+            source: "library/layers/door-glow.png".into(),
+            from: vec!["work/door.ipx".into(), "library/2026-11-14_19-02-door-take.png".into()],
+            with: vec!["the door: layout".into()],
+        });
+        round_trip_app(AppMessage::CanonHistory { tab: "1".into(), artifact: "the door: glow".into() });
+        round_trip_app(AppMessage::Revert {
+            tab: "1".into(),
+            artifact: "the door: glow".into(),
+            file: "library/2026-11-12_10-40-door-glow.png".into(),
+        });
+        round_trip_host(HostMessage::Published {
+            tab: "1".into(),
+            artifact: "the door: glow".into(),
+            file: "library/layers/door-glow.png".into(),
+            version: Some(4),
+            error: None,
+        });
+        round_trip_host(HostMessage::Published {
+            tab: "1".into(),
+            artifact: "the door: glow".into(),
+            file: String::new(),
+            version: None,
+            error: Some("The door has no element called that.".into()),
+        });
+        round_trip_host(HostMessage::History {
+            tab: "1".into(),
+            artifact: "the door: glow".into(),
+            versions: vec![
+                CanonVersion {
+                    file: "library/layers/door-glow.png".into(),
+                    published: 1_794_823_200,
+                    note: "Warmer glow.".into(),
+                    canon: true,
+                    request: Some("2026-11-16T09-58-00Z-a1b2".into()),
+                },
+                CanonVersion {
+                    file: "library/2026-11-12_10-40-door-glow.png".into(),
+                    published: 1_794_480_000,
+                    note: String::new(),
+                    canon: false,
+                    request: None,
+                },
+            ],
+        });
+        assert_eq!(
+            parse_app_message(r#"{"type":"publish","tab":"1"}"#).unwrap(),
+            AppMessage::Publish { tab: "1".into(), artifact: String::new(), source: String::new(), from: Vec::new(), with: Vec::new() }
+        );
+        assert_eq!(
+            parse_app_message(r#"{"type":"canon_history","tab":"1"}"#).unwrap(),
+            AppMessage::CanonHistory { tab: "1".into(), artifact: String::new() }
+        );
+        assert_eq!(
+            parse_app_message(r#"{"type":"revert","tab":"1"}"#).unwrap(),
+            AppMessage::Revert { tab: "1".into(), artifact: String::new(), file: String::new() }
+        );
+        assert_eq!(
+            parse_host_message(r#"{"type":"published","tab":"1"}"#).unwrap(),
+            HostMessage::Published { tab: "1".into(), artifact: String::new(), file: String::new(), version: None, error: None }
+        );
+        assert_eq!(
+            parse_host_message(r#"{"type":"history","tab":"1","versions":[{}]}"#).unwrap(),
+            HostMessage::History {
+                tab: "1".into(),
+                artifact: String::new(),
+                versions: vec![CanonVersion { file: String::new(), published: 0, note: String::new(), canon: false, request: None }],
+            }
+        );
     }
 }

@@ -697,7 +697,7 @@ impl Session {
                 }
             }
             HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
-            HostMessage::CellBecameStep { tab, cell, step } => self.cell_became_step(&tab, &cell, &step, &mut out),
+            HostMessage::CellBecameStep { tab, cell, step, .. } => self.cell_became_step(&tab, &cell, &step, &mut out),
             _ => {}
         }
         if self.finish_writes(false) {

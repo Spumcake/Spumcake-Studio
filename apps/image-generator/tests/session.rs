@@ -983,6 +983,7 @@ fn round(request: &str, number: u32, takes: Vec<protocol::TakeFile>) -> protocol
         takes,
         error: None,
         report: None,
+        artifact: None,
     }
 }
 
@@ -1411,7 +1412,7 @@ fn a_draft_becomes_its_step_and_a_skills_project_files_what_leaves() {
         _ => None,
     });
     let step = protocol::StepRef { chain: "shot-12".into(), step: "keyframe".into() };
-    program.send(HostMessage::CellBecameStep { tab: "1".into(), cell: cell.clone(), step: step.clone() });
+    program.send(HostMessage::CellBecameStep { tab: "1".into(), cell: cell.clone(), step: step.clone(), artifact: None });
     let pointed = program.wait(|message| match message {
         AppMessage::Cells { cells, .. } => cells.iter().find(|own| own.id == cell && own.step.is_some()).cloned(),
         _ => None,

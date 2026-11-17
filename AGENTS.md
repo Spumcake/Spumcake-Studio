@@ -12,7 +12,7 @@ The stack is Rust, egui through eframe, and Iconoir icons.
 - `draw/` — the shared document model of the drawing surface: documents, steps, ink, text, the camera, and gestures. The host draws and previews with it; a sub-application that owns such documents commits and records with it. It has no session, history, registry, store, or preferences.
 - `apps/<id>/` — one sub-application per folder: its crate, its `manifest.json`, and its own `AGENTS.md`. It depends on `protocol`, and on `draw` when it uses the drawing surface, never on the host or another sub-application.
 - `apps/template/` — the smallest correct sub-application, hidden from people. New ones are copied from it.
-- `apps/storyboard-generator/` — the Storyboard Generator: storyboards drawn on canvases.
+- `apps/storyboard-generator/` — the Storyboard Generator: storyboards as a film of drawn clips on genga sheets, with Sound tracks, played and scrubbed with their sound, and the animatic exported.
 - `apps/recipe-creation/` — Recipe Creation: recipes, lists of cells. It stores cells and declares them. The host draws and runs them.
 - `apps/video-generator/` — the Video Generator: the Image Generator for video. A gallery of takes, each a link to a video file it never writes, shown a frame at a time, side by side, or as frame strips, decoded through `media/` at the size drawn. Its `.vgx` format is in its own AGENTS.md. Making takes, playing them with sound, and the mix come with the Image and Video build plan's later milestones.
 - `apps/image-generator/` — the Image Generator: layered images. It owns every pixel, layer, and step of history, composites the image, and declares a raster tab; the host draws it, previews strokes, and sends gestures. Its `.ipx` format is in its own AGENTS.md.

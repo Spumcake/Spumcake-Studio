@@ -381,7 +381,7 @@ impl Server {
             | HostMessage::Takes { .. }
             | HostMessage::CellBecameStep { .. }
             | HostMessage::View3dCamera { .. }
-            | HostMessage::View3dPicked { .. } => {}
+            | HostMessage::View3dPicked { .. } | HostMessage::Published { .. } | HostMessage::History { .. } => {}
             HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {
                 id,
                 thumbnail: None,

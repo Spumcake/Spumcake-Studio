@@ -757,6 +757,7 @@ mod tests {
             takes: takes.iter().map(|path| TakeFile { path: path.to_string(), media_type: "image/png".into(), canon: false }).collect(),
             error: None,
             report: None,
+            artifact: None,
         }
     }
 
