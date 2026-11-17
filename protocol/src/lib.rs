@@ -329,6 +329,21 @@ pub enum AppMessage {
         #[serde(default)]
         media_type: String,
     },
+    /// Asks the host to deliver `file`, a finished film the workspace
+    /// filed in the project, such as a mix: on the user's yes on the
+    /// Deliver card, it is published as the canon artifact `artifact` and
+    /// copied into `output/` with `pipeline.py deliver`. `uses` is the
+    /// card's line saying what it holds, for the user to read, never
+    /// parsed. The answer is `delivered`.
+    Deliver {
+        tab: String,
+        #[serde(default)]
+        artifact: String,
+        #[serde(default)]
+        file: String,
+        #[serde(default)]
+        uses: String,
+    },
 }
 
 /// The cell, and its image's path relative to the project, that new work
@@ -659,6 +674,15 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to `deliver`: the delivered file in `output/`, relative to
+    /// the project, or empty with why not, the user's Cancel included.
+    Delivered {
+        tab: String,
+        #[serde(default)]
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// The answer to `run_step`: the take it made, relative to the
     /// project, or why there is none.
     StepRan {
@@ -872,6 +896,7 @@ impl Declaration {
             | AppMessage::RunStep { .. }
             | AppMessage::RunSkillScript { .. }
             | AppMessage::OpenIn { .. }
+            | AppMessage::Deliver { .. }
             | AppMessage::Edits { .. }
             | AppMessage::Previews { .. }
             | AppMessage::Clipboard { .. } => Accept::More,
@@ -1912,6 +1937,18 @@ mod tests {
         });
         round_trip_host(HostMessage::SkillScriptRan { id: "w1".into(), output: r#"{"path": "prompts/resources/a.json"}"#.into(), error: None });
         round_trip_app(AppMessage::OpenIn { path: "work/start-frame.png".into(), media_type: "image/png".into() });
+        round_trip_app(AppMessage::Deliver {
+            tab: "1".into(),
+            artifact: "Last order: final shot".into(),
+            file: "library/2026-11-15_08-20-final-shot-mix.mp4".into(),
+            uses: "Take 3 · 60 fps · 4K, with Voice, Bed and Door".into(),
+        });
+        round_trip_host(HostMessage::Delivered { tab: "1".into(), file: "output/2026-11-15_08-25-002-last-order.mp4".into(), error: None });
+        round_trip_host(HostMessage::Delivered { tab: "1".into(), file: String::new(), error: Some("Its inputs aren't canon.".into()) });
+        assert_eq!(
+            parse_app_message(r#"{"type":"deliver","tab":"1"}"#).unwrap(),
+            AppMessage::Deliver { tab: "1".into(), artifact: String::new(), file: String::new(), uses: String::new() }
+        );
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: vec![serde_json::json!({"script": "python3 assemble.py"}), serde_json::json!(["8.0"])], error: None });
         round_trip_host(HostMessage::CanonRows { id: "r1".into(), rows: Vec::new(), error: Some("refused: --read-only, and this query writes".into()) });
         round_trip_host(HostMessage::Filed { id: "f1".into(), file: "prompts/resources/2026-11-17_10-00-assembly.json".into(), error: None });

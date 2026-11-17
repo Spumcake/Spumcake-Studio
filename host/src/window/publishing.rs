@@ -47,6 +47,18 @@ pub(crate) fn published_reply(asker: Asker, artifact: String, file: String, vers
     }
 }
 
+/// A film a workspace asked to deliver: published as `artifact` and
+/// copied into `output/`, on the user's yes on the Deliver card, which
+/// shows `uses`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Delivery {
+    pub app: usize,
+    pub tab: String,
+    pub artifact: String,
+    pub file: String,
+    pub uses: String,
+}
+
 /// What was asked for, with who asked.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Asked {
@@ -92,6 +104,10 @@ pub(crate) struct Shown {
 pub(crate) struct Publishing {
     /// What workspaces asked for, oldest first, for the runner to take.
     pub asked: VecDeque<Asked>,
+    /// Films workspaces asked to deliver, oldest first, for the runner to
+    /// take. The Deliver card is drawn from what it reads.
+    #[allow(dead_code)]
+    pub delivering: VecDeque<Delivery>,
     /// The publish or revert card the runner filled.
     pub card: Option<Card>,
     /// Cards the person confirmed, with whether Commit was on, for the
@@ -108,6 +124,7 @@ impl HostWindow {
     /// Takes what workspaces asked to publish, revert, or see.
     pub(super) fn take_publishing(&mut self) {
         let mut asked = Vec::new();
+        let mut deliveries = Vec::new();
         for (app, started) in self.apps.iter_mut().enumerate() {
             let declared = &mut started.running.declared;
             for (tab, artifact, source, from, with) in declared.publishes.drain(..) {
@@ -118,6 +135,19 @@ impl HostWindow {
             }
             for (tab, artifact) in declared.canon_histories.drain(..) {
                 asked.push(Asked::History { app, tab, artifact });
+            }
+            for (tab, artifact, file, uses) in declared.delivers.drain(..) {
+                deliveries.push(Delivery { app, tab, artifact, file, uses });
+            }
+        }
+        // A delivery waits for the runner, which fills the Deliver card, in
+        // a Skills project; elsewhere there is no canon to publish it into.
+        if self.skills_project().is_some() {
+            self.publishing.delivering.extend(deliveries);
+        } else {
+            for delivery in deliveries {
+                let error = Some(String::from("Only a Skills project has canon to publish into."));
+                self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error });
             }
         }
         if asked.is_empty() {
