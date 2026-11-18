@@ -157,7 +157,7 @@ fn declare_film(session: &Session, boards: &mut Boards, looker: &mut Looker, tab
                 label: clip.name.clone(),
                 icon: None,
                 selected,
-                thumbnail: board::thumbnail(boards, looker, record, clip),
+                thumbnail: board::thumbnail(boards, looker, record, clip, session.project()),
                 waveform: Vec::new(),
                 progress: None,
                 end_mark: None,
@@ -350,7 +350,11 @@ fn sound_row(session: &Session, track: &SoundTrack, picked: &[u64]) -> protocol:
                 menu: vec![
                     // Offered as canon, so the animatic can name it: a sound in
                     // the project, never one placed with no project.
-                    entry("Publish sound", action_with("publish_sound", json!(clip.id)), session.project().is_some() && !std::path::Path::new(&clip.file).is_absolute()),
+                    entry(
+                        "Publish sound",
+                        action_with("publish_sound", json!(clip.id)),
+                        session.project().is_some() && !std::path::Path::new(&clip.file).is_absolute() && !session.is_canon(&clip.file),
+                    ),
                     entry("Delete", action_with("delete_sound", json!(clip.id)), !track.locked),
                 ],
                 open: None,

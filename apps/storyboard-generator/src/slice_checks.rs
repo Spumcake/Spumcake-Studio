@@ -32,7 +32,7 @@ fn in_a_clip() -> (Session, u64) {
 fn first_frame(session: &Session, boards: &mut Boards, looker: &mut Looker, clip: u64, which: Which) -> String {
     let record = session.active_storyboard();
     let clip = record.film().clip(clip).expect("the clip").clone();
-    boards.fingerprint(looker, record, &clip, which).expect("a fingerprint")
+    boards.fingerprint(looker, record, &clip, which, None).expect("a fingerprint")
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn a_frames_fingerprint_survives_saving_and_opening() {
     let record = stored.into_record(&mut ids, &[]);
     let reopened = record.film().clip(clip).unwrap().clone();
     let mut fresh = Boards::default();
-    assert_eq!(fresh.fingerprint(&mut looker, &record, &reopened, Which::First).unwrap(), before);
+    assert_eq!(fresh.fingerprint(&mut looker, &record, &reopened, Which::First, None).unwrap(), before);
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn a_storyboard_from_before_films_opens_on_its_sheet_unchanged() {
     // Its field lies on its drawing, so its first frame is not blank.
     let mut boards = Boards::default();
     let mut looker = Looker::new();
-    let drawn = boards.fingerprint(&mut looker, &record, &clip, Which::First).unwrap();
+    let drawn = boards.fingerprint(&mut looker, &record, &clip, Which::First, None).unwrap();
     let mut empty = Session::new();
     let blank_clip = empty.add_clip(None, 48).unwrap();
     let blank = first_frame(&empty, &mut boards, &mut looker, blank_clip, Which::First);

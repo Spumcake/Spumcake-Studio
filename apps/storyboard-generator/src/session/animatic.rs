@@ -82,17 +82,28 @@ impl Session {
         (only.is_clean() && only.path().is_none() && self.text_draft.is_none()).then(|| only.id())
     }
 
-    /// Takes away the blank a storyboard was opened in place of.
+    /// Puts the storyboard just opened in the place of the blank it was
+    /// opened in place of, under the blank's own id, so the window's tab
+    /// for it stays the same tab and shows it.
     pub(crate) fn drop_blank(&mut self, blank: Option<DrawingId>) {
         let Some(index) = blank.and_then(|id| self.index_of(id)) else {
             return;
         };
-        if self.storyboards.len() > 1 && index != self.active {
-            self.storyboards.remove(index);
-            if self.active > index {
-                self.active -= 1;
-            }
+        if self.storyboards.len() < 2 || index == self.active {
+            return;
         }
+        let mut opened = self.storyboards.remove(self.active);
+        let index = self.index_of(blank.expect("found above")).expect("still there");
+        opened.set_id(self.storyboards[index].id());
+        // The window fitted the blank's view once for this tab and will not
+        // again: a storyboard with no view of its own keeps the blank's.
+        if !opened.has_camera(None)
+            && let Some(camera) = self.storyboards[index].camera_of(None)
+        {
+            opened.set_cameras(vec![(None, camera)]);
+        }
+        self.storyboards[index] = opened;
+        self.active = index;
     }
 
     /// The stage with the image key the playhead shows under the drawing,
@@ -514,8 +525,12 @@ mod tests {
             panic!("Publish sound offered nothing");
         };
         assert_eq!((again, source.as_str()), (artifact.clone(), "prompts/resources/2026-11-17_10-00-outside.wav"));
-        // A take already in the project, after its own file.
+        // A take already in the project, after its own file; once it is
+        // canon, it has nothing to publish.
         assert_eq!(session.publish_sound(take).unwrap(), "Last order: 2026-11-12_20-03-otis-line-1, sound");
+        session.published("Last order: 2026-11-12_20-03-otis-line-1, sound", "library/2026-11-12_20-03-otis-line-1.wav", None);
+        assert!(session.is_canon("library/2026-11-12_20-03-otis-line-1.wav"));
+        assert!(session.publish_sound(take).unwrap_err().starts_with("that sound is already canon"));
         assert!(!dir.join(&path).exists(), "the copy in work/ was kept");
         // Drawing over a keyframe, then Publish hold: a PNG, asked to be published.
         let second = session.film().clips[1].id;
@@ -762,10 +777,19 @@ mod tests {
         let mut session = Session::new();
         session.set_project(&dir);
         assert_eq!(session.storyboards.len(), 1);
-        // Told the project, it shows the animatic in place of the blank.
+        let blank = session.active_id();
+        session.fit_view([-40.0, -30.0], 0.5);
+        let fitted = session.active_storyboard().camera_of(None).unwrap();
+        // Told the project, it shows the animatic in place of the blank,
+        // as the same tab, which the window keeps showing.
         session.show_animatic();
         answer_steps(&mut session, "prompts/resources/2026-11-14_16-07-animatic-assembly.json");
         assert_eq!(session.storyboards.len(), 1);
+        assert_eq!(session.active_id(), blank, "the animatic opened as another tab");
+        // It keeps the view the window fitted for the blank's tab, so coming
+        // back from a shot shows the film fitted, not a default view.
+        let kept = session.active_storyboard().camera_of(None).unwrap();
+        assert_eq!((kept.origin, kept.zoom), (fitted.origin, fitted.zoom));
         // The film is Last order; the storyboard is named as every new one.
         assert_eq!(session.film().title, "Last order");
         assert_eq!(session.active_storyboard().name(), "Untitled Storyboard");
