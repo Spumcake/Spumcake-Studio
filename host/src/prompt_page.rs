@@ -25,11 +25,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::workspace::{EndpointKind, Settings};
 
-/// The skills whose requests finish a take, as Spumcake-Skills' reports
-/// record them: generate-finished-shot, and create-final-animation, whose
-/// older rounds in Last order generate-finished-shot claims as its own.
-const FINISHING_SKILLS: [&str; 2] = ["generate-finished-shot", "create-final-animation"];
-/// The field a finishing request sends the take it finishes in.
+/// The skill whose every request finishes a take, as Spumcake-Skills'
+/// reports record it.
+const FINISHING_SKILL: &str = "generate-finished-shot";
+/// The skill of Last order's older finishing rounds, which
+/// generate-finished-shot claims as its own: one of its requests finishes
+/// a take when it sends exactly one file in `FINISHING_FIELD`.
+const OLDER_FINISHING_SKILL: &str = "create-final-animation";
+/// The field Last order's older finishing rounds sent their take in.
 const FINISHING_FIELD: &str = "video_url";
 
 /// How long a cell stands still before its cost is asked again.
@@ -430,25 +433,23 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
         seeds.insert(file.clone());
     }
     // Then the rounds a found take was finished through, as a retime or an
-    // upscale is: a request of a finishing skill, whose one reference in
-    // the finishing field is the take it finishes, as Skills' reports mark
-    // it. Each found take brings what was finished from it, and each found
+    // upscale is: a request of the finishing skill, whose one reference of
+    // its own media is the take it finishes, or one of Last order's older
+    // finishing rounds, whose one reference in the finishing field is. Each found take brings what was finished from it, and each found
     // round the take it finished, back to the round that made it; never the
     // other rounds made from that one, nor a take made from another as a
     // reference, such as an image from another image, and never a report
     // that names another step or another cell.
     let finished_from = |record: &Value| -> Option<String> {
-        if !record.get("skill").and_then(Value::as_str).is_some_and(|skill| FINISHING_SKILLS.contains(&skill)) {
-            return None;
-        }
-        let finished: Vec<&str> = record
-            .get("references")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|reference| reference.get("field").and_then(Value::as_str) == Some(FINISHING_FIELD))
-            .filter_map(|reference| reference.get("file").and_then(Value::as_str))
-            .collect();
+        let references = record.get("references").and_then(Value::as_array).into_iter().flatten();
+        let finished: Vec<&str> = match record.get("skill").and_then(Value::as_str) {
+            Some(FINISHING_SKILL) => {
+                let media = media_type(outputs_of(record).first()?);
+                references.filter_map(|reference| reference.get("file").and_then(Value::as_str)).filter(|path| media_type(path) == media).collect()
+            }
+            Some(OLDER_FINISHING_SKILL) => references.filter(|reference| reference.get("field").and_then(Value::as_str) == Some(FINISHING_FIELD)).filter_map(|reference| reference.get("file").and_then(Value::as_str)).collect(),
+            _ => return None,
+        };
         if let [only] = finished.as_slice() { Some(only.to_string()) } else { None }
     };
     let own_step = |record: &Value| {
@@ -1032,9 +1033,10 @@ mod tests {
         report("line art", "2026-11-14T10:30:00Z", json!({ "chain": "the line-art shot", "step": "line-art shot" }), "create-line-animation", json!(["library/line-art.mp4"]), json!([]));
         report("keyframe", "2026-11-14T11:00:00Z", none.clone(), "generate-keyframe", json!(["library/keyframe.png"]), json!([reference("library/layout.png", "image 1"), reference("library/sheet.png", "image 2")]));
         report("shot", "2026-11-14T12:00:00Z", none.clone(), "create-final-animation", json!(["library/shot.mp4"]), json!([reference("library/keyframe.png", "start"), reference("library/line-art.mp4", "Video 1, the motion")]));
-        // Last order's retime and upscale: their roles differ, their field does not.
+        // Last order's older retime: its role is its own, its field is the mark.
         report("retime", "2026-11-14T13:00:00Z", chain.clone(), "create-final-animation", json!(["library/shot-60.mp4"]), json!([finishes("library/shot.mp4", "the approved final shot, at 24 fps")]));
-        report("upscale", "2026-11-14T14:00:00Z", chain.clone(), "generate-finished-shot", json!(["library/shot-4k.mp4"]), json!([finishes("library/shot-60.mp4", "the final shot at 60 fps, 1344x768")]));
+        // generate-finished-shot's skill alone marks it, whatever field its model takes.
+        report("upscale", "2026-11-14T14:00:00Z", chain.clone(), "generate-finished-shot", json!(["library/shot-4k.mp4"]), json!([reference("library/shot-60.mp4", "the final shot at 60 fps, 1344x768")]));
         report("other", "2026-11-14T15:00:00Z", none.clone(), "", json!(["library/other.mp4"]), json!([reference("library/shot.mp4", "Video 1"), reference("library/elsewhere.mp4", "Video 2")]));
         report("sibling", "2026-11-14T16:00:00Z", none.clone(), "create-final-animation", json!(["library/sibling.mp4"]), json!([finishes("library/line-art.mp4", "the control video")]));
         // A take made for the chain with the final shot's skill, as the LTX
