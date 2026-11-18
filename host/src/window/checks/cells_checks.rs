@@ -1293,7 +1293,7 @@ fn a_recipe_image_cell_makes_a_image() {
         protocol::CellPart::Path { path, .. } => path.clone(),
         other => panic!("the version holds no image: {other:?}"),
     };
-    assert!(path.starts_with("images/"));
+    assert!(path.starts_with("work/images/"), "{path}");
     assert!(window.app.project.as_ref().unwrap().folder.join(&path).is_file());
     let _ = std::fs::remove_dir_all(dir);
 }

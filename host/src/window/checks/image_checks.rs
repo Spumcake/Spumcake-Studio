@@ -66,7 +66,7 @@ fn an_image_is_made_kept_and_shown() {
     let cell = image_cell(&window);
     assert_eq!(cell.prompt(), "A girl in a straw hat on a beach at sunset.");
     let first = image_of(&cell);
-    assert!(first.starts_with("images/"), "the cell names its image outside the project: {first}");
+    assert!(first.starts_with("work/images/"), "the cell names its image outside the project's work folder: {first}");
     let folder = window.app.project.as_ref().unwrap().folder.clone();
     assert!(folder.join(&first).is_file(), "the image is not in the project");
     window.until(|_| stand_in.requests().len() >= 2);

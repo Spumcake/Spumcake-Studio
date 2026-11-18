@@ -450,9 +450,11 @@ impl HostWindow {
         endpoints::skill_route(&self.settings, &skill, |id| keys.get(id))
     }
 
-    /// Keeps a run's image in the project's `images` folder, one file per
-    /// run, and names it relative to the project. With no project, as in a
-    /// frame test with none, it goes to a scratch folder.
+    /// Keeps a run's image in the project's `work/images/`, the setup's own
+    /// folder, which Studio adds to no project and commits with it, one file
+    /// per run, named relative to the project. An older project's images,
+    /// named `images/…`, are read where they are and never moved. With no
+    /// project, as in a frame test with none, it goes to a scratch folder.
     pub(super) fn keep_image(&mut self, index: usize, png: Vec<u8>) {
         let Some(id) = self.board.runs.get(index).map(|run| run.id.clone()) else {
             return;
@@ -460,7 +462,7 @@ impl HostWindow {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.as_millis());
         let name = format!("{id}-{stamp}.png");
         let (folder, named) = match &self.project {
-            Some(project) => (project.folder.join("images"), format!("images/{name}")),
+            Some(project) => (project.folder.join("work").join("images"), format!("work/images/{name}")),
             None => {
                 let folder = std::env::temp_dir().join("inpainter-images");
                 (folder.clone(), folder.join(&name).display().to_string())
