@@ -450,11 +450,12 @@ impl HostWindow {
         endpoints::skill_route(&self.settings, &skill, |id| keys.get(id))
     }
 
-    /// Keeps a run's image in the project's `work/images/`, the setup's own
-    /// folder, which Studio adds to no project and commits with it, one file
-    /// per run, named relative to the project. An older project's images,
-    /// named `images/…`, are read where they are and never moved. With no
-    /// project, as in a frame test with none, it goes to a scratch folder.
+    /// Keeps a run's image in the project's `work/images/`, among the
+    /// workspaces' files, committed with the project, one file per run, named
+    /// relative to the project. Studio adds no folder of its own at the
+    /// project's top for them. An older project's images, named `images/…`,
+    /// are read where they are and never moved. With no project, as in a
+    /// frame test with none, it goes to a scratch folder.
     pub(super) fn keep_image(&mut self, index: usize, png: Vec<u8>) {
         let Some(id) = self.board.runs.get(index).map(|run| run.id.clone()) else {
             return;
