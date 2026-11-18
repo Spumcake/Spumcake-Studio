@@ -497,6 +497,76 @@ fn a_video_opens_as_new_work() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Catches a project's video that cannot be opened to play, or that is
+/// kept as work it never was: a `.mp4` in the project is claimed and one
+/// outside it is not; opened by its path in the project, as the project
+/// panel opens an animatic in `library/`, it is a tab of one take that
+/// plays, with its transport row, and nothing is written in `work/`;
+/// opened again, its tab is shown and no second one made; and once its
+/// gallery changes, it is kept in `work/` as a new tab is.
+#[test]
+fn a_video_in_the_project_opens_to_play() {
+    let (dir, first, _) = project("open-to-play");
+    let outside = scratch("open-to-play-elsewhere").join("Elsewhere.mp4");
+    write_video(&outside, DUSK_FRAMES, dusk);
+    let mut program = Program::start(true);
+    program.send(HostMessage::Viewport { viewport: VIEWPORT });
+    program.send(in_project(&dir));
+    let claimed = |program: &mut Program, id: &str, path: &Path| {
+        program.send(HostMessage::Claim { id: id.into(), path: path.display().to_string() });
+        program.wait("claimed", |message| match message {
+            AppMessage::Claimed { id: answered, yours } if answered == id => Some(*yours),
+            _ => None,
+        })
+    };
+    assert!(claimed(&mut program, "c1", &first), "a video in the project is not claimed");
+    assert!(!claimed(&mut program, "c2", &outside), "a video outside the project was claimed");
+
+    program.send(HostMessage::Open { path: Some("takes/Dawn.mp4".into()) });
+    let (view, _) = program.view("the take to play", |view, image| names(view) == ["Dawn"] && is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0));
+    let tab = view.tab.clone();
+    let declared = transport(&view).expect("no transport row");
+    assert_eq!((declared.length, declared.fps), (2.0, 24.0));
+    program.command("transport_play", json!({ "value": true }));
+    program.view("playing", |view, _| transport(view).is_some_and(|transport| transport.playing));
+    program.command("transport_play", json!({ "value": false }));
+
+    // Kept, it has no file: nothing was written in `work/`.
+    program.send(HostMessage::Keep { tab: tab.clone() });
+    let kept = program.wait("kept", |message| match message {
+        AppMessage::Kept { tab: kept, path, error } if *kept == tab => Some((path.clone(), error.clone())),
+        _ => None,
+    });
+    assert_eq!(kept, (None, None), "a video opened to play was kept as work");
+    let in_work = || std::fs::read_dir(dir.join("work")).map(|entries| entries.count()).unwrap_or(0);
+    assert_eq!(in_work(), 0, "opening a video wrote in work/");
+
+    // Opened again: its tab, not a second one.
+    program.send(HostMessage::Open { path: Some(first.display().to_string()) });
+    program.send(HostMessage::Ping);
+    let mut seen = Vec::new();
+    program.wait("pong", |message| {
+        seen.push(message.clone());
+        matches!(message, AppMessage::Pong).then_some(())
+    });
+    assert!(!seen.iter().any(|message| matches!(message, AppMessage::Tab { .. } | AppMessage::Contents { .. })), "a second tab was made");
+    assert!(seen.iter().all(|message| !matches!(message, AppMessage::Tabs(tabs) if tabs.tabs.len() != 1)), "a second tab was made");
+
+    // Changed, it is kept in `work/` as any new tab is.
+    program.command("film_rename", json!({ "take": 0, "value": "Morning" }));
+    program.send(HostMessage::Keep { tab: tab.clone() });
+    let kept = program.wait("kept after a change", |message| match message {
+        AppMessage::Kept { tab: kept, path, .. } if *kept == tab => Some(path.clone()),
+        _ => None,
+    });
+    let file = PathBuf::from(kept.expect("no file after a change"));
+    assert_eq!(file, dir.join("work/Dawn.vgx"));
+    assert!(vgx_header(&file).to_string().contains("\"takes/Dawn.mp4\""), "the take does not link its file");
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(outside.parent().unwrap());
+}
+
 /// A take whose left half is one colour and right half another, 640 × 360,
 /// so where its middle is drawn shows how it was zoomed.
 fn write_halves(path: &Path) {
