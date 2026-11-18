@@ -1999,3 +1999,57 @@ fn a_sound_outside_the_project_stops_a_deliver() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(outside.parent().unwrap());
 }
+
+/// The draft output of the tab `pick` takes, from the next `cells` that
+/// names a draft for it: the tab, and the selected cell's output.
+fn draft_output(program: &Program, what: &str, mut pick: impl FnMut(&str, &[protocol::CellPart]) -> bool) -> (String, Vec<protocol::CellPart>) {
+    program.wait(what, |message| match message {
+        AppMessage::Cells { tab, cells, selected: Some(selected) } => {
+            cells.iter().find(|cell| cell.id == *selected).map(|cell| (tab.clone(), cell.output.clone())).filter(|(tab, output)| pick(tab, output))
+        }
+        _ => None,
+    })
+}
+
+/// Catches a draft that hides which take it was opened from, or one that
+/// keeps it: a tab with no take has a draft with no output; a take opened
+/// from a project file sends `cells` whose draft's output is that file, as
+/// the project names it, so the host can find its round; the `.vgx` keeps
+/// no output; and after a restart, `cells` carries it again.
+#[test]
+fn a_draft_says_the_file_its_take_was_opened_from() {
+    let (dir, _, _) = project("draft-output");
+    let mut program = Program::start(false);
+    let (_, empty) = draft_output(&program, "the first tab's draft", |tab, _| tab == "1");
+    assert!(empty.is_empty(), "a draft with no take has an output");
+    program.send(HostMessage::Viewport { viewport: VIEWPORT });
+    program.send(in_project(&dir));
+    program.send(HostMessage::Open { path: Some("takes/Dawn.mp4".into()) });
+    let (tab, output) = draft_output(&program, "the take's draft", |tab, output| tab != "1" && !output.is_empty());
+    let opened = [protocol::CellPart::Path { path: "takes/Dawn.mp4".into(), media_type: "video/mp4".into(), role: None, field: None }];
+    assert_eq!(output, opened);
+
+    // Changed, so it is kept, and kept with no output.
+    program.send(HostMessage::Command { id: "film_rename".into(), tab: Some(tab.clone()), arg: Some(json!({ "take": 0, "value": "Morning" })), node: None, viewport: VIEWPORT });
+    program.send(HostMessage::Keep { tab: tab.clone() });
+    let kept = program.wait("kept", |message| match message {
+        AppMessage::Kept { tab: kept, path, .. } if *kept == tab => path.clone(),
+        _ => None,
+    });
+    let header = vgx_header(Path::new(&kept));
+    assert!(
+        header["cells"].as_array().into_iter().flatten().all(|cell| cell["output"].as_array().is_none_or(|output| output.is_empty())),
+        "the file kept a draft's output: {header}"
+    );
+    program.send(HostMessage::Shutdown);
+    drop(program);
+
+    let mut program = Program::start(true);
+    program.send(HostMessage::Viewport { viewport: VIEWPORT });
+    program.send(in_project(&dir));
+    program.send(HostMessage::Open { path: Some(kept) });
+    let (_, again) = draft_output(&program, "the draft after a restart", |_, output| !output.is_empty());
+    assert_eq!(again, opened, "after a restart, the draft does not say its file");
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}

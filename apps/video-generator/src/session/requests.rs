@@ -23,7 +23,18 @@ impl Session {
             let size = self.draft_size(index);
             let tab = &mut self.tabs[index];
             tab.gallery.ensure_cell(size);
-            let now = (tab.gallery.cells.clone(), tab.gallery.cell.clone());
+            let mut cells = tab.gallery.cells.clone();
+            // A draft that has never run says the file of the gallery's take
+            // shown as its output, so the host finds that take's round; a
+            // round's take shown has its round already. Never kept, and
+            // never in place of a real run's output or on a step.
+            let opened = if tab.rounds.shown.is_none() { tab.gallery.take().map(|take| take.link.path.clone()) } else { None };
+            if let Some(path) = opened.map(|path| as_in_project(self.project.as_deref(), &path)) {
+                for cell in cells.iter_mut().filter(|cell| cell.step.is_none() && cell.versions.is_empty() && cell.output.is_empty()) {
+                    cell.output = vec![CellPart::Path { media_type: media_type_of(&path), path: path.clone(), role: None, field: None }];
+                }
+            }
+            let now = (cells, tab.gallery.cell.clone());
             if tab.cells_sent.as_ref() != Some(&now) {
                 out.push(AppMessage::Cells { tab: tab.id.clone(), cells: now.0.clone(), selected: now.1.clone() });
                 tab.cells_sent = Some(now);
@@ -408,4 +419,32 @@ fn media_type_of(path: &str) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+/// A file's path as a project's reports name it: relative to the project
+/// when it is inside it, with `/` between folders, or else as it is.
+fn as_in_project(project: Option<&Path>, path: &str) -> String {
+    let whole = Path::new(path);
+    match project.filter(|_| whole.is_absolute()).and_then(|project| whole.strip_prefix(project).ok()) {
+        Some(inside) => inside.to_string_lossy().replace('\\', "/"),
+        None => path.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// Catches a draft's output named otherwise than the project's reports
+    /// name it: a file inside the project, linked by its whole path, is
+    /// named relative to the project; one outside it, or already relative,
+    /// as it is.
+    #[test]
+    fn a_linked_file_is_named_as_the_reports_name_it() {
+        let project = Path::new("/home/someone/Last order");
+        assert_eq!(as_in_project(Some(project), "/home/someone/Last order/library/a.png"), "library/a.png");
+        assert_eq!(as_in_project(Some(project), "library/a.png"), "library/a.png");
+        assert_eq!(as_in_project(Some(project), "/elsewhere/a.png"), "/elsewhere/a.png");
+        assert_eq!(as_in_project(None, "/home/someone/Last order/library/a.png"), "/home/someone/Last order/library/a.png");
+    }
 }

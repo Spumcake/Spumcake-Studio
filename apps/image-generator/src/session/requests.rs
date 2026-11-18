@@ -14,9 +14,21 @@ impl Session {
     /// tab with a cell for its Prompt page, an empty draft when it had none.
     pub(super) fn cells_due(&mut self) -> Vec<AppMessage> {
         let mut out = Vec::new();
+        let project = self.project.clone();
         for image in &mut self.images {
             image.gallery.ensure_cell();
-            let now = (image.gallery.cells.clone(), image.gallery.cell.clone());
+            let mut cells = image.gallery.cells.clone();
+            // A draft that has never run says the file its tab's image was
+            // opened from, its bottom-most linked layer's, as its output, so
+            // the host finds that take's round; never kept, and never in
+            // place of a real run's output or on a step.
+            let opened = super::publish::all_links(&image.gallery.frame().doc).into_iter().next();
+            if let Some(path) = opened.map(|path| as_in_project(project.as_deref(), &path)) {
+                for cell in cells.iter_mut().filter(|cell| cell.step.is_none() && cell.versions.is_empty() && cell.output.is_empty()) {
+                    cell.output = vec![CellPart::Path { media_type: media_type_of(&path), path: path.clone(), role: None, field: None }];
+                }
+            }
+            let now = (cells, image.gallery.cell.clone());
             if image.cells_sent.as_ref() != Some(&now) {
                 out.push(AppMessage::Cells { tab: image.id.clone(), cells: now.0.clone(), selected: now.1.clone() });
                 image.cells_sent = Some(now);
@@ -632,5 +644,33 @@ pub(super) fn forget_files(cache: &Path, tab: &str, uid: u64) {
         if name.starts_with(&whole) || name.starts_with(&part) {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+/// A file's path as a project's reports name it: relative to the project
+/// when it is inside it, with `/` between folders, or else as it is.
+fn as_in_project(project: Option<&Path>, path: &str) -> String {
+    let whole = Path::new(path);
+    match project.filter(|_| whole.is_absolute()).and_then(|project| whole.strip_prefix(project).ok()) {
+        Some(inside) => inside.to_string_lossy().replace('\\', "/"),
+        None => path.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// Catches a draft's output named otherwise than the project's reports
+    /// name it: a file inside the project, linked by its whole path, is
+    /// named relative to the project; one outside it, or already relative,
+    /// as it is.
+    #[test]
+    fn a_linked_file_is_named_as_the_reports_name_it() {
+        let project = Path::new("/home/someone/Last order");
+        assert_eq!(as_in_project(Some(project), "/home/someone/Last order/library/a.png"), "library/a.png");
+        assert_eq!(as_in_project(Some(project), "library/a.png"), "library/a.png");
+        assert_eq!(as_in_project(Some(project), "/elsewhere/a.png"), "/elsewhere/a.png");
+        assert_eq!(as_in_project(None, "/home/someone/Last order/library/a.png"), "/home/someone/Last order/library/a.png");
     }
 }
