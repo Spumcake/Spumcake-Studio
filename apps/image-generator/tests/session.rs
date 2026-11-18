@@ -88,6 +88,13 @@ impl Drop for Program {
     }
 }
 
+/// The host's `project` for `folder`, read from its line, so it says
+/// nothing but the folder: every project is organized one way.
+fn in_project(folder: &Path) -> HostMessage {
+    let line = json!({ "type": "project", "folder": folder.display().to_string() }).to_string();
+    protocol::parse_host_message(&line).expect("a project")
+}
+
 fn scratch(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("image-generator-session-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -125,7 +132,7 @@ fn a_stroke_reaches_the_image_and_the_project() {
     assert_eq!((first.width, first.height), (1920, 1080));
     assert!(first.camera.is_some(), "a new image came without a camera");
 
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     let view = program.raster(0);
     let file = PathBuf::from(&view.image);
     assert!(file.starts_with(display_folder(&folder)), "{}", file.display());
@@ -150,7 +157,7 @@ fn a_stroke_reaches_the_image_and_the_project() {
     program.raster(undone.revision);
 
     // A second after the change it is written by itself.
-    let written = folder.join("Untitled Image.ipx");
+    let written = folder.join("work/Untitled Image.ipx");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !written.is_file() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
@@ -159,7 +166,7 @@ fn a_stroke_reaches_the_image_and_the_project() {
     drop(program);
 
     let mut again = Program::start(true);
-    again.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    again.send(in_project(&folder));
     again.send(HostMessage::Claim { id: "c1".into(), path: written.display().to_string() });
     assert!(again.wait(|message| match message {
         AppMessage::Claimed { id, yours } if id == "c1" => Some(*yours),
@@ -199,7 +206,7 @@ fn the_images_for_the_host_are_in_memory_when_there_is_some() {
     assert!(file.starts_with(runtime.join("inpainter/image-generator")), "{}", file.display());
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 1920 * 1080 * 4);
     assert!(!left.exists(), "a folder left by a program no longer running stayed");
-    program.send(HostMessage::Project { folder: project.display().to_string(), skills: false });
+    program.send(in_project(&project));
     let view = program.wait(|message| match message {
         AppMessage::Raster(view) => Some(view.clone()),
         _ => None,
@@ -219,7 +226,7 @@ fn the_images_for_the_host_are_in_memory_when_there_is_some() {
         command.env_remove("XDG_RUNTIME_DIR");
     });
     program.raster(0);
-    program.send(HostMessage::Project { folder: project.display().to_string(), skills: false });
+    program.send(in_project(&project));
     let view = program.wait(|message| match message {
         AppMessage::Raster(view) => Some(view.clone()),
         _ => None,
@@ -253,7 +260,7 @@ fn open_and_export_go_through_the_file_dialog() {
     std::fs::write(&source, png).unwrap();
 
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.raster(0);
     program.command("open", json!({}));
     let asked = program.wait(|message| match message {
@@ -402,21 +409,23 @@ fn until_file(path: &Path, changed_after: Option<std::time::SystemTime>) {
 }
 
 /// Catches an image opened as new work that is not kept, broken by its
-/// name, or forgets where it came from: `open_as_new` with a name holding
-/// "/" and a line break makes a tab of one image called by a safe name,
-/// written in the project's own folder with the image's pixels and its
-/// source; opened again, painted, and saved, the file keeps its source.
+/// name, kept beside the project's activities, or with a record of what
+/// made it: `open_as_new` with a name holding "/" and a line break, and
+/// where it came from, makes a tab of one image called by a safe name,
+/// written in the project's `work/` folder with the image's pixels and no
+/// `source`, as Spumcake-Skills keeps what made a file, and nothing at the
+/// project's root; opened again, painted, and saved, it still has none.
 #[test]
-fn an_image_opened_as_new_work_is_kept_with_its_source() {
+fn an_image_opened_as_new_work_is_kept_in_work_without_its_source() {
     let folder = scratch("open-as-new");
     let source = folder.join("lamp.png");
     image::RgbaImage::from_pixel(20, 10, image::Rgba([10, 120, 200, 255])).save(&source).unwrap();
     let from = protocol::OpenedFrom { cell: "c7".into(), image: "images/lamp.png".into(), session: Some("s3".into()), recipe: None };
 
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.raster(0);
-    program.send(HostMessage::OpenAsNew { path: source.display().to_string(), name: "AC/DC lamp\nposter".into(), from: Some(from.clone()) });
+    program.send(HostMessage::OpenAsNew { path: source.display().to_string(), name: "AC/DC lamp\nposter".into(), from: Some(from) });
     let opened = program.wait(|message| match message {
         AppMessage::Raster(view) if (view.width, view.height) == (20, 10) => Some(view.clone()),
         _ => None,
@@ -424,15 +433,16 @@ fn an_image_opened_as_new_work_is_kept_with_its_source() {
     assert_eq!(opened.film.as_ref().unwrap().items.len(), 1);
     assert_eq!(opened.film.as_ref().unwrap().items[0].name, "AC DC lamp poster");
     assert_eq!(pixel(Path::new(&opened.image), 20, 3, 3), [10, 120, 200, 255]);
-    let written = folder.join("AC DC lamp poster.ipx");
+    let written = folder.join("work/AC DC lamp poster.ipx");
     until_file(&written, None);
-    assert_eq!(header(&written)["source"], serde_json::to_value(&from).unwrap(), "the file forgot where it came from");
+    assert!(header(&written).get("source").is_none(), "the image keeps where it came from");
+    assert!(!folder.join("AC DC lamp poster.ipx").exists(), "the image was kept at the project's root");
     drop(program);
 
-    // Opened again, painted, and saved: the source stays.
+    // Opened again, painted, and saved: still no source.
     let saved = std::fs::metadata(&written).unwrap().modified().unwrap();
     let mut again = Program::start(false);
-    again.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    again.send(in_project(&folder));
     again.raster(0);
     again.send(HostMessage::Open { path: Some(written.display().to_string()) });
     let shown = again.wait(|message| match message {
@@ -442,7 +452,7 @@ fn an_image_opened_as_new_work_is_kept_with_its_source() {
     again.send(HostMessage::Command { id: "tool".into(), tab: Some(shown.tab.clone()), arg: Some(json!({ "tool": "brush" })), node: None, viewport: [1200.0, 800.0] });
     again.send(HostMessage::RasterGesture { tab: shown.tab.clone(), gesture: RasterGesture::Stroke { points: vec![[2.0, 2.0, 1.0], [18.0, 8.0, 1.0]] } });
     until_file(&written, Some(saved));
-    assert_eq!(header(&written)["source"], serde_json::to_value(&from).unwrap(), "a save lost where the work came from");
+    assert!(header(&written).get("source").is_none(), "a save in a project wrote where the work came from");
     drop(again);
     let _ = std::fs::remove_dir_all(folder);
 }
@@ -604,16 +614,18 @@ fn an_adjustment_is_added_and_set_from_the_panel() {
 
 /// Catches new images named by a rule of the workspace's own, or named for
 /// a file the project already holds: with "Untitled Image.ipx" in the
-/// project's folder, two new tabs are "Untitled Image 2" and "Untitled
-/// Image 3", the second is kept in its own file beside the first, which is
-/// left as it was, and its filmstrip's new image is "Untitled Image 2".
+/// project's `work/` folder, two new tabs are "Untitled Image 2" and
+/// "Untitled Image 3", the second is kept in its own file beside the first,
+/// which is left as it was, and its filmstrip's new image is "Untitled
+/// Image 2".
 #[test]
 fn new_images_are_named_free_of_the_projects_files() {
     let folder = scratch("names");
-    let existing = folder.join("Untitled Image.ipx");
+    let existing = folder.join("work/Untitled Image.ipx");
+    std::fs::create_dir_all(folder.join("work")).unwrap();
     std::fs::write(&existing, b"someone's image").unwrap();
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     let new_image = HostMessage::Command { id: "new_image".into(), tab: None, arg: None, node: None, viewport: [1200.0, 800.0] };
     program.send(new_image.clone());
     program.send(new_image);
@@ -638,24 +650,25 @@ fn new_images_are_named_free_of_the_projects_files() {
         AppMessage::Kept { tab: kept, path, error } if *kept == tab => Some((path.clone(), error.clone())),
         _ => None,
     });
-    assert_eq!(kept, (Some(folder.join("Untitled Image 3.ipx").display().to_string()), None));
+    assert_eq!(kept, (Some(folder.join("work/Untitled Image 3.ipx").display().to_string()), None));
     assert_eq!(std::fs::read(&existing).unwrap(), b"someone's image", "a new image wrote over a file in the project");
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }
 
 /// Catches a 0.13 image file that no longer opens, or forgets where it came
-/// from: "Lamp from pitch.ipx", as the 0.13 program wrote it, opens with
-/// its image, and once changed and kept, its file still names the cell,
-/// image, and recipe it was opened from.
+/// from with no project open: "Lamp from pitch.ipx", as the 0.13 program
+/// wrote it, opens with its image, and once changed and saved, with no
+/// project to keep that record, its file still names the cell, image, and
+/// recipe it was opened from.
 #[test]
 fn an_image_file_from_0_13_opens_with_its_source() {
     let folder = scratch("v0-13");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../host/tests/fixtures/v0.13/project/Lamp from pitch.ipx");
     let path = folder.join("Lamp from pitch.ipx");
     std::fs::copy(&fixture, &path).expect("the 0.13 fixture");
+    let saved = std::fs::metadata(&path).unwrap().modified().unwrap();
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
     program.send(HostMessage::Open { path: Some(path.display().to_string()) });
     let opened = program.wait(|message| match message {
         AppMessage::Raster(view) => Some(view.clone()),
@@ -666,12 +679,8 @@ fn an_image_file_from_0_13_opens_with_its_source() {
     assert_eq!(names, ["Lamp from pitch"]);
 
     program.send(HostMessage::Command { id: "add_layer".into(), tab: Some(opened.tab.clone()), arg: None, node: None, viewport: [1200.0, 800.0] });
-    program.send(HostMessage::Keep { tab: opened.tab.clone() });
-    let kept = program.wait(|message| match message {
-        AppMessage::Kept { path, error, .. } => Some((path.clone(), error.clone())),
-        _ => None,
-    });
-    assert_eq!(kept, (Some(path.display().to_string()), None));
+    program.send(HostMessage::Command { id: "save".into(), tab: Some(opened.tab.clone()), arg: None, node: None, viewport: [1200.0, 800.0] });
+    until_file(&path, Some(saved));
     let source: protocol::OpenedFrom = serde_json::from_value(header(&path)["source"].clone()).expect("the file forgot where it came from");
     assert_eq!(source.cell, "5b7e0c1e-0000-4000-8000-000000000201");
     assert_eq!(source.image, "images/lamp.png");
@@ -723,7 +732,7 @@ fn a_linked_layer_keeps_its_file_and_its_painting() {
     let linked = layers::link::sha256_file(&take).unwrap();
 
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.send(HostMessage::Open { path: Some(take.display().to_string()) });
     let opened = program.raster(0);
     assert_eq!((opened.width, opened.height), (40, 30));
@@ -739,7 +748,7 @@ fn a_linked_layer_keeps_its_file_and_its_painting() {
     write_png(&take, 40, 30, &[90u8; 40 * 30 * 4]);
     let changed = layers::link::sha256_file(&take).unwrap();
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.send(HostMessage::Open { path: Some(file.display().to_string()) });
     let reopened = program.raster(0);
     assert_eq!(pixel(Path::new(&reopened.image), 40, 20, 15), [90, 90, 90, 90], "the layer was not read from its file");
@@ -764,7 +773,7 @@ fn a_linked_layer_keeps_its_file_and_its_painting() {
     let _ = std::fs::remove_dir_all(folder.join(protocol::PROJECT_DIR));
     write_png(&take, 40, 30, &[10u8; 40 * 30 * 4]);
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.send(HostMessage::Open { path: Some(file.display().to_string()) });
     let again = program.raster(0);
     assert_eq!(pixel(Path::new(&again.image), 40, 20, 15), [0, 0, 0, 255], "the painting was lost");
@@ -786,7 +795,7 @@ fn notes_are_shown_and_kept_but_never_exported() {
     let white = vec![255u8; 200 * 120 * 4];
     write_png(&plate, 200, 120, &white);
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.send(HostMessage::Open { path: Some(plate.display().to_string()) });
     let opened = program.raster(0);
     program.command("tool", json!({ "tool": "notes" }));
@@ -845,7 +854,7 @@ fn notes_are_shown_and_kept_but_never_exported() {
     drop(program);
 
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.send(HostMessage::Open { path: Some(file.display().to_string()) });
     let reopened = program.raster(0);
     assert_eq!(pixel(Path::new(&reopened.image), 200, 100, 100), layers::notes::RED, "the notes were not kept");
@@ -881,7 +890,7 @@ fn the_previs_check_is_drawn_only_where_it_is_shown() {
     write_png(&folder.join("render.png"), 60, 40, &render.data);
 
     let mut program = Program::start(true);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     program.send(HostMessage::Open { path: Some(folder.join("plate.png").display().to_string()) });
     let opened = program.raster(0);
     program.command("previs_toggle", json!({}));
@@ -939,7 +948,7 @@ fn the_previs_check_is_drawn_only_where_it_is_shown() {
 }
 
 // Requests: the Prompt page's cell, rounds of takes, the round views, a
-// next round, previews, and a Skills project's `work/` folder.
+// next round, previews, and the project's `work/` folder.
 
 /// The takes' colours, each a flat image, and a reference's.
 const TEAL: [u8; 3] = [30, 160, 200];
@@ -952,9 +961,9 @@ fn flat(colour: [u8; 3], width: u32, height: u32) -> Vec<u8> {
     [colour[0], colour[1], colour[2], 255].repeat((width * height) as usize)
 }
 
-/// A Skills project with four takes in `library/`, 160 × 90, and a
-/// reference in `refs/`.
-fn skills_project(label: &str) -> PathBuf {
+/// A project with four takes in `library/`, 160 × 90, and a reference in
+/// `refs/`.
+fn with_takes(label: &str) -> PathBuf {
     let folder = scratch(label);
     std::fs::create_dir_all(folder.join("library")).unwrap();
     std::fs::create_dir_all(folder.join("refs")).unwrap();
@@ -1032,13 +1041,13 @@ fn found(bytes: &[u8], width: u32, colour: [u8; 3]) -> Option<[u32; 4]> {
 /// under "Round N · model", a canon take sealed, a round being made as its
 /// waiting places, and the gallery's own images after them; sent again
 /// without a take, as when its report is deleted, its tile leaves, and
-/// with one added by hand, it appears; and the tab's file, in the Skills
+/// with one added by hand, it appears; and the tab's file, in the
 /// project's `work/` folder, names no take.
 #[test]
 fn takes_fill_the_strip_by_round_and_are_never_kept() {
-    let folder = skills_project("takes");
+    let folder = with_takes("takes");
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    program.send(in_project(&folder));
     let cell = cell_of(&program);
     let running = protocol::Round { state: protocol::RoundState::Running, count: Some(2), ..round("q2", 2, Vec::new()) };
     send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", true)]), running.clone()]);
@@ -1069,7 +1078,7 @@ fn takes_fill_the_strip_by_round_and_are_never_kept() {
     assert_eq!(pixel(Path::new(&film.items[1].thumbnail.path), 78, 39, 22), [BLUE[0], BLUE[1], BLUE[2], 255]);
 
     let file = keep(&mut program, "1");
-    assert_eq!(file, folder.join("work/Untitled Image.ipx"), "a Skills project's image is not in work/");
+    assert_eq!(file, folder.join("work/Untitled Image.ipx"), "a project's image is not in work/");
     let kept = header(&file).to_string();
     assert!(!kept.contains("library/") && !kept.contains("\"q1\""), "a take was kept in the image's file: {kept}");
     assert_eq!(header(&file)["cell"], json!(cell), "the Prompt page's cell was not kept");
@@ -1077,19 +1086,21 @@ fn takes_fill_the_strip_by_round_and_are_never_kept() {
     let _ = std::fs::remove_dir_all(folder);
 }
 
-/// Catches a next round that loses the notes or the take: with a pin's
-/// words typed on a take, Next round from this makes the tab's cell a
-/// draft whose prompt is the round's, then "Notes on the last round: 1.
-/// …"; whose references are the round's, in order, the take with the
-/// role Reference, and the marked image, an item of the tab's file with
-/// the role "Notes on the last round"; and that item is declared, and
-/// rendered for the runner as the take with the pin on it.
+/// Catches a next round that loses the notes or the take, or sends a model
+/// a file only in `work/`: with a pin's words typed on a take, Next round
+/// from this writes the marked image, the take with the pin on it, beside
+/// the tab's file in `work/` and files it from the tab's file and the take;
+/// it makes the tab's cell a draft whose prompt is the round's, then "Notes
+/// on the last round: 1. …", and whose references are the round's, in
+/// order, and the take with the role Reference; and once `filed` names the
+/// marked image, it joins the draft as that file, with the role "Notes on
+/// the last round".
 #[test]
 fn next_round_from_a_take_carries_its_notes() {
-    let folder = skills_project("next-round");
+    let folder = with_takes("next-round");
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: [1200.0, 800.0] });
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    program.send(in_project(&folder));
     let cell = cell_of(&program);
     let mut first = round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", false)]);
     first.references = vec![protocol::SentReference { path: "refs/plate.png".into(), role: Some("Control, the room's layout".into()) }];
@@ -1112,6 +1123,17 @@ fn next_round_from_a_take_carries_its_notes() {
     });
     program.send(HostMessage::RasterText { tab: "1".into(), input: protocol::TextInput::Insert { text: "less rain".into() } });
     program.command("take_next_round", json!({ "take": "library/r1-1.png" }));
+    let (filing, written, from) = program.wait(|message| match message {
+        AppMessage::FileResource { path, from, id: Some(id), .. } => Some((id.clone(), path.clone(), from.clone())),
+        _ => None,
+    });
+    assert_eq!(written, "work/Untitled Image notes.png");
+    assert_eq!(from, ["work/Untitled Image.ipx", "library/r1-1.png"]);
+    let marked = image::open(folder.join(&written)).unwrap().into_rgba8();
+    assert_eq!(marked.dimensions(), (160, 90));
+    assert_eq!(marked.get_pixel(140, 80).0, [TEAL[0], TEAL[1], TEAL[2], 255], "the marked image is not the take");
+    let near: Vec<[u8; 4]> = (36..45).map(|x| marked.get_pixel(x, 30).0).collect();
+    assert!(near.iter().any(|pixel| pixel[..3] != TEAL), "the marked image has no pin");
     let draft = program.wait(|message| match message {
         AppMessage::Cells { cells, selected: Some(selected), .. } => {
             cells.iter().find(|own| own.id == *selected && own.prompt().contains("Notes on the last round")).cloned()
@@ -1135,32 +1157,17 @@ fn next_round_from_a_take_carries_its_notes() {
             ("library/r1-1.png".to_string(), Some("Reference".to_string()))
         ]
     );
-    let (item, media_type) = draft
-        .input
-        .iter()
-        .find_map(|part| match part {
-            protocol::CellPart::Item { item, media_type, role, .. } if role.as_deref() == Some("Notes on the last round") => Some((item.clone(), media_type.clone())),
-            _ => None,
-        })
-        .expect("the marked image is not sent");
-    assert_eq!((item.path.as_str(), media_type.as_str()), ("work/Untitled Image.ipx", "image/png"));
-
-    let declared = program.wait(|message| match message {
-        AppMessage::Items { path, items } if *path == item.path => items.iter().find(|own| Some(&own.id) == item.item.as_ref()).cloned(),
+    program.send(HostMessage::Filed { id: filing, file: "library/notes-1.png".into(), error: None });
+    let filed = program.wait(|message| match message {
+        AppMessage::Cells { cells, .. } => cells.iter().find(|own| own.id == draft.id).and_then(|own| {
+            own.input.iter().find_map(|part| match part {
+                protocol::CellPart::Path { path, media_type, role, .. } if role.as_deref() == Some("Notes on the last round") => Some((path.clone(), media_type.clone())),
+                _ => None,
+            })
+        }),
         _ => None,
     });
-    program.send(HostMessage::Render { id: "r1".into(), item: item.clone(), media_type: "image/png".into(), part: None });
-    let (path, fingerprint, error) = program.wait(|message| match message {
-        AppMessage::Rendered { id, path, fingerprint, error } if id == "r1" => Some((path.clone(), fingerprint.clone(), error.clone())),
-        _ => None,
-    });
-    assert_eq!(error, None);
-    assert_eq!(fingerprint, Some(declared.fingerprint), "the render is not the item declared");
-    let marked = image::open(folder.join(path.unwrap())).unwrap().into_rgba8();
-    assert_eq!(marked.dimensions(), (160, 90));
-    assert_eq!(marked.get_pixel(140, 80).0, [TEAL[0], TEAL[1], TEAL[2], 255], "the marked image is not the take");
-    let near: Vec<[u8; 4]> = (36..45).map(|x| marked.get_pixel(x, 30).0).collect();
-    assert!(near.iter().any(|pixel| pixel[..3] != TEAL), "the marked image has no pin");
+    assert_eq!(filed, ("library/notes-1.png".to_string(), "image/png".to_string()));
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }
@@ -1173,10 +1180,10 @@ fn next_round_from_a_take_carries_its_notes() {
 /// sheet shows the reference beside the take.
 #[test]
 fn the_round_views_draw_the_right_takes_in_the_right_places() {
-    let folder = skills_project("round-views");
+    let folder = with_takes("round-views");
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: [1200.0, 800.0] });
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    program.send(in_project(&folder));
     let cell = cell_of(&program);
     let mut first = round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", false)]);
     first.references = vec![protocol::SentReference { path: "refs/plate.png".into(), role: Some("Control, the room's layout".into()) }];
@@ -1234,7 +1241,7 @@ fn png_jpeg_and_webp_are_previewed() {
         _ => None,
     });
     assert_eq!(edits, ["image/png", "image/jpeg", "image/webp"]);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    program.send(in_project(&folder));
     let mut preview = |id: &str, path: &str, media_type: &str| {
         program.send(HostMessage::Preview { id: id.into(), path: path.into(), media_type: media_type.into() });
         program.wait(|message| match message {
@@ -1260,41 +1267,16 @@ fn png_jpeg_and_webp_are_previewed() {
     let _ = std::fs::remove_dir_all(folder);
 }
 
-/// Catches a Skills project's image kept beside its activities, or with a
-/// record of what made it: opened as new work there, with where it came
-/// from, it is kept in the project's `work/` folder, with no `source`.
-#[test]
-fn a_skills_projects_image_is_kept_in_work_without_its_source() {
-    let folder = scratch("skills-work");
-    let source = folder.join("lamp.png");
-    image::RgbaImage::from_pixel(20, 10, image::Rgba([10, 120, 200, 255])).save(&source).unwrap();
-    let from = protocol::OpenedFrom { cell: "c7".into(), image: "lamp.png".into(), session: Some("s3".into()), recipe: None };
-    let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
-    program.raster(0);
-    program.send(HostMessage::OpenAsNew { path: source.display().to_string(), name: "Lamp".into(), from: Some(from) });
-    let opened = program.wait(|message| match message {
-        AppMessage::Raster(view) if (view.width, view.height) == (20, 10) => Some(view.clone()),
-        _ => None,
-    });
-    let file = keep(&mut program, &opened.tab);
-    assert_eq!(file, folder.join("work/Lamp.ipx"));
-    assert!(header(&file).get("source").is_none(), "a Skills project's image keeps where it came from");
-    assert!(!folder.join("Lamp.ipx").exists());
-    drop(program);
-    let _ = std::fs::remove_dir_all(folder);
-}
-
 /// Catches notes on a take lost when the program ends, or a take kept in
 /// their place: a pin with its words on a take is kept in the tab's file
 /// by the take's path and sha256 alone, and a new program that opens the
 /// file and is sent the same rounds shows the take with its pin again.
 #[test]
 fn notes_on_a_take_survive_a_restart() {
-    let folder = skills_project("take-notes");
+    let folder = with_takes("take-notes");
     let rounds = || vec![round("q1", 1, vec![take("library/r1-1.png", false), take("library/r1-2.png", false)])];
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    program.send(in_project(&folder));
     let cell = cell_of(&program);
     send_takes(&mut program, &cell, rounds());
     strip(&program, |film| !film.groups.is_empty());
@@ -1319,7 +1301,7 @@ fn notes_on_a_take_survive_a_restart() {
     assert!(!kept.to_string().contains("\"q1\"") && !kept.to_string().contains("Model A"), "a take's record was kept");
 
     let mut again = Program::start(true);
-    again.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    again.send(in_project(&folder));
     again.send(HostMessage::Open { path: Some(file.display().to_string()) });
     assert_eq!(cell_of(&again), cell, "the tab's cell was not kept");
     send_takes(&mut again, &cell, rounds());
@@ -1339,17 +1321,17 @@ fn notes_on_a_take_survive_a_restart() {
 }
 
 /// Catches a draft kept after it became a step, a report that cannot be
-/// opened, or a layer written out in a Skills project that the runner is
-/// not asked to file: Open report asks for the take's round's report; a
-/// layer written out is a PNG next to the tab's file in `work/`, and
+/// opened, or a layer written out that the runner is not asked to file:
+/// Open report asks for the take's round's report; a layer written out is
+/// a PNG in the project's `work/`, and
 /// `file_resource` names it and that file; `cell_became_step` leaves the
 /// cell its pointer alone, and no undo brings its draft back, in the file
 /// too.
 #[test]
-fn a_draft_becomes_its_step_and_a_skills_project_files_what_leaves() {
-    let folder = skills_project("steps");
+fn a_draft_becomes_its_step_and_what_leaves_is_filed() {
+    let folder = with_takes("steps");
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    program.send(in_project(&folder));
     let cell = cell_of(&program);
     send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-1.png", false)])]);
     let (_, film) = strip(&program, |film| !film.groups.is_empty());
@@ -1434,13 +1416,13 @@ fn a_draft_becomes_its_step_and_a_skills_project_files_what_leaves() {
 
 const ARTIFACT: &str = "shot 12: keyframe";
 
-/// A Skills project whose cell's round 1 made the take r1-1, canon or not,
+/// A project whose cell's round 1 made the take r1-1, canon or not,
 /// for the artifact "shot 12: keyframe"; the program, and the strip once
 /// it shows the round.
 fn publishing(label: &str, canon: bool) -> (PathBuf, Program) {
-    let folder = skills_project(label);
+    let folder = with_takes(label);
     let mut program = Program::start(false);
-    program.send(HostMessage::Project { folder: folder.display().to_string(), skills: true });
+    program.send(in_project(&folder));
     let cell = cell_of(&program);
     let mut first = round("q1", 1, vec![take("library/r1-1.png", canon)]);
     first.artifact = Some(ARTIFACT.into());
@@ -1596,8 +1578,8 @@ fn an_edit_with_a_file_outside_the_project_is_refused() {
 
 /// Catches an edit on canon takes that cannot be published, or one
 /// published without what it was made from: Publish sends `publish` for
-/// the artifact, its source a PNG under the project's renders, the same
-/// file for the same edit, and `from` the
+/// the artifact, its source a PNG in `work/`, named by the tab's file and
+/// the image, the same file each time it is published, and `from` the
 /// tab's file then the take's; the card's Cancel, `published` with no
 /// file, and the runner's refusal, `published` with an error, show
 /// nothing and leave the seal off; a publish then published
@@ -1616,10 +1598,8 @@ fn an_edit_on_canon_takes_is_published() {
     assert_eq!(artifact, ARTIFACT);
     assert_eq!(from, ["work/Untitled Image.ipx", "library/r1-1.png"]);
     assert!(with.is_empty());
-    assert!(source.starts_with(".spumcake/renders/") && source.ends_with(".png"), "{source}");
+    assert_eq!(source, "work/Untitled Image r1-1.png", "the source is not named by its tab's file and its image");
     assert!(image::open(folder.join(&source)).is_ok(), "the source was not written");
-    let work = || std::fs::read_dir(folder.join("work")).unwrap().count();
-    let in_work = work();
 
     // The card's Cancel: nothing published, nothing said.
     program.send(HostMessage::Published { tab: "1".into(), artifact: ARTIFACT.into(), file: String::new(), version: None, error: None });
@@ -1635,14 +1615,18 @@ fn an_edit_on_canon_takes_is_published() {
     );
     // The runner's refusal names the file it refused, and publishes
     // nothing: the host's card says why.
-    // The same edit again is the same file, and nothing joins `work/`.
+    // Again: the same file, written again, and nothing else joins `work/`.
+    let work = || std::fs::read_dir(folder.join("work")).unwrap().count();
+    let in_work = work();
+    std::fs::remove_file(folder.join(&source)).unwrap();
     program.command("publish", json!({}));
     let again = program.wait(|message| match message {
         AppMessage::Publish { source, .. } => Some(source.clone()),
         _ => None,
     });
-    assert_eq!(again, source);
-    assert_eq!(work(), in_work, "publishing wrote into work/");
+    assert_eq!(again, source, "publishing again named another file");
+    assert!(image::open(folder.join(&source)).is_ok(), "the source was not written again");
+    assert_eq!(work(), in_work, "publishing again added a file to work/");
     let error = Some(String::from("The pipeline refused it."));
     program.send(HostMessage::Published { tab: "1".into(), artifact: ARTIFACT.into(), file: source.clone(), version: None, error });
     let seen = until_pong(&mut program);

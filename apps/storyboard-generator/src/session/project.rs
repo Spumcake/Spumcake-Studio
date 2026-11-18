@@ -696,7 +696,6 @@ impl Session {
         let then = std::mem::take(&mut saving.then);
         self.send_next(then);
     }
-    }
 
     /// The host edited the step: the storyboard reads the saved timing as
     /// its own, and a card says where it went.

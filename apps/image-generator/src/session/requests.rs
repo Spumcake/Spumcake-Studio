@@ -1,10 +1,13 @@
 //! A tab's requests: its cells on the Prompt page, the rounds the host
-//! says they made, the take shown, a take's menu, the tab's items and
-//! their renders, layers written out, and the previews the host asks for.
+//! says they made, the take shown, a take's menu, layers written out, and
+//! the previews the host asks for.
 
 use super::*;
 use crate::rounds::{self, IMAGE_TYPES};
 use protocol::Round;
+
+/// The start of a layer written out's filing id, so its `filed` is known.
+pub(super) const WRITTEN_OUT: &str = "written-out-";
 
 impl Session {
     /// The cells of every tab whose cells the host has not been told, each
@@ -52,7 +55,6 @@ impl Session {
         if index == self.active {
             out.extend(self.emit());
         }
-        out.extend(self.items_due());
     }
 
     /// A click on a take's tile shows it. With Ctrl or Shift, a take of
@@ -179,9 +181,10 @@ impl Session {
     /// Next round from this: a draft of the take's round, with the same
     /// references in order and the take itself as a reference; when the
     /// take has notes, their words end the prompt and the marked image is
-    /// sent too, as an item of the tab's file the runner files. A draft
-    /// not yet run takes it in place; otherwise it is a new cell beside
-    /// the one it came from. One step of the strip's history.
+    /// sent too, written beside the tab's file in `work/` and filed, then
+    /// joining the draft when `filed` names it. A draft not yet run takes
+    /// it in place; otherwise it is a new cell beside the one it came from.
+    /// One step of the strip's history.
     pub(super) fn next_round(&mut self, path: &str, out: &mut Vec<AppMessage>) {
         let index = self.active;
         let Some(image) = self.images.get_mut(index) else {
@@ -217,12 +220,6 @@ impl Session {
             input.push(CellPart::Path { path: reference.path.clone(), media_type: media_type_of(&reference.path), role: reference.role.clone(), field: None });
         }
         input.push(CellPart::Path { path: take.path.clone(), media_type: take.media_type.clone(), role: Some(rounds::ROLES[0].to_string()), field: None });
-        if let Some(marked) = marked {
-            match self.file_marked(index, &marked) {
-                Ok(item) => input.push(CellPart::Item { item, media_type: String::from("image/png"), part: None, role: Some(NOTES_WORDS.into()), field: None }),
-                Err(reason) => out.push(notice("The image could not be exported", &reason)),
-            }
-        }
         let image = &mut self.images[index];
         let current = image.gallery.current_cell().cloned();
         let from = current.as_ref().filter(|cell| cell.step.is_none());
@@ -244,37 +241,22 @@ impl Session {
             Some(cell) => *cell = draft.clone(),
             None => cells.push(draft.clone()),
         }
+        let (made, cell) = (draft.input.clone(), draft.id.clone());
         if image.gallery.set_cells(cells, Some(draft.id)) {
             image.dirty = true;
         }
+        // The marked image, written and filed now; it joins the draft when
+        // `filed` comes.
+        if let Some(marked) = marked {
+            let stem = format!("{} notes", self.images[index].gallery.frame().name);
+            let filed = files::encode_png(marked.width, marked.height, &marked.data)
+                .and_then(|png| self.file_for_draft(index, &stem, &png, &take.path, &cell, made, out));
+            if let Err(reason) = filed {
+                out.push(notice("The image could not be exported", &reason));
+            }
+        }
         self.page = Page::Prompt;
         out.extend(self.emit());
-        out.extend(self.items_due());
-    }
-
-    /// The marked image of a next round, as an item of the tab's file: its
-    /// PNG is rendered now, named by its fingerprint, so the runner's
-    /// `render` finds it, and the file is written first, so the item has a
-    /// file to be of.
-    fn file_marked(&mut self, index: usize, marked: &layers::Rgba) -> Result<ItemRef, String> {
-        let Some(project) = self.project.clone() else {
-            return Err("The image is not in a project.".into());
-        };
-        if self.images[index].path.is_none() {
-            self.images[index].dirty = true;
-        }
-        let path = self.write_into_project(index)?.ok_or_else(|| String::from("The image could not be written."))?;
-        let relative = self.relative(&path).ok_or_else(|| String::from("The image is not in the project."))?;
-        let png = files::encode_png(marked.width, marked.height, &marked.data)?;
-        let fingerprint = protocol::fingerprint(&png);
-        let id = format!("{MARKED_ITEM}{fingerprint}");
-        let item = ItemRef { path: relative, item: Some(id.clone()) };
-        files::write_atomic(&project.join(protocol::render_path(OWNER, &item, None, &fingerprint, "png")), &png)?;
-        let image = &mut self.images[index];
-        if !image.marked.iter().any(|(own, _)| *own == id) {
-            image.marked.push((id, fingerprint));
-        }
-        Ok(item)
     }
 
     /// Ask the assistant to use this take: a prepared request naming the
@@ -310,12 +292,11 @@ impl Session {
     /// Write out as PNG…: a layer of the image shown, as a PNG of the
     /// image's size, a plain file next to the tab's file, named as the
     /// layer, free among the files there; with no file and no project,
-    /// where the person chooses. In a Skills project, what leaves the
+    /// where the person chooses. Inside a project, what leaves the
     /// workspace is filed by the runner: `file_resource` asks it to, with
     /// `request.py resource` the PNG `--from` the tab's file in `work/`,
     /// then the layer's own linked file, then the file of every linked
-    /// layer beneath it, edited or not. The layer is declared as an item of
-    /// the tab's file either way.
+    /// layer beneath it, edited or not, with an id, so a refusal is said.
     pub(super) fn write_out(&mut self, node: u64, out: &mut Vec<AppMessage>) {
         let index = self.active;
         let Some(image) = self.images.get(index) else {
@@ -353,7 +334,8 @@ impl Session {
                 return;
             }
         };
-        let Some(folder) = file.as_deref().and_then(Path::parent).map(Path::to_path_buf) else {
+        // In the project's work/, or beside the tab's file with no project.
+        let Some(folder) = self.work_folder().or_else(|| file.as_deref().and_then(Path::parent).map(Path::to_path_buf)) else {
             return;
         };
         let stem = match safe_name(&layer) {
@@ -366,8 +348,7 @@ impl Session {
             out.push(notice("The image could not be exported", &reason));
             return;
         }
-        if self.skills
-            && let (Some(path), Some(own)) = (self.relative(&written), file.as_deref().and_then(|file| self.relative(file)))
+        if let (Some(path), Some(own)) = (self.relative(&written), file.as_deref().and_then(|file| self.relative(file)))
         {
             // A link names its file in the project, or whole when it is
             // outside; only a file in the project can be named here.
@@ -378,7 +359,10 @@ impl Session {
                     from.push(link);
                 }
             }
-            out.push(AppMessage::FileResource { tab, path, from, id: None });
+            // With an id, so a filing refused is said, at the bottom left.
+            let id = format!("{WRITTEN_OUT}{}", self.next_file);
+            self.next_file += 1;
+            out.push(AppMessage::FileResource { tab, path, from, id: Some(id) });
         }
         // As ig-layer-export shows it, at the working area's bottom left.
         out.push(AppMessage::Notices {
@@ -394,77 +378,11 @@ impl Session {
             }],
             corner: protocol::NoticeCorner::BottomLeft,
         });
-        let image = &mut self.images[index];
-        if !image.written_out.contains(&(name.clone(), node)) {
-            image.written_out.push((name, node));
-        }
-        out.extend(self.items_due());
     }
 
-    /// `render`: an item of a tab's file as a file inside the project. A
-    /// take is its own file when that is what is asked for; a marked image
-    /// was rendered when its round was made; a layer written out, and the
-    /// whole file, the gallery's image shown, are rendered as they are now,
-    /// under `protocol::render_path`, never over an earlier render.
-    pub(super) fn render(&mut self, id: String, item: &ItemRef, media_type: &str) -> AppMessage {
-        let Some(project) = self.project.clone() else {
-            return not_rendered(id, "The image is not in a project.");
-        };
-        let found = (0..self.images.len()).find(|index| {
-            self.images[*index].path.as_deref().and_then(|path| self.relative(path)).as_deref() == Some(item.path.as_str())
-        });
-        let Some(index) = found else {
-            return not_rendered(id, "That image is not open.");
-        };
-        let own = item.item.as_deref().unwrap_or("");
-        let image = &mut self.images[index];
-        if let Some((take, fingerprint)) = image.rounds.take_by_item(own) {
-            // A take is its own file, when that is what is asked for.
-            if take.media_type == media_type {
-                return rendered(id, Ok(take.path), fingerprint);
-            }
-            if media_type != "image/png" {
-                return not_rendered(id, "Only PNG is rendered here.");
-            }
-            let source = files::resolve(&project, &take.path);
-            let png = || files::import(&source).and_then(|pixels| files::encode_png(pixels.width, pixels.height, &pixels.data));
-            return rendered(id, render_once(&project, item, &fingerprint, png), fingerprint);
-        }
-        if media_type != "image/png" {
-            return not_rendered(id, "Only PNG is rendered here.");
-        }
-        if let Some(fingerprint) = own.strip_prefix(MARKED_ITEM) {
-            let relative = protocol::render_path(OWNER, item, None, fingerprint, "png");
-            return if project.join(&relative).is_file() {
-                rendered(id, Ok(relative), fingerprint.to_string())
-            } else {
-                not_rendered(id, "The marked image is gone. Make the next round from the take again.")
-            };
-        }
-        if let Some((node, name)) = own.strip_prefix(LAYER_ITEM).and_then(|rest| rest.split_once(' '))
-            && let Ok(node) = node.parse::<u64>()
-        {
-            let Some(frame) = image.gallery.frames.iter().find(|frame| frame.name == name) else {
-                return not_rendered(id, "That image is no longer in the gallery.");
-            };
-            let (width, height) = (frame.doc.image.width, frame.doc.image.height);
-            let canvas = match layer_canvas(&frame.doc, node) {
-                Ok((_, canvas)) => canvas,
-                Err(reason) => return not_rendered(id, &reason),
-            };
-            let fingerprint = protocol::fingerprint(&canvas);
-            let png = || files::encode_png(width, height, &canvas);
-            return rendered(id, render_once(&project, item, &fingerprint, png), fingerprint);
-        }
-        if item.item.is_none() {
-            // The whole file: the gallery's image shown, as it is now.
-            let doc = &mut image.gallery.frame_mut().doc;
-            let (width, height) = (doc.image.width, doc.image.height);
-            let composite = doc.composite().to_vec();
-            let fingerprint = protocol::fingerprint(&composite);
-            let png = || files::encode_png(width, height, &composite);
-            return rendered(id, render_once(&project, item, &fingerprint, png), fingerprint);
-        }
+    /// `render`: inside a project a tab's files are filed, and nothing is
+    /// declared as an item, so any item asked for is none of this image's.
+    pub(super) fn render(&mut self, id: String) -> AppMessage {
         not_rendered(id, "That is not an item of this image.")
     }
 
@@ -499,57 +417,6 @@ impl Session {
             cues: Vec::new(),
             error: None,
         }
-    }
-
-    /// The items of each tab's file the host has not been told: its takes,
-    /// the marked images its next rounds send, and its layers written out.
-    /// Only a tab with a file in the project has any.
-    pub(super) fn items_due(&mut self) -> Vec<AppMessage> {
-        if self.project.is_none() {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        for index in 0..self.images.len() {
-            let Some(path) = self.images[index].path.clone().and_then(|path| self.relative(&path)) else {
-                continue;
-            };
-            let now = (path, self.items_of(index));
-            let image = &mut self.images[index];
-            if image.items_sent.as_ref() != Some(&now) {
-                out.push(AppMessage::Items { path: now.0.clone(), items: now.1.clone() });
-                image.items_sent = Some(now);
-            }
-        }
-        out
-    }
-
-    fn items_of(&mut self, index: usize) -> Vec<Item> {
-        let image = &mut self.images[index];
-        let png = || vec![String::from("image/png")];
-        let mut items = image.rounds.items();
-        for (id, fingerprint) in &image.marked {
-            items.push(Item { id: id.clone(), name: NOTES_WORDS.into(), media_types: png(), fingerprint: fingerprint.clone(), made: None });
-        }
-        for (name, node) in image.written_out.clone() {
-            let Some(frame) = image.gallery.frames.iter().find(|frame| frame.name == name) else {
-                continue;
-            };
-            let Some(layer) = frame.doc.image.find(node).map(|found| found.name.clone()) else {
-                continue;
-            };
-            let key = (frame.uid, node);
-            let generation = frame.doc.generation;
-            let print = match image.layer_prints.get(&key) {
-                Some((made, print)) if *made == generation => Some(print.clone()),
-                _ => layer_canvas(&frame.doc, node).ok().map(|(_, canvas)| protocol::fingerprint(&canvas)),
-            };
-            let Some(print) = print else {
-                continue;
-            };
-            image.layer_prints.insert(key, (generation, print.clone()));
-            items.push(Item { id: format!("{LAYER_ITEM}{node} {name}"), name: layer, media_types: png(), fingerprint: print, made: None });
-        }
-        items
     }
 
     /// The person's edit of a draft's prompt on the Prompt page, with its
@@ -644,11 +511,12 @@ impl Session {
         out.push(AppMessage::OpenReport { request: tile.request.clone() });
     }
 
-    /// A run of a tab's cell outside a Skills project, where the host runs
-    /// cells itself: each image it made joins the gallery, linked to its
-    /// file. In a Skills project, rounds come with `takes` instead.
+    /// A run of a tab's cell the host ran itself, as it still does with no
+    /// project open: each image it made joins the gallery, linked to its
+    /// file. In a project the runner runs cells, and rounds come with
+    /// `takes` instead.
     pub(super) fn cell_result(&mut self, cell: &str, output: &[CellPart], out: &mut Vec<AppMessage>) {
-        if self.skills {
+        if self.project.is_some() {
             return;
         }
         let Some(index) = self.images.iter().position(|image| image.gallery.cells.iter().any(|own| own.id == cell)) else {
@@ -680,28 +548,8 @@ impl Session {
     }
 }
 
-/// The answer to `render` for a file inside the project, or why not.
-fn rendered(id: String, path: Result<String, String>, fingerprint: String) -> AppMessage {
-    match path {
-        Ok(path) => AppMessage::Rendered { id, path: Some(path), fingerprint: Some(fingerprint), error: None },
-        Err(reason) => not_rendered(id, &reason),
-    }
-}
-
 fn not_rendered(id: String, error: &str) -> AppMessage {
     AppMessage::Rendered { id, path: None, fingerprint: None, error: Some(error.to_string()) }
-}
-
-/// An item's PNG under its render path, written when it is not there yet,
-/// as a render is never written over. Returns the path, relative to the
-/// project.
-fn render_once(project: &Path, item: &ItemRef, fingerprint: &str, png: impl FnOnce() -> Result<Vec<u8>, String>) -> Result<String, String> {
-    let relative = protocol::render_path(OWNER, item, None, fingerprint, "png");
-    let file = project.join(&relative);
-    if !file.is_file() {
-        files::write_atomic(&file, &png()?)?;
-    }
-    Ok(relative)
 }
 
 /// A layer of pixels, as written out: the image's size, the layer's pixels

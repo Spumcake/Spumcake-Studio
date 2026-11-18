@@ -137,4 +137,26 @@ mod tests {
         assert!(!names_a_checkout(&["/no/such/folder".into()]));
         let _ = std::fs::remove_dir_all(named);
     }
+
+    /// Catches a new project made plain, with folders of its own: laid out
+    /// by the real Spumcake-Skills `request.py init`, it holds what Last
+    /// order holds, and Skills' own check accepts it. Runs where
+    /// SPUMCAKE_SKILLS_SCRIPTS names a checkout's scripts, as check.sh sets.
+    #[test]
+    fn a_new_project_is_laid_out_the_way_last_order_is() {
+        let Some(scripts) = std::env::var_os("SPUMCAKE_SKILLS_SCRIPTS").map(PathBuf::from) else { return };
+        let Some(checkout) = scripts.parent().filter(|checkout| is_checkout(checkout)) else { return };
+        let root = std::env::temp_dir().join(format!("skills-checkout-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let folder = root.join("The Last Signal");
+        let skills = checkout.join("skills").display().to_string();
+        lay_out(&folder, std::slice::from_ref(&skills)).expect("Skills laid the project out");
+        for made in ["agent/index.md", "library", "requests", "prompts", "brief", "pipeline/001/canon.sql"] {
+            assert!(folder.join(made).exists(), "a new project has no {made}");
+        }
+        let checked = std::process::Command::new("python3").arg(scripts.join("request.py")).arg("check").current_dir(&folder).output().unwrap();
+        assert!(checked.status.success(), "request.py check refused the new project: {}", String::from_utf8_lossy(&checked.stderr));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

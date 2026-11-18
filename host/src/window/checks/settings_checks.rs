@@ -28,6 +28,7 @@ impl Window {
             kind: EndpointKind::Openai,
             name: String::from("Local"),
             address: url.to_string(),
+            description: String::new(),
             key: None,
         });
         self.app.settings.endpoints.iter().find(|endpoint| endpoint.name == "Local").expect("added").id.clone()
@@ -70,8 +71,7 @@ fn settings_reach_the_assistants_requests() {
     assert_eq!(sent[1]["reasoning"]["effort"], "high");
 
     let local_id = window.add_local(&local.url);
-    discussion.endpoint = Some(local_id.clone());
-    window.setting(SettingsChoice::SaveSkill(discussion));
+    window.setting(SettingsChoice::ChooseAssistantEndpoint(local_id.clone()));
     window.ask("Third.");
     assert_eq!(stand_in.requests().len(), 2, "a request still went to the old endpoint");
     let sent = local.requests();
@@ -87,7 +87,7 @@ fn settings_reach_the_assistants_requests() {
 /// prompt, its result returns, and Run again stays on that endpoint. The
 /// endpoint's own model list names its models.
 #[test]
-fn a_skill_runs_as_a_cell_on_its_own_endpoint() {
+fn a_skill_runs_as_a_cell_on_the_endpoint_chosen_for_it() {
     let dir = scratch("settings-skill");
     let tool = protocol::tool_key(crate::route::HOST_ID, "skills", "story_notes");
     let stand_in = StandIn::start(vec![call_reply(&tool, json!({"input": "a beat sheet"})), text_reply("Done.")]);
@@ -99,11 +99,13 @@ fn a_skill_runs_as_a_cell_on_its_own_endpoint() {
         id: String::from("story"),
         name: String::from("Story notes"),
         description: String::from("Drafts beat sheets"),
-        endpoint: Some(local_id.clone()),
-        model: Some(String::from("llama3.2")),
+        former_endpoint: None,
+        former_model: None,
         prompt: String::from("You write beat sheets."),
         makes: crate::workspace::Makes::Text,
     }));
+    // The endpoint and model are chosen apart from the skill.
+    window.app.settings.remember_route("story", &local_id, "llama3.2");
     window.ask("Make a beat sheet.");
     window.until(|app| {
         app.chat.conversation.iter().any(|entry| entry.cell.as_ref().is_some_and(|cell| cell.state == CellState::Done))
@@ -176,6 +178,7 @@ fn no_key_is_written_where_studio_keeps_its_files() {
         kind: first.kind,
         name: first.name.clone(),
         address: first.address.clone(),
+        description: first.description.clone(),
         key: Some(String::from("sk-never-in-a-file")),
     });
     window.ask("Anything.");
@@ -407,5 +410,22 @@ fn an_older_cell_counts_as_on_the_level_of_its_model() {
     assert_eq!(stand_in.requests()[before]["reasoning"]["effort"], "medium");
     let ran = window.app.chat.conversation.iter().find_map(|entry| entry.cell.clone()).unwrap();
     assert_eq!(ran.effort.as_deref(), Some("medium"), "the run did not record its effort: {ran:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Catches a skill's "Runs on" and "Model" written into the skill, which
+/// keeps no endpoint, or not kept as its remembered choice.
+#[test]
+fn a_skills_runs_on_and_model_are_kept_apart_from_it() {
+    let dir = scratch("settings-skill-route");
+    let stand_in = StandIn::start(vec![text_reply("Kept.")]);
+    let mut window = project_window(both(), &stand_in, &dir);
+    window.app.settings.add_image_skill();
+    let image = window.app.settings.image_skill().cloned().expect("an image skill");
+    let endpoint = window.app.settings.endpoints[0].id.clone();
+    window.setting(SettingsChoice::ChooseSkillRoute { skill: image.id.clone(), endpoint: endpoint.clone(), model: String::from("stand-in/image") });
+    let route = window.app.settings.skill_routes.get(&image.id).cloned().expect("no remembered choice");
+    assert_eq!((route.endpoint.as_str(), route.model.as_str()), (endpoint.as_str(), "stand-in/image"));
+    assert_eq!(window.app.settings.skill(&image.id), Some(&image), "the skill itself changed");
     let _ = std::fs::remove_dir_all(dir);
 }

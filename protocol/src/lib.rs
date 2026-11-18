@@ -280,7 +280,7 @@ pub enum AppMessage {
         file: String,
     },
     /// Asks the host to read the project's canon with `pipeline.py sql
-    /// <living pipeline> <query> --read-only`, in a Skills project. The
+    /// <living pipeline> <query> --read-only`. The
     /// answer is `canon_rows`, under the same `id`.
     ReadCanon {
         id: String,
@@ -307,6 +307,30 @@ pub enum AppMessage {
         skill: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifact: Option<String>,
+        /// The step's endpoint, as `pipeline.py step --endpoint` takes it,
+        /// such as `{"kind": "script", "outputs": [".build/animatic.mp4"]}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
+    /// Asks the host to record a canon element, `pipeline.py element
+    /// <name> --kind <kind>`, such as the film a new project's animatic
+    /// belongs to. The answer is `canon_edited`.
+    EditElement {
+        id: String,
+        tab: String,
+        name: String,
+        #[serde(default)]
+        kind: String,
+    },
+    /// Asks the host to record a chain that does not exist yet, `pipeline.py
+    /// chain <n> <chain> --order <order>`; a chain that exists is never
+    /// asked for, since this replaces its order. The answer is
+    /// `canon_edited`.
+    EditChain {
+        id: String,
+        tab: String,
+        chain: String,
+        order: u32,
     },
     /// Asks the host's runner to run a chain step again, as a take, on the
     /// user's yes on the plan card. The answer is `step_ran`.
@@ -477,8 +501,9 @@ pub enum HostMessage {
     /// Make sure that tab's file is written. The answer is `kept`.
     Keep { tab: String },
     /// The project's folder, as an absolute path. New activities are created
-    /// in it, and paths outside it are refused. `skills` says it is a Skills
-    /// project, whose requests run through Spumcake-Skills' scripts.
+    /// in it, and paths outside it are refused. Every project is organized
+    /// the way Last order is, so `skills` is always true; nothing should
+    /// read it, and it is removed once no workspace does.
     Project {
         folder: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -586,7 +611,7 @@ pub enum HostMessage {
         media_type: Option<String>,
     },
     /// Every round that cell has made, oldest first, replacing those sent
-    /// before. In a Skills project it takes the place of `cell_result`.
+    /// before. In a project it takes the place of `cell_result`.
     Takes { cell: ItemRef, rounds: Vec<Round> },
     /// Asks a workspace whose `edits` covers `media_type` for a small image
     /// of that file, such as a video or sound reference's. The answer is
@@ -672,6 +697,12 @@ pub enum HostMessage {
         id: String,
         #[serde(default)]
         file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `edit_element` and `edit_chain`: recorded, or why not.
+    CanonEdited {
+        id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -910,6 +941,8 @@ impl Declaration {
             | AppMessage::Revert { .. }
             | AppMessage::ReadCanon { .. }
             | AppMessage::EditStep { .. }
+            | AppMessage::EditElement { .. }
+            | AppMessage::EditChain { .. }
             | AppMessage::RunStep { .. }
             | AppMessage::RunSkillScript { .. }
             | AppMessage::OpenIn { .. }
@@ -1947,6 +1980,7 @@ mod tests {
             order: None,
             skill: None,
             artifact: None,
+            endpoint: None,
         });
         round_trip_app(AppMessage::EditStep {
             id: "e2".into(),
@@ -1957,7 +1991,11 @@ mod tests {
             order: Some(1),
             skill: Some("build-animatic".into()),
             artifact: Some("The Last Signal: animatic".into()),
+            endpoint: Some(r#"{"kind": "script", "outputs": [".build/animatic.mp4"]}"#.into()),
         });
+        round_trip_app(AppMessage::EditElement { id: "c1".into(), tab: "1".into(), name: "The Last Signal".into(), kind: "film".into() });
+        round_trip_app(AppMessage::EditChain { id: "c2".into(), tab: "1".into(), chain: "the animatic".into(), order: 7 });
+        round_trip_host(HostMessage::CanonEdited { id: "c1".into(), error: None });
         round_trip_app(AppMessage::RunStep { id: "s1".into(), tab: "1".into(), step: animatic.clone() });
         round_trip_app(AppMessage::RunSkillScript {
             id: "w1".into(),
@@ -2002,7 +2040,7 @@ mod tests {
         assert_eq!(parse_app_message(r#"{"type":"read_canon","id":"r1"}"#).unwrap(), AppMessage::ReadCanon { id: "r1".into(), query: String::new() });
         assert_eq!(
             parse_app_message(r#"{"type":"edit_step","id":"e1","tab":"1","step":{"chain":"Last order","step":"the animatic"}}"#).unwrap(),
-            AppMessage::EditStep { id: "e1".into(), tab: "1".into(), step: animatic, script: None, refs: None, order: None, skill: None, artifact: None }
+            AppMessage::EditStep { id: "e1".into(), tab: "1".into(), step: animatic, script: None, refs: None, order: None, skill: None, artifact: None, endpoint: None }
         );
         let off: MenuEntry = serde_json::from_str(r#"{"label":"The animatic's frame at the playhead","enabled":false,"tip":"Add the shot's animatic as a Motion reference first."}"#).unwrap();
         assert_eq!(off.tip.as_deref(), Some("Add the shot's animatic as a Motion reference first."));

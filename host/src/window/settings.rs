@@ -117,11 +117,7 @@ impl HostWindow {
         }
         // The image skill's models too, so an Image cell names its model.
         if self.native_dialogs
-            && let Some(endpoint) = self
-                .settings
-                .image_skill()
-                .and_then(|skill| skill.endpoint.clone())
-                .and_then(|id| self.settings.endpoint(&id).cloned())
+            && let Some((endpoint, _)) = self.settings.image_skill().and_then(|skill| self.settings.skill_route(skill))
         {
             let key = self.keys.get(&endpoint.id);
             self.probes.image_models(&self.ctx, &endpoint, key);
@@ -202,9 +198,9 @@ impl HostWindow {
             SettingsChoice::RemoveSkillFolder(folder) => {
                 self.settings.update(|settings| settings.skill_folders.retain(|known| *known != folder));
             }
-            SettingsChoice::SaveEndpoint { id, kind, name, address, key } => {
+            SettingsChoice::SaveEndpoint { id, kind, name, address, description, key } => {
                 let id = id.unwrap_or_else(protocol::cell_id);
-                let endpoint = EndpointSetting { id: id.clone(), name, kind, address };
+                let endpoint = EndpointSetting { id: id.clone(), name, kind, address, description };
                 self.settings.update(|settings| {
                     match settings.endpoints.iter_mut().find(|known| known.id == endpoint.id) {
                         Some(known) => *known = endpoint,
@@ -220,31 +216,30 @@ impl HostWindow {
             }
             SettingsChoice::DeleteEndpoint(id) => {
                 self.settings.update(|settings| settings.endpoints.retain(|endpoint| endpoint.id != id));
+                self.settings.forget_routes_on(&id);
                 self.keys.delete(&id);
                 self.probes.forget(&id);
             }
             SettingsChoice::SaveSkill(skill) => {
-                self.settings.update(|settings| {
-                    let mut moved = None::<String>;
-                    match settings.skills.iter_mut().find(|known| known.id == skill.id) {
-                        Some(known) => {
-                            // Discussion keeps its name: it is built in.
-                            let name = if skill.id == DISCUSSION { known.name.clone() } else { skill.name.clone() };
-                            if skill.id == DISCUSSION && known.endpoint != skill.endpoint {
-                                moved = skill.endpoint.clone();
-                            }
-                            *known = skill;
-                            known.name = name;
-                        }
-                        None => settings.skills.push(skill),
+                self.settings.update(|settings| match settings.skills.iter_mut().find(|known| known.id == skill.id) {
+                    Some(known) => {
+                        // Discussion keeps its name: it is built in.
+                        let name = if skill.id == DISCUSSION { known.name.clone() } else { skill.name.clone() };
+                        *known = skill;
+                        known.name = name;
                     }
-                    // Discussion's endpoint is where the replies come from:
-                    // every level follows it, as the owner set on
-                    // 2026-10-29. A model it does not list shows a warning.
-                    if let Some(new) = moved {
-                        for level in &mut settings.levels {
-                            level.endpoint = new.clone();
-                        }
+                    None => settings.skills.push(skill),
+                });
+            }
+            SettingsChoice::ChooseSkillRoute { skill, endpoint, model } => self.settings.remember_route(&skill, &endpoint, &model),
+            SettingsChoice::ChooseAssistantEndpoint(endpoint) => {
+                // The assistant's endpoint is where the replies come from:
+                // every level follows it, as the owner set on 2026-10-29. A
+                // model it does not list shows a warning.
+                self.settings.update(|settings| {
+                    settings.assistant_endpoint = Some(endpoint.clone());
+                    for level in &mut settings.levels {
+                        level.endpoint = endpoint.clone();
                     }
                 });
             }
@@ -313,6 +308,13 @@ impl HostWindow {
             return;
         };
         let effort = level.effort.map(|effort| effort.word().to_string());
+        // A text skill's cell remembers the choice for the skill; a level
+        // is a chat model, which an image skill does not run on.
+        if let Some(skill) = self.cell_skills.get(id).cloned()
+            && self.settings.skill(&skill).is_some_and(|known| known.makes == crate::workspace::Makes::Text)
+        {
+            self.settings.remember_route(&skill, &endpoint, &level.model);
+        }
         if let Some(cell) = self
             .chat
             .conversation
@@ -448,8 +450,11 @@ impl HostWindow {
         endpoints::skill_route(&self.settings, &skill, |id| keys.get(id))
     }
 
-    /// Keeps a run's image in the project's `images` folder, one file per
-    /// run, and names it relative to the project. With no project, as in a
+    /// Keeps a run's image in the project's `work/images/`, among the
+    /// workspaces' files, committed with the project, one file per run, named
+    /// relative to the project. Studio adds no folder of its own at the
+    /// project's top for them. An older project's images, named `images/…`,
+    /// are read where they are and never moved. With no project, as in a
     /// frame test with none, it goes to a scratch folder.
     pub(super) fn keep_image(&mut self, index: usize, png: Vec<u8>) {
         let Some(id) = self.board.runs.get(index).map(|run| run.id.clone()) else {
@@ -458,7 +463,7 @@ impl HostWindow {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.as_millis());
         let name = format!("{id}-{stamp}.png");
         let (folder, named) = match &self.project {
-            Some(project) => (project.folder.join("images"), format!("images/{name}")),
+            Some(project) => (project.folder.join("work").join("images"), format!("work/images/{name}")),
             None => {
                 let folder = std::env::temp_dir().join("inpainter-images");
                 (folder.clone(), folder.join(&name).display().to_string())

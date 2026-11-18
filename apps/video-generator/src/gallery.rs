@@ -10,7 +10,7 @@
 
 use layers::link::Link;
 use layers::notes::Notes;
-use protocol::{Cell, CellState, StepRef};
+use protocol::{Cell, CellPart, CellState, StepRef};
 use std::path::PathBuf;
 
 /// One take of a gallery: a frame of its filmstrip.
@@ -309,6 +309,39 @@ impl Gallery {
         let shown = self.shown;
         self.commit(Change::Cells { before, after }, shown);
         true
+    }
+
+    /// A file filed for a draft arrived: `part` joins the draft `id`, in
+    /// place of any part with its role, now and in every step of the
+    /// history whose copy of the draft is still `made`, so the step that
+    /// made the draft has it. No step of its own. Returns whether the
+    /// draft was found.
+    pub fn amend_draft(&mut self, id: &str, made: &[CellPart], part: CellPart) -> bool {
+        let role = |own: &CellPart| match own {
+            CellPart::Path { role, .. } | CellPart::Item { role, .. } => role.clone(),
+            _ => None,
+        };
+        let wanted = role(&part);
+        let amend = |cell: &mut Cell| {
+            cell.input.retain(|own| wanted.is_none() || role(own) != wanted);
+            cell.input.push(part.clone());
+        };
+        let mut found = false;
+        for cell in self.cells.iter_mut().filter(|cell| cell.id == id && cell.step.is_none()) {
+            amend(cell);
+            found = true;
+        }
+        for kept in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if let Change::Cells { before, after } = &mut kept.change {
+                for cell in before.0.iter_mut().chain(after.0.iter_mut()).filter(|cell| cell.id == id && cell.step.is_none() && cell.input == made) {
+                    amend(cell);
+                }
+            }
+        }
+        if found {
+            self.edits += 1;
+        }
+        found
     }
 
     /// The draft cell `id` is now that chain step: it keeps only the
