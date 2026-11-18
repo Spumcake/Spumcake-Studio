@@ -75,6 +75,8 @@ pub(crate) enum SettingsChoice {
     SaveSkill(SkillSetting),
     /// The assistant's endpoint, beside the Discussion skill, by id.
     ChooseAssistantEndpoint(String),
+    /// A skill's remembered endpoint and model, kept apart from the skill.
+    ChooseSkillRoute { skill: String, endpoint: String, model: String },
     DeleteSkill(String),
     /// Skill folders' Add folder…: choose a folder the assistant finds
     /// agent skills in.
@@ -129,6 +131,9 @@ const ENDPOINT_DESCRIPTION_LINE: &str = "What it is for, which the assistant rea
 /// A skill's page's line, now that a skill's cell chooses its endpoint and
 /// model, as the owner approved on 2026-11-17.
 const SKILL_PAGE_LINE: &str = "Runs its prompt in the conversation when the assistant calls it. Its cell chooses the endpoint and model.";
+/// A skill's page's row for the endpoint its cells run on, kept apart from
+/// the skill, as the Studio session manager set on 2026-11-17.
+const RUNS_ON: &str = "Runs on";
 
 /// The level form, as it is being filled in.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1212,7 +1217,7 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
     } else {
         header(ui, panel, &skill.name, SKILL_PAGE_LINE, None);
     }
-    let rows = card(ui, if built_in { 1 } else { 3 });
+    let rows = card(ui, if built_in { 1 } else { 5 });
     if !built_in {
         let name_rect = control(rows[0], CONTROL_W, 0.0);
         row_text(ui, rows[0], rows[0].left() + PAD, name_rect.left() - 8.0, "Name", "The tool's name, as the assistant sees it");
@@ -1240,6 +1245,41 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
         let shown = chosen.map_or("Text", |index| labels[index].as_str()).to_string();
         if let Some(picked) = select(ui, makes_rect, &format!("skill-makes-{id}"), &shown, &labels, chosen) {
             skill.makes = kinds[picked];
+        }
+        // Where its cells run, the skill's remembered choice, kept apart
+        // from the skill; a cell's menu changes it too.
+        let route = settings.skill_route(&skill);
+        let endpoint_rect = control(rows[3], CONTROL_W, 0.0);
+        row_text(ui, rows[3], rows[3].left() + PAD, endpoint_rect.left() - 8.0, RUNS_ON, "Where its cells send their prompts");
+        let current = route.as_ref().map(|(endpoint, _)| endpoint.id.clone());
+        let (names, ids, chosen) = endpoint_options(settings, current.as_deref(), true);
+        let shown = chosen.map_or("No endpoint", |index| names[index].as_str()).to_string();
+        let model_now = route.as_ref().map(|(_, model)| model.clone()).unwrap_or_default();
+        if let Some(picked) = select(ui, endpoint_rect, &format!("skill-route-endpoint-{id}"), &shown, &names, chosen) {
+            choices.push(SettingsChoice::ChooseSkillRoute { skill: skill.id.clone(), endpoint: ids[picked].clone(), model: model_now.clone() });
+        }
+        let model_rect = control(rows[4], CONTROL_W, 0.0);
+        let endpoint = route.as_ref().map(|(endpoint, _)| endpoint.clone());
+        let line = match &endpoint {
+            Some(endpoint) if skill.makes == Makes::Images && endpoint.kind != EndpointKind::Openrouter => "Images are made only through OpenRouter for now",
+            _ if skill.makes == Makes::Images => "From the endpoint's image models",
+            _ => "From the endpoint's models",
+        };
+        let name = endpoint.as_ref().map_or("the endpoint", |endpoint| endpoint.name.as_str());
+        let missing = panel.unlisted.skills.contains(&skill.id).then_some(name);
+        model_row(ui, rows[4], model_rect.left() - 8.0, line, missing);
+        let known = env.probes.known_models();
+        let models = match &endpoint {
+            Some(endpoint) => {
+                let key = env.keys.get(&endpoint.id);
+                env.probes.models_for(ui.ctx(), endpoint, key, skill.makes).cloned()
+            }
+            None => None,
+        };
+        if let Some(endpoint) = &endpoint
+            && let Some(model) = model_select(ui, model_rect, &format!("skill-route-model-{id}"), &model_now, &known, models.as_ref(), &mut panel.model_search)
+        {
+            choices.push(SettingsChoice::ChooseSkillRoute { skill: skill.id.clone(), endpoint: endpoint.id.clone(), model });
         }
     }
     gap(ui, 22.0);

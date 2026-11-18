@@ -231,6 +231,7 @@ impl HostWindow {
                     None => settings.skills.push(skill),
                 });
             }
+            SettingsChoice::ChooseSkillRoute { skill, endpoint, model } => self.settings.remember_route(&skill, &endpoint, &model),
             SettingsChoice::ChooseAssistantEndpoint(endpoint) => {
                 // The assistant's endpoint is where the replies come from:
                 // every level follows it, as the owner set on 2026-10-29. A

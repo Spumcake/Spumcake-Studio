@@ -172,6 +172,12 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
         .into_iter()
         .map(|(name, skill)| {
             let described = if skill.description.trim().is_empty() { skill.name.clone() } else { format!("{}: {}", skill.name, skill.description) };
+            // Where it runs now, so the assistant can keep it there or name
+            // another endpoint and model.
+            let described = match settings.skill_route(&skill) {
+                Some((endpoint, model)) => format!("{described}. Runs on {} with {model} unless you name another endpoint and model", endpoint.name),
+                None => described,
+            };
             // An image skill makes one image from a prompt, shown as an
             // Image cell; the assistant writes the whole description.
             let (description, input) = match skill.makes {
@@ -222,7 +228,7 @@ const ON_MODEL: &str = "With endpoint, the model to run on: one its list gives."
 /// Every endpoint as the assistant is told of it, so it can pair a skill
 /// with one: its name, its kind, the user's description, and the models its
 /// list gives when they are known. Never a key, and never an address.
-fn endpoints_seen(settings: &Settings, listed: &std::collections::HashMap<String, Vec<String>>) -> String {
+fn endpoints_seen(settings: &Settings, listed: &crate::endpoints::Listed) -> String {
     if settings.endpoints.is_empty() {
         return String::new();
     }
@@ -232,21 +238,27 @@ fn endpoints_seen(settings: &Settings, listed: &std::collections::HashMap<String
         if !endpoint.description.trim().is_empty() {
             seen.push_str(&format!(": {}", endpoint.description.trim()));
         }
-        if let Some(models) = listed.get(&endpoint.id).filter(|models| !models.is_empty()) {
+        if let Some((chat, images)) = listed.get(&endpoint.id) {
             const MOST: usize = 40;
-            let shown: Vec<&str> = models.iter().take(MOST).map(String::as_str).collect();
-            let more = if models.len() > MOST { format!(", and {} more", models.len() - MOST) } else { String::new() };
-            seen.push_str(&format!(". Models: {}{more}", shown.join(", ")));
+            for (what, models) in [("Chat models", chat), ("Image models", images)] {
+                if models.is_empty() {
+                    continue;
+                }
+                let shown: Vec<&str> = models.iter().take(MOST).map(String::as_str).collect();
+                let more = if models.len() > MOST { format!(", and {} more", models.len() - MOST) } else { String::new() };
+                seen.push_str(&format!(". {what}: {}{more}", shown.join(", ")));
+            }
         }
     }
     seen
 }
 
-/// The host's tools. In a project, every generation runs through
-/// `request.py`, so the host offers none of the tools that generate
-/// directly, its prompt tools and the person's skills, and offers the
-/// project tools and Spumcake-Skills' skills instead.
-fn host_target(settings: &Settings, project: Option<&Path>, listed: &std::collections::HashMap<String, Vec<String>>) -> Target {
+/// The host's tools: in a project, the project tools and Spumcake-Skills'
+/// skills, through which the project's work runs on `request.py`; and in
+/// every project, the conversation's own prompt tools and the user's
+/// skills, which make cells in the conversation, with the endpoints the
+/// user has set up.
+fn host_target(settings: &Settings, project: Option<&Path>, listed: &crate::endpoints::Listed) -> Target {
     // The conversation's own prompt tools and the user's skills are offered
     // in every project, as the owner set on 2026-11-17, beside the project's
     // tools.
@@ -269,7 +281,7 @@ fn host_target(settings: &Settings, project: Option<&Path>, listed: &std::collec
 
 /// Every running sub-application, and the host's own tools, as a request
 /// offers them, for the project open in `project`.
-pub(crate) fn targets(apps: &[Started], settings: &Settings, project: Option<&Path>, listed: &std::collections::HashMap<String, Vec<String>>) -> Vec<Target> {
+pub(crate) fn targets(apps: &[Started], settings: &Settings, project: Option<&Path>, listed: &crate::endpoints::Listed) -> Vec<Target> {
     let mut offered: Vec<Target> = apps
         .iter()
         .filter(|started| !started.running.exited() && !started.running.pending())
@@ -416,7 +428,7 @@ impl Routing {
 
     /// The running sub-applications, when they changed since the assistant
     /// was last told.
-    pub(crate) fn changed_targets(&mut self, apps: &[Started], settings: &Settings, project: Option<&Path>, listed: &std::collections::HashMap<String, Vec<String>>) -> Option<Vec<Target>> {
+    pub(crate) fn changed_targets(&mut self, apps: &[Started], settings: &Settings, project: Option<&Path>, listed: &crate::endpoints::Listed) -> Option<Vec<Target>> {
         let now = targets(apps, settings, project, listed);
         if self.offered.as_ref() == Some(&now) {
             return None;
@@ -480,9 +492,9 @@ mod tests {
         let mut settings = Settings::default();
         let id = settings.first_start("https://stand-in/v1?key=secret").unwrap();
         settings.endpoints[0].description = String::from("Fast image drafts");
-        let listed: std::collections::HashMap<String, Vec<String>> = [(id, vec![String::from("openai/gpt-image-2.5-sunburst")])].into_iter().collect();
+        let listed: crate::endpoints::Listed = [(id, (vec![String::from("anthropic/claude-haiku-5.5")], vec![String::from("openai/gpt-image-2.5-sunburst")]))].into_iter().collect();
         let seen = endpoints_seen(&settings, &listed);
-        assert!(seen.contains("OpenRouter (OpenRouter): Fast image drafts. Models: openai/gpt-image-2.5-sunburst"), "{seen}");
+        assert!(seen.contains("OpenRouter (OpenRouter): Fast image drafts. Chat models: anthropic/claude-haiku-5.5. Image models: openai/gpt-image-2.5-sunburst"), "{seen}");
         assert!(!seen.contains("stand-in") && !seen.contains("secret"), "an address reached the assistant: {seen}");
     }
 }

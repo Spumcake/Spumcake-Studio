@@ -189,6 +189,9 @@ fn ask<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + Send +
 
 pub(crate) type Models = Result<Vec<assistant::Model>, String>;
 
+/// Each endpoint's chat models and image models as last read, by id.
+pub(crate) type Listed = HashMap<String, (Vec<String>, Vec<String>)>;
+
 /// Statuses and model lists, by endpoint id, asked once until forgotten.
 #[derive(Default)]
 pub(crate) struct Probes {
@@ -272,15 +275,18 @@ impl Probes {
         known
     }
 
-    /// Each endpoint's model ids already read, chat and image lists
-    /// together, by endpoint id: what the assistant is told an endpoint
+    /// Each endpoint's model ids already read, by endpoint id, chat models
+    /// apart from image models: what the assistant is told an endpoint
     /// offers. An endpoint not asked yet has none.
-    pub(crate) fn listed_by_endpoint(&mut self) -> HashMap<String, Vec<String>> {
-        let mut listed: HashMap<String, Vec<String>> = HashMap::new();
+    pub(crate) fn listed_by_endpoint(&mut self) -> Listed {
+        let mut listed = Listed::new();
         for (key, asked) in self.models.iter_mut() {
             if let Some(Ok(list)) = asked.poll() {
-                let endpoint = key.strip_suffix("#images").unwrap_or(key).to_string();
-                listed.entry(endpoint).or_default().extend(list.iter().map(|model| model.id.clone()));
+                let ids = list.iter().map(|model| model.id.clone());
+                match key.strip_suffix("#images") {
+                    Some(endpoint) => listed.entry(endpoint.to_string()).or_default().1.extend(ids),
+                    None => listed.entry(key.clone()).or_default().0.extend(ids),
+                }
             }
         }
         listed

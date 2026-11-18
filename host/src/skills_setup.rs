@@ -170,7 +170,7 @@ pub(crate) fn tool_group(folder: &Path, skills: &[Skill]) -> ToolGroup {
     let mut instructions = format!(
         "This project, {}, is organized as Spumcake-Skills' docs/projects.md describes: its folders and file names say what it holds. \
 For the project's work, request.py is the one renderer: every step, every chain, and anything a skill makes calls a model only through it and the plan card, never through an execution skill or a command. \
-The conversation's own tools, such as run_text_prompt, edit_image, and the user's skills, make cells in this conversation only, outside the project's chains: use them when the user asks for something here in the conversation, and never for a step or for anything a skill makes. \
+The conversation's own tools, such as run_text_prompt, edit_image, and the user's skills, make cells in this conversation only, outside the project's chains: use them when the user asks for something here in the conversation, and never for a step or for anything a Spumcake-Skills skill makes. \
 Read a skill with read_skill before following it, and read what it links to with read_file, relative to the skill's folder or its repository. \
 Read the project with list_files and read_file, and look at every image you judge with look_at_file. \
 Write by hand only a page of brief/, or a new file in the agent's folder with its line in its index; every other folder is written by the skills' own scripts. \

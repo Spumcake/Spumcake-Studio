@@ -1179,13 +1179,6 @@ impl HostWindow {
             }
             None => (text("prompt"), self.level_route(), false),
         };
-        if let Some(skill) = &skill_of
-            && let Ok(route) = &run_on
-        {
-            // The endpoint and model a skill's cell runs on are remembered
-            // for the skill, as its cell's menu or the assistant chose them.
-            self.settings.remember_route(skill, &route.endpoint, &route.model);
-        }
         let mut cell = protocol::Cell::text(protocol::cell_id(), &prompt);
         if image {
             cell.kind = protocol::IMAGE_KIND.to_string();
@@ -1229,6 +1222,12 @@ impl HostWindow {
         let model = model.trim();
         if model.is_empty() {
             return Some(Err(format!("Name the model to run on “{}” too.", found.name)));
+        }
+        // A model the endpoint's list does not give, when the list is known.
+        let listed = self.probes.listed_by_endpoint();
+        let known = listed.get(&found.id).map(|(chat, images)| if skill.makes == workspace::Makes::Images { images.clone() } else { chat.clone() }).unwrap_or_default();
+        if !known.is_empty() && !known.iter().any(|id| id == model) {
+            return Some(Err(format!("“{}” does not list {model}. Use one of its models.", found.name)));
         }
         let key = self.keys.get(&found.id);
         Some(Ok(crate::endpoints::Route::new(&found, key, model, None)))
