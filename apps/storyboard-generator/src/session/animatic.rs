@@ -475,6 +475,8 @@ mod tests {
     #[test]
     fn holds_are_published_and_sounds_are_filed_into_the_project() {
         let (mut session, _) = opened("skills");
+        // The project's film, as its canon names it.
+        session.film_element = Some("Last order".to_string());
         let dir = session.project().unwrap().to_path_buf();
         // A take already in the project is placed where it is.
         let take = session.import_sound(&dir.join("library/2026-11-12_20-03-otis-line-1.wav"), None, Some(0)).unwrap();
@@ -838,6 +840,10 @@ mod tests {
         // No film element yet, and no chain for the animatic.
         session.chain_orders = Some(crate::session::project::ChainOrders { chain_there: false, last_step: 0, last_chain: 4 });
         session.film_element = None;
+        session.steps_read = true;
+        // Not until the film's read is answered.
+        assert_eq!(session.save_timing().unwrap_err(), "The project's animatic step is not known yet.");
+        session.film_read = true;
         let film = session.film_name();
         session.save_timing().unwrap();
         let Some(protocol::AppMessage::RunSkillScript { id, script, .. }) = session.take_outgoing().pop() else {

@@ -187,8 +187,8 @@ fn kept_for(folder: &std::path::Path, key: &(String, String)) -> Option<std::pat
             })
         })
         .collect();
-    // The same every time, when more than one was kept.
-    found.sort();
+    // The one kept last, when more than one was.
+    found.sort_by_key(|path| std::cmp::Reverse(std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()));
     found.into_iter().next()
 }
 
@@ -249,6 +249,9 @@ impl Session {
         if self.project.is_none() {
             return;
         }
+        self.film_read = false;
+        self.steps_read = false;
+        self.chain_orders = None;
         self.ask_canon(ARTIFACTS, Asked::Artifacts);
         self.ask_canon(FILM, Asked::Film);
         self.ask_canon(ORDERS, Asked::Orders);
@@ -294,6 +297,7 @@ impl Session {
                 // With several, the first by name; Skills asks which, and
                 // Studio has one film to a project.
                 self.film_element = rows.iter().filter_map(row_text).map(|name| name.trim().to_string()).find(|name| !name.is_empty());
+                self.film_read = true;
             }
             Asked::Orders => {
                 let text = rows.iter().filter_map(row_text).next().unwrap_or_default();
@@ -314,6 +318,7 @@ impl Session {
                 for step in &steps {
                     self.steps.insert(step.key(), step.clone());
                 }
+                self.steps_read = true;
                 // No animatic yet: the blank storyboard is the one whose
                 // save makes it.
                 let Some(step) = steps.first().cloned() else {
@@ -460,7 +465,10 @@ impl Session {
         if self.saving.is_some() {
             return Err("The timing is already being saved.".to_string());
         }
-        let orders = self.chain_orders.ok_or("The project's animatic step is not known yet.")?;
+        // Only once the project's film, its chains, and its animatic steps
+        // are all read, whatever order the host answered in, so a step or
+        // an element already there is never recorded over.
+        let orders = self.chain_orders.filter(|_| self.film_read && self.steps_read).ok_or("The project's animatic step is not known yet.")?;
         let (assembly, notes) = self.timing(None)?;
         let files = self.canon_files.clone();
         let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned())?;

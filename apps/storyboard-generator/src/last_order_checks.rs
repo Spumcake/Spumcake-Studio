@@ -110,9 +110,14 @@ impl Copy {
         let quoted = artifact.replace('\'', "''");
         let chain = self.pipeline(&["sql", &format!("SELECT chain FROM step WHERE artifact = '{quoted}'"), "--read-only"])?;
         let refs = self.pipeline(&["sql", &format!("SELECT refs FROM step WHERE artifact = '{quoted}'"), "--read-only"])?;
-        let refs: Vec<Value> = serde_json::from_str(refs.trim()).map_err(|error| error.to_string())?;
+        // A file no step makes, such as a filed sound, has no chain and
+        // nothing it was made from.
+        let refs: Vec<Value> = serde_json::from_str(refs.trim()).unwrap_or_default();
         let chain = chain.trim().to_string();
-        let mut args = vec!["publish", artifact, "--file", take, "--chain", chain.as_str()];
+        let mut args = vec!["publish", artifact, "--file", take];
+        if !chain.is_empty() {
+            args.extend(["--chain", chain.as_str()]);
+        }
         let mut seen: Vec<&str> = Vec::new();
         for reference in &refs {
             let (Some(name), Some(role)) = (reference["artifact"].as_str(), reference["role"].as_str()) else { continue };
@@ -157,16 +162,21 @@ impl Copy {
                         Err(error) => HostMessage::SkillScriptRan { id: id.clone(), output: String::new(), error: Some(error) },
                     })
                 }
-                AppMessage::EditStep { id, step, script, refs, .. } => {
+                AppMessage::EditStep { id, step, script, refs, order, skill, artifact, endpoint, .. } => {
+                    // As the host records it: the agent's checkout falls back
+                    // to the one Studio found.
+                    let script = script.as_ref().map(|script| script.replace("${SPUMCAKE_AGENT}", &format!("${{SPUMCAKE_AGENT:-{}}}", self.skills.display())));
+                    let order = order.map(|order| order.to_string());
                     let mut args = vec!["step", step.chain.as_str(), step.step.as_str()];
-                    if let Some(script) = script {
-                        args.extend(["--script", script.as_str()]);
-                    }
-                    if let Some(refs) = refs {
-                        args.extend(["--refs", refs.as_str()]);
+                    for (flag, value) in [("--script", &script), ("--refs", refs), ("--order", &order), ("--skill", skill), ("--artifact", artifact), ("--endpoint", endpoint)] {
+                        if let Some(value) = value {
+                            args.extend([flag, value.as_str()]);
+                        }
                     }
                     Some(HostMessage::StepEdited { id: id.clone(), error: self.pipeline(&args).err() })
                 }
+                AppMessage::EditElement { id, name, kind, .. } => Some(HostMessage::CanonEdited { id: id.clone(), error: self.pipeline(&["element", name, "--kind", kind]).err() }),
+                AppMessage::EditChain { id, chain, order, .. } => Some(HostMessage::CanonEdited { id: id.clone(), error: self.pipeline(&["chain", chain, "--order", &order.to_string()]).err() }),
                 AppMessage::FileResource { path, from, id: Some(id), .. } => Some(match self.file(path, from) {
                     Ok(file) => HostMessage::Filed { id: id.clone(), file, error: None },
                     Err(error) => HostMessage::Filed { id: id.clone(), file: String::new(), error: Some(error) },
@@ -207,7 +217,7 @@ fn copy_or_skip() -> Option<Copy> {
 #[test]
 fn last_order_on_a_test_copy() {
     let Some(copy) = copy_or_skip() else { return };
-    let checks: [(&str, fn(&Copy)); 9] = [
+    let checks: [(&str, fn(&Copy)); 10] = [
         ("opens and saves back unchanged", opens_from_its_step_and_saves_back_unchanged),
         ("the step decides, not the newest file", the_step_decides_not_the_newest_file),
         ("Studio's retime is what build-animatic assembles", studios_retime_is_what_build_animatic_assembles),
@@ -217,6 +227,7 @@ fn last_order_on_a_test_copy() {
         ("drawing reaches the animatic through canon", drawing_reaches_the_animatic_through_canon),
         ("import and export through the project", import_and_export_through_the_project),
         ("playback is what the step's take is", playback_is_the_take),
+        ("a first save records the animatic's step", a_first_save_records_the_animatic_step),
     ];
     for (name, check) in checks {
         copy.reset();
@@ -569,6 +580,9 @@ fn import_and_export_through_the_project(copy: &Copy) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let placed = placed.expect("the sound was not placed");
+    // Offered as canon, and published on the card's yes, under the film.
+    let published = copy.pipeline(&["sql", &format!("SELECT id FROM artifact WHERE file = '{placed}'"), "--read-only"]).unwrap();
+    assert!(published.trim().starts_with("Last order: storyboard-outside-sound-") && published.trim().ends_with(", sound"), "{published}");
     assert!(placed.starts_with("prompts/resources/"), "{placed}");
     assert!(!copy.project.join("sounds").exists() && !copy.project.join("exports").exists());
     assert!(!copy.project.join("work").join(outside.file_name().unwrap()).exists(), "the copy in work/ was kept");
@@ -662,4 +676,60 @@ fn playback_is_the_take(copy: &Copy) {
     let bed: Vec<media::Track> = tracks.iter().take(1).cloned().collect();
     let quiet = loudness(&media::mix(&bed, 0, length as u32, rate, (24, 1)), rate, length);
     assert!(quiet.iter().zip(&made).any(|(quiet, made)| (quiet - made).abs() > 1.0), "the sound comparison cannot tell the voice is missing");
+}
+
+/// Check of a new film's first save: with Last order's animatic step, its
+/// chain, and its film element gone, a storyboard made of its keyframes and
+/// its bed, saved, records the film after the project, the chain after the
+/// last one, and the step, as `build-animatic` records them, and Skills
+/// alone then assembles it.
+fn a_first_save_records_the_animatic_step(copy: &Copy) {
+    copy.pipeline(&["sql", "DELETE FROM step WHERE chain = 'the animatic' AND name = 'animatic'"]).unwrap();
+    copy.pipeline(&["sql", "DELETE FROM chain WHERE name = 'the animatic'"]).unwrap();
+    copy.pipeline(&["sql", "DELETE FROM element WHERE kind = 'film'"]).unwrap();
+    let last_chain: u32 = copy.pipeline(&["sql", "SELECT coalesce(max(ord), 0) FROM chain", "--read-only"]).unwrap().trim().parse().unwrap();
+    let project = copy.project.file_name().unwrap().to_string_lossy().into_owned();
+    let assembly = last_orders_assembly(copy);
+    let mut server = Server::new(None);
+    let tab = shown_tab(&server.greeting()).unwrap_or_else(|| "1".to_string());
+    let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string(), skills: true }).unwrap();
+    let seen = copy.host(&mut server, replies);
+    let tab = shown_tab(&seen).unwrap_or(tab);
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    assert!(film["project_animatic"].is_null(), "an animatic was shown: {}", film["project_animatic"]);
+    // The film's four shots, each its keyframe, and its bed.
+    for frame in &assembly.frames {
+        let start = crate::assembly::frame_of(frame.start);
+        let length = crate::assembly::frame_of(frame.end) - start;
+        let made = tool(&mut server, copy, &tab, "add_clip", json!({ "start": start + 1, "length": length }));
+        let clip = made["made"].as_u64().unwrap_or_else(|| panic!("{made}"));
+        tool(&mut server, copy, &tab, "edit_clip", json!({ "clip": clip }));
+        let keyed = tool(&mut server, copy, &tab, "insert_image_key", json!({ "image": frame.image }));
+        assert!(keyed.get("error").is_none(), "{keyed}");
+        tool(&mut server, copy, &tab, "leave_clip", json!({}));
+    }
+    let bed = copy.project.join(&assembly.bed.audio).display().to_string();
+    let placed = tool(&mut server, copy, &tab, "import_sound", json!({ "path": bed, "frame": 1 }));
+    assert!(placed.get("error").is_none(), "{placed}");
+    let saved = tool(&mut server, copy, &tab, "save_timing", json!({}));
+    assert!(saved.get("error").is_none(), "{saved}");
+    // The film, named after the project, and the chain after the last one.
+    let films = copy.pipeline(&["sql", "SELECT name FROM element WHERE kind = 'film'", "--read-only"]).unwrap();
+    assert_eq!(films.trim(), project, "{films}");
+    let chain = copy.pipeline(&["sql", "SELECT ord FROM chain WHERE name = 'the animatic'", "--read-only"]).unwrap();
+    assert_eq!(chain.trim(), (last_chain + 1).to_string());
+    // The step, as build-animatic records it, naming the new assembly.
+    let recorded = copy.pipeline(&["sql", "SELECT skill || char(31) || artifact || char(31) || script FROM step WHERE chain = 'the animatic' AND name = 'animatic'", "--read-only"]).unwrap();
+    let parts: Vec<&str> = recorded.trim().split('\u{1f}').collect();
+    assert_eq!(parts[..2], ["build-animatic", format!("{project}: animatic").as_str()], "{recorded}");
+    assert!(parts[2].contains("assemble.py") && parts[2].contains("${SPUMCAKE_AGENT:-"), "{recorded}");
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    assert_eq!(film["project_animatic"]["step"], "the animatic: animatic", "{film}");
+    // Skills alone assembles it, for real.
+    let take = copy.rerun("the animatic", "animatic").unwrap();
+    let cut = cuts(&copy.project.join(take["files"][0].as_str().unwrap()));
+    for want in [72u32, 101, 151] {
+        assert!(cut.iter().any(|at| at.abs_diff(want) <= 1), "no cut near {want}: {cut:?}");
+    }
+    nothing_published_changed(copy);
 }

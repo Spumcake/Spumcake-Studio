@@ -384,6 +384,10 @@ pub struct Session {
     film_element: Option<String>,
     /// Where the project's chains stand, once read, for a new animatic step.
     chain_orders: Option<project::ChainOrders>,
+    /// The project's film and its animatic steps were read, so a first
+    /// save knows what is there: the host answers reads in any order.
+    film_read: bool,
+    steps_read: bool,
     /// Export animatic video, running the project's animatic step.
     stepping: Option<project::Stepping>,
     /// Sounds from outside the project being filed into it, by the
@@ -459,6 +463,8 @@ impl Session {
             last_saved: None,
             film_element: None,
             chain_orders: None,
+            film_read: false,
+            steps_read: false,
             stepping: None,
             filing: HashMap::new(),
             last_check: None,
@@ -717,6 +723,13 @@ impl Session {
     pub(crate) fn set_project(&mut self, folder: &Path) {
         let folder = crate::store::normalize(folder);
         self.project = Some(folder.canonicalize().unwrap_or(folder));
+        // What was read of another project's canon is not this one's.
+        self.film_element = None;
+        self.chain_orders = None;
+        self.film_read = false;
+        self.steps_read = false;
+        self.steps.clear();
+        self.canon_files.clear();
         let blank = self.storyboards.len() == 1
             && self.storyboards[0].is_clean()
             && self.storyboards[0].path().is_none()
