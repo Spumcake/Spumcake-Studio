@@ -864,6 +864,9 @@ impl PromptPage {
             let plan = script(&scripts, &folder, &setup, "request.py", &["plan", &file, "--json"]).ok();
             let _ = std::fs::remove_file(folder.join(&file));
             let mut plan: Value = serde_json::from_str(&plan?).ok()?;
+            if let Some(data) = crate::prices::data_of(&setup) {
+                crate::prices::fill_from_token_prices(&data, &folder, &mut plan);
+            }
             crate::prices::fill_from_history(&folder, &mut plan);
             Some(cost_line(&plan, &service))
         });
