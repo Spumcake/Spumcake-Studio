@@ -997,9 +997,9 @@ mod tests {
         // A cell whose file is the finished take, back to its generation.
         let finished = rounds(&folder, "finished", None, &[String::from("library/shot-4k.mp4")], &Canon::default(), &mut Reports::default());
         assert_eq!(ids(finished), ["shot", "retime", "upscale"], "a finished take's rounds, back to its generation and no further");
-        // A picture whose cell names its take, made from two images.
-        let picture = rounds(&folder, "mood", None, &[String::from("library/keyframe.png")], &Canon::default(), &mut Reports::default());
-        assert_eq!(ids(picture), ["keyframe"], "a take made from several images pulled them in as its rounds");
+        // An image whose cell names its take, made from two images.
+        let image = rounds(&folder, "mood", None, &[String::from("library/keyframe.png")], &Canon::default(), &mut Reports::default());
+        assert_eq!(ids(image), ["keyframe"], "a take made from several images pulled them in as its rounds");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
