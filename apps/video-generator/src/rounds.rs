@@ -225,7 +225,7 @@ impl Rounds {
             }
             last = Some(key);
             let model = self.round_of(tile).map_or("", model_name);
-            groups.push((format!("Round {} · {model}", tile.number), 1));
+            groups.push((round_title(tile.number, model), 1));
         }
         groups
     }
@@ -234,6 +234,12 @@ impl Rounds {
     pub fn shape(&self) -> Option<(u32, u32)> {
         self.tiles.iter().filter_map(Tile::path).filter_map(|path| self.reads.get(path)).find_map(|read| read.info).map(|info| (info.width, info.height))
     }
+}
+
+/// A round's words, "Round 3 · MiniMax H3 Max", or "Round 3" alone when its
+/// report names no model.
+pub fn round_title(number: u32, model: &str) -> String {
+    if model.is_empty() { format!("Round {number}") } else { format!("Round {number} · {model}") }
 }
 
 /// The model as a round's label reads it: its name, "MiniMax H3 Max", or
@@ -250,6 +256,8 @@ mod tests {
     /// name, or by nothing when it does not.
     #[test]
     fn a_round_reads_its_models_name() {
+        assert_eq!(round_title(3, ""), "Round 3", "a round with no model ends in a dot");
+        assert_eq!(round_title(3, "MiniMax H3 Max"), "Round 3 · MiniMax H3 Max");
         let mut named = round("r1", 1, &[], RoundState::Done, None);
         assert_eq!(model_name(&named), "Model");
         named.model_name = "MiniMax H3 Max".into();

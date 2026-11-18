@@ -1665,3 +1665,49 @@ fn an_edit_on_canon_takes_is_published() {
     drop(program);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+/// The draft output of the tab `pick` takes, from the next `cells` that
+/// names a draft for it: the tab, and the selected cell's output.
+fn draft_output(program: &Program, mut pick: impl FnMut(&str, &[protocol::CellPart]) -> bool) -> (String, Vec<protocol::CellPart>) {
+    program.wait(|message| match message {
+        AppMessage::Cells { tab, cells, selected: Some(selected) } => {
+            cells.iter().find(|cell| cell.id == *selected).map(|cell| (tab.clone(), cell.output.clone())).filter(|(tab, output)| pick(tab, output))
+        }
+        _ => None,
+    })
+}
+
+/// Catches a draft that hides which take its image was opened from, or one
+/// that keeps it: a tab whose image links nothing has a draft with no
+/// output; an image opened from a project file sends `cells` whose draft's
+/// output is that file, as the project names it, so the host can find its
+/// round; the `.ipx` keeps no output; and after a restart, `cells` carries
+/// it again.
+#[test]
+fn a_draft_says_the_file_its_image_was_opened_from() {
+    let folder = with_takes("draft-output");
+    let mut program = Program::start(false);
+    let (_, empty) = draft_output(&program, |tab, _| tab == "1");
+    assert!(empty.is_empty(), "a draft whose image links nothing has an output");
+    program.send(in_project(&folder));
+    program.send(HostMessage::Open { path: Some(folder.join("library/r1-1.png").display().to_string()) });
+    let (tab, output) = draft_output(&program, |tab, output| tab != "1" && !output.is_empty());
+    let opened = [protocol::CellPart::Path { path: "library/r1-1.png".into(), media_type: "image/png".into(), role: None, field: None }];
+    assert_eq!(output, opened);
+    let file = keep(&mut program, &tab);
+    let kept = header(&file);
+    assert!(
+        kept["cells"].as_array().into_iter().flatten().all(|cell| cell["output"].as_array().is_none_or(|output| output.is_empty())),
+        "the file kept a draft's output: {kept}"
+    );
+    program.send(HostMessage::Shutdown);
+    drop(program);
+
+    let mut program = Program::start(true);
+    program.send(in_project(&folder));
+    program.send(HostMessage::Open { path: Some(file.display().to_string()) });
+    let (_, again) = draft_output(&program, |_, output| !output.is_empty());
+    assert_eq!(again, opened, "after a restart, the draft does not say its file");
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
