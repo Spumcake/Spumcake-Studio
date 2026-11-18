@@ -1641,7 +1641,7 @@ mod tests {
     fn changed_in(folder: &std::path::Path) -> (Server, String) {
         let mut server = Server::new(None);
         let _ = server.greeting();
-        let _ = server.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        let _ = server.handle(HostMessage::Project { folder: folder.display().to_string() });
         let tab = tab_id(server.session.active_id());
         let _ = server.handle(command("new_clip", Some(tab.clone())));
         (server, tab)
@@ -1708,7 +1708,7 @@ mod tests {
 
         let mut untouched = Server::new(None);
         let _ = untouched.greeting();
-        let _ = untouched.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        let _ = untouched.handle(HostMessage::Project { folder: folder.display().to_string() });
         let blank = tab_id(untouched.session.active_id());
         let replies = untouched.handle(HostMessage::Keep { tab: blank }).expect("replies");
         assert!(replies.iter().any(|reply| matches!(reply, AppMessage::Kept { path: None, error: None, .. })));
@@ -1761,7 +1761,7 @@ mod tests {
         std::fs::write(folder.join("work/Untitled Storyboard.smx"), b"{}").expect("a file of that name");
         let mut server = Server::new(None);
         let _ = server.greeting();
-        let replies = server.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false }).expect("replies");
+        let replies = server.handle(HostMessage::Project { folder: folder.display().to_string() }).expect("replies");
         assert_eq!(tab_labels(&replies), Some(vec!["Untitled Storyboard 2".to_string()]));
         let replies = server.handle(command("new_storyboard", None)).expect("replies");
         assert_eq!(

@@ -206,7 +206,7 @@ fn one_request_imports_a_sound_and_times_a_clip_to_it_as_one_undo() {
             _ => None,
         })
         .unwrap();
-    server.handle(protocol::HostMessage::Project { folder: project.display().to_string(), skills: false });
+    server.handle(protocol::HostMessage::Project { folder: project.display().to_string() });
     invoke(&mut server, &tab, "add_clip", serde_json::json!({ "length": 24 }), "setup");
     let second = invoke(&mut server, &tab, "add_clip", serde_json::json!({ "length": 24 }), "setup")["made"].as_u64().unwrap();
     // The request: import the dialogue, hear where it starts, put the
@@ -459,7 +459,7 @@ fn a_storyboard_with_sound_reopens_through_the_protocol() {
             _ => None,
         })
         .unwrap();
-    server.handle(protocol::HostMessage::Project { folder: project.display().to_string(), skills: false });
+    server.handle(protocol::HostMessage::Project { folder: project.display().to_string() });
     invoke(&mut server, &tab, "add_clip", serde_json::json!({}), "one");
     invoke(&mut server, &tab, "import_sound", serde_json::json!({ "path": source.display().to_string(), "frame": 3 }), "one");
     server.handle(protocol::HostMessage::Command { id: "save".into(), tab: Some(tab.clone()), arg: None, node: None, viewport: [800.0, 600.0] });
@@ -468,7 +468,7 @@ fn a_storyboard_with_sound_reopens_through_the_protocol() {
     // A new program opens it: the sound is decoded again from where it is.
     let mut again = crate::serve::Server::new(None);
     again.greeting();
-    again.handle(protocol::HostMessage::Project { folder: project.display().to_string(), skills: false });
+    again.handle(protocol::HostMessage::Project { folder: project.display().to_string() });
     let replies = again.handle(protocol::HostMessage::Open { path: Some(saved[0].display().to_string()) }).unwrap();
     let opened = replies
         .iter()

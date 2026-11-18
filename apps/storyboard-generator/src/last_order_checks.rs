@@ -281,7 +281,7 @@ fn opened(copy: &Copy) -> (Server, String) {
     let mut server = Server::new(None);
     server.greeting();
     // Told the project, it shows the project's animatic.
-    let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string(), skills: true }).unwrap();
+    let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string() }).unwrap();
     let seen = copy.host(&mut server, replies);
     let tab = shown_tab(&seen).expect("a tab");
     (server, tab)
@@ -692,7 +692,7 @@ fn a_first_save_records_the_animatic_step(copy: &Copy) {
     let assembly = last_orders_assembly(copy);
     let mut server = Server::new(None);
     let tab = shown_tab(&server.greeting()).unwrap_or_else(|| "1".to_string());
-    let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string(), skills: true }).unwrap();
+    let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string() }).unwrap();
     let seen = copy.host(&mut server, replies);
     let tab = shown_tab(&seen).unwrap_or(tab);
     let film = tool(&mut server, copy, &tab, "read_film", json!({}));

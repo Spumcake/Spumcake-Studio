@@ -1801,7 +1801,8 @@ fn every_project_is_told_it_is_one() {
     let dir = scratch("project-heard");
     let heard = dir.join("heard.txt");
     let hearer = hearer_program(&dir, &heard);
-    let told = |heard: &Path| std::fs::read_to_string(heard).unwrap_or_default().lines().map(|line| line.contains(r#""skills":true"#)).collect::<Vec<_>>();
+    // Each `project` line a workspace heard, true when it names no kind.
+    let told = |heard: &Path| std::fs::read_to_string(heard).unwrap_or_default().lines().filter(|line| line.contains(r#""type":"project""#)).map(|line| !line.contains("skills")).collect::<Vec<_>>();
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(vec![spec("hearer", "Hearer", &hearer)], &stand_in, &dir);
     let (_, folder, _) = window.here();

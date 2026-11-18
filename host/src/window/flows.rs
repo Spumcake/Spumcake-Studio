@@ -1427,9 +1427,6 @@ impl HostWindow {
         for started in std::mem::take(&mut self.apps) {
             started.running.shutdown();
         }
-        // Every project is organized the way Last order is, so every
-        // workspace is told so, until none reads the flag and it goes.
-        let skills = folder.is_some();
         self.apps = specs
             .into_iter()
             .enumerate()
@@ -1450,7 +1447,6 @@ impl HostWindow {
                 if let Some(folder) = folder {
                     running.send(&HostMessage::Project {
                         folder: folder.display().to_string(),
-                        skills,
                     });
                 }
                 Started {

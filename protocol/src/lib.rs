@@ -502,12 +502,9 @@ pub enum HostMessage {
     Keep { tab: String },
     /// The project's folder, as an absolute path. New activities are created
     /// in it, and paths outside it are refused. Every project is organized
-    /// the way Last order is, so `skills` is always true; nothing should
-    /// read it, and it is removed once no workspace does.
+    /// the way Last order is.
     Project {
         folder: String,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        skills: bool,
     },
     /// The window is closing. Exit.
     Shutdown,
@@ -1656,11 +1653,10 @@ mod tests {
             endpoint: Some("fal".into()),
             model: Some("stand-in/video".into()),
         });
-        round_trip_host(HostMessage::Project { folder: "/p".into(), skills: true });
-        let Ok(HostMessage::Project { skills, .. }) = parse_host_message(r#"{"type":"project","folder":"/p"}"#) else {
-            panic!("a project without the flag did not read");
-        };
-        assert!(!skills);
+        round_trip_host(HostMessage::Project { folder: "/p".into() });
+        // An older host's flag, which told two kinds of project apart, is
+        // read and ignored.
+        assert_eq!(parse_host_message(r#"{"type":"project","folder":"/p","skills":true}"#).unwrap(), HostMessage::Project { folder: "/p".into() });
         let sent = SentReference { path: "library/door.png".into(), role: Some("Start frame, the keeper".into()) };
         round_trip_host(HostMessage::Takes {
             cell: cell.clone(),
@@ -1754,7 +1750,6 @@ mod tests {
     fn project_and_kept_round_trip() {
         round_trip_host(HostMessage::Project {
             folder: "/home/someone/Inpainter/Lighthouse".into(),
-            skills: false,
         });
         round_trip_app(AppMessage::Kept {
             tab: "1".into(),

@@ -531,7 +531,7 @@ fn gather() -> Result<(Vec<ToolGroup>, Seen), String> {
     let project = std::env::temp_dir().join(format!("storyboard-client-coverage-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&project);
     std::fs::create_dir_all(&project).map_err(|error| error.to_string())?;
-    walk.send(HostMessage::Project { folder: project.display().to_string(), skills: false }, None);
+    walk.send(HostMessage::Project { folder: project.display().to_string() }, None);
 
     // The film: its storyboard page, two clips, a clip's page and menus.
     walk.command("toggle_panel", None, None);

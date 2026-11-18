@@ -105,7 +105,7 @@ The host sends these; a sub-application that declares no tools never receives `i
 - `keep {tab}` — make sure that tab's file is written. Answer `kept {tab, path?, error?}`: `path` with no `error` when written, no `path` and no `error` when clean or untouched, and `error` when writing failed.
 - Each `tabs` entry carries `path`, the file the tab shows once it has one, and `saves`, whether the tab is a document that can be saved to a file. The template's tab does not save.
 - Started with `--restore` (`protocol::RESTORE_FLAG`), a sub-application opens no document of its own: its greeting has no `tab`, `contents`, or `panel`, and it waits for `open`. The host uses this to reopen a workspace.
-- `project {folder, skills}` — the current project's folder as an absolute path, sent before any `open`; every project is organized the way Last order is, so `skills` is always true; read nothing from it, as it is removed once no workspace does. Inside a project a sub-application that saves documents:
+- `project {folder}` — the current project's folder as an absolute path, sent before any `open`; every project is organized the way Last order is. Inside a project a sub-application that saves documents:
   - writes each document into that folder by itself, about a second after it changes, with no Save, Save As, or save question; the Storyboard Generator and Recipe Creation show how, with a loop that also wakes with no message;
   - names a new document's file after its tab, which is named by the conventions guide's rule, free among the folder's files, and never replaces another file;
   - writes everything before a tab closes, before `kept`, and before `quit_ready`, so closing and quitting ask nothing;
