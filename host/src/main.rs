@@ -16,6 +16,7 @@ mod film;
 mod frames;
 mod keys;
 mod markdown;
+mod new_film;
 mod notices;
 mod outliner;
 mod panel;
