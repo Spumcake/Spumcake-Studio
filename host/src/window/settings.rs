@@ -152,12 +152,21 @@ impl HostWindow {
             .unwrap_or_else(|| egui::pos2(ctx.content_rect().center().x, 50.0));
         let projects_root = self.projects_root().map(|root| root.display().to_string()).unwrap_or_default();
         let uses_file = self.data.is_none() || crate::keys::uses_file();
+        // Only the endpoint form lists the models priced by their tokens,
+        // so the skills are read only while it is open.
+        let token_models = if matches!(self.settings_panel.page, settings_panel::Page::EndpointForm) {
+            let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&self.settings.skill_folders));
+            crate::prices::service_models(&skills, "openai")
+        } else {
+            Vec::new()
+        };
         let mut env = Env {
             settings: &self.settings,
             probes: &mut self.probes,
             keys: &mut self.keys,
             uses_file,
             projects_root,
+            token_models,
         };
         let choices = settings_panel::show(ctx, top, &mut self.settings_panel, &mut env);
         for choice in choices {
@@ -214,8 +223,17 @@ impl HostWindow {
                 }
                 self.probes.forget(&id);
             }
+            SettingsChoice::SavePrices { endpoint, prices } => {
+                self.settings.update(|settings| {
+                    settings.token_prices.retain(|price| price.endpoint != endpoint);
+                    settings.token_prices.extend(prices);
+                });
+            }
             SettingsChoice::DeleteEndpoint(id) => {
-                self.settings.update(|settings| settings.endpoints.retain(|endpoint| endpoint.id != id));
+                self.settings.update(|settings| {
+                    settings.endpoints.retain(|endpoint| endpoint.id != id);
+                    settings.token_prices.retain(|price| price.endpoint != id);
+                });
                 self.settings.forget_routes_on(&id);
                 self.keys.delete(&id);
                 self.probes.forget(&id);

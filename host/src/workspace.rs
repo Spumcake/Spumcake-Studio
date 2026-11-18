@@ -796,6 +796,11 @@ pub(crate) struct Settings {
     /// by the skill's id.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub skill_routes: std::collections::BTreeMap<String, SkillRoute>,
+    /// The prices of each endpoint's models priced by their tokens, such
+    /// as OpenAI's image models, as the user copies them from the
+    /// service's published prices. The setup file gives them to `request.py`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_prices: Vec<TokenPrice>,
     /// The assistant's levels, in the picker's order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub levels: Vec<Level>,
@@ -889,6 +894,21 @@ pub(crate) struct EndpointSetting {
     /// drafts": the assistant reads it to choose an endpoint for a skill.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+}
+
+/// One model's prices on one endpoint, in dollars a million tokens, as
+/// Skills' setup file names them: for the prompt's text, for the images
+/// sent, and for the images made. A price not given is unknown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct TokenPrice {
+    pub endpoint: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_text: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_image: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_image: Option<f64>,
 }
 
 /// A skill's endpoint and model, chosen apart from the skill.

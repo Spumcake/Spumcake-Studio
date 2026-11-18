@@ -489,6 +489,9 @@ fn planned(argv: &[String], cwd: &Path, vars: &[(String, String)], stand_in: boo
     // requests were billed; the hash binds what is sent, not the estimate.
     // A listed price's note, what it leaves out, is shown beside it.
     if !stand_in {
+        if let Some(data) = crate::prices::data_of(vars) {
+            crate::prices::fill_from_token_prices(&data, cwd, &mut plan);
+        }
         crate::prices::fill_from_history(cwd, &mut plan);
         if let Some(note) = crate::prices::data_of(vars).and_then(|data| crate::prices::note_for(&data, &plan)) {
             plan["price_note"] = json!(note);
