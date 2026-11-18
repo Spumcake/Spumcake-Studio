@@ -1558,6 +1558,7 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
     let tile_icon = match cell.kind.as_str() {
         protocol::IMAGE_KIND => "media-image",
         protocol::VIDEO_KIND => "media-video",
+        protocol::SOUND_KIND => "sound-high",
         _ => "align-left",
     };
     crate::toolbar::paint_icon(&painter, tile.center(), tile_icon, S.of(17.0), TEXT);

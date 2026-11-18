@@ -7,11 +7,13 @@
 //! Before research it shows the searches with their cost, then Search, or
 //! a file to download with its page and licence, then Download.
 
+use crate::panel::ReferencePreview;
 use crate::runner::Asking;
 use crate::typescale as ts;
 use crate::widgets::{self, BORDER, MUTED, TEXT};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, pos2, vec2};
 use serde_json::Value;
+use std::collections::HashMap;
 
 const WIDTH: f32 = 560.0;
 const PAD: f32 = 28.0;
@@ -23,6 +25,8 @@ const BUTTON_H: f32 = 46.0;
 const DARK: Color32 = Color32::from_rgb(24, 25, 28);
 /// The overlay behind the card, faint, so the work stays readable.
 const OVERLAY: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 40);
+/// The fill behind a preview's corner words, as on the Prompt page.
+const BADGE_FILL: Color32 = Color32::from_rgba_premultiplied(17, 18, 20, 190);
 /// The tallest the prompt's box grows before it scrolls.
 const PROMPT_MOST: f32 = 220.0;
 
@@ -173,7 +177,22 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
 
 /// Draws the card. Returns the person's answer: true for Send request or
 /// Run, false for Cancel or Escape, None while they decide.
-pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&str) -> String) -> Option<bool> {
+/// The path of every reference and file the card shows, so the window can
+/// ask for previews of those that are not images.
+pub(crate) fn reference_paths(asking: &Asking) -> Vec<String> {
+    lines(asking, &|model| model.to_string())
+        .0
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Reference { path, .. } if !path.is_empty() => Some(path),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `previews` holds what the previewing workspace made of each reference
+/// that is not an image, by its path.
+pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&str) -> String, previews: &HashMap<String, ReferencePreview>) -> Option<bool> {
     let (lines, send) = lines(asking, model_name);
     let screen = ctx.content_rect();
     let mut answer = None;
@@ -190,7 +209,7 @@ pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&st
             let max_height = (screen.height() - 220.0).max(200.0);
             egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
                 for line in &lines {
-                    paint_line(ui, line, inner);
+                    paint_line(ui, line, inner, previews);
                 }
             });
             ui.add_space(18.0);
@@ -218,7 +237,7 @@ pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&st
     answer
 }
 
-fn paint_line(ui: &mut egui::Ui, line: &Line, width: f32) {
+fn paint_line(ui: &mut egui::Ui, line: &Line, width: f32, previews: &HashMap<String, ReferencePreview>) {
     match line {
         Line::Title(text) => {
             let galley = ui.painter().layout(text.clone(), widgets::semibold(ts::heading(2).0), TEXT, width);
@@ -260,16 +279,29 @@ fn paint_line(ui: &mut egui::Ui, line: &Line, width: f32) {
             let (row, _) = ui.allocate_exact_size(vec2(width, THUMB_H), Sense::hover());
             ui.painter().text(pos2(row.left() + 14.0, row.center().y), Align2::CENTER_CENTER, number.to_string(), ts::body(), MUTED);
             let thumb = Rect::from_min_size(pos2(row.left() + 36.0, row.top()), vec2(THUMB_W, THUMB_H));
-            match crate::chat::shown_texture(ui.ctx(), path) {
-                Some(texture) => {
-                    let size = texture.size_vec2();
+            // A video's or a sound's preview, as its workspace made it, or
+            // else the image itself.
+            let preview = previews.get(path);
+            let shown = match preview.and_then(|preview| preview.thumbnail.as_ref()) {
+                Some(thumbnail) => crate::raster::raw_image(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false).map(|(texture, _)| (texture, vec2(thumbnail.width.max(1) as f32, thumbnail.height.max(1) as f32))),
+                None => crate::chat::shown_texture(ui.ctx(), path).map(|texture| (texture.id(), texture.size_vec2())),
+            };
+            match shown {
+                Some((texture, size)) => {
                     let scale = (THUMB_W / size.x).min(THUMB_H / size.y);
                     let image = Rect::from_center_size(thumb.center(), size * scale);
-                    ui.painter().image(texture.id(), image, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+                    ui.painter().image(texture, image, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
                 }
                 None => {
                     widgets::field(ui.painter(), thumb, false, widgets::Scale::PANEL);
                 }
+            }
+            if let Some(badge) = preview.map(|preview| preview.badge.as_str()).filter(|badge| !badge.is_empty()) {
+                let galley = ui.painter().layout_no_wrap(badge.to_string(), ts::small(), Color32::WHITE);
+                let size = galley.size() + vec2(8.0, 3.0);
+                let spot = Rect::from_min_size(thumb.right_bottom() - size - vec2(3.0, 3.0), size);
+                ui.painter().rect_filled(spot, 4.0, BADGE_FILL);
+                ui.painter().galley(spot.center() - galley.size() / 2.0, galley, Color32::WHITE);
             }
             let left = thumb.right() + 16.0;
             let text_w = row.right() - left;

@@ -25,6 +25,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::workspace::{EndpointKind, Settings};
 
+/// The skill whose every request finishes a take, as Spumcake-Skills'
+/// reports record it.
+const FINISHING_SKILL: &str = "generate-finished-shot";
+/// The skill of Last order's older finishing rounds, which
+/// generate-finished-shot claims as its own: one of its requests finishes
+/// a take when it sends exactly one file in `FINISHING_FIELD`.
+const OLDER_FINISHING_SKILL: &str = "create-final-animation";
+/// The field Last order's older finishing rounds sent their take in.
+const FINISHING_FIELD: &str = "video_url";
+
 /// How long a cell stands still before its cost is asked again.
 const COST_PAUSE: Duration = Duration::from_millis(700);
 
@@ -38,6 +48,8 @@ pub(crate) struct Canon {
     pub published: HashSet<String>,
     /// The artifact each step makes, by its chain and its name.
     pub step_artifacts: HashMap<(String, String), String>,
+    /// The skill each step follows, by its chain and its name.
+    pub step_skills: HashMap<(String, String), String>,
 }
 
 /// The living pipeline: the highest-numbered folder in `pipeline/`, as the
@@ -90,6 +102,14 @@ pub(crate) fn read_canon(scripts: &Path, folder: &Path, setup: &[(String, String
             canon.step_artifacts.insert((chain.clone(), step.clone()), artifact.clone());
         }
     }
+    let skills = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(chain, name, skill) FROM step WHERE skill IS NOT NULL AND skill != ''", "--read-only"]).unwrap_or_default();
+    for row in skills.lines() {
+        if let Ok(Value::Array(cells)) = serde_json::from_str::<Value>(row)
+            && let [Value::String(chain), Value::String(step), Value::String(skill)] = cells.as_slice()
+        {
+            canon.step_skills.insert((chain.clone(), step.clone()), skill.clone());
+        }
+    }
     Ok(canon)
 }
 
@@ -134,6 +154,8 @@ pub(crate) fn media_type(path: &str) -> &'static str {
         Some("webm") => "video/webm",
         Some("wav") => "audio/wav",
         Some("mp3") => "audio/mpeg",
+        Some("flac") => "audio/flac",
+        Some("aif" | "aiff") => "audio/aiff",
         Some("md" | "txt") => "text/plain",
         _ => "application/octet-stream",
     }
@@ -180,14 +202,21 @@ pub(crate) fn cell_endpoint(settings: &Settings, cell: &Cell) -> Option<String> 
     })
 }
 
+/// Why a sound cell does not run on an endpoint other than fal.ai.
+const SOUND_ON_FAL: &str = "Sound is made only through fal.ai.";
+
 /// The kind of request `request.py` makes for a cell on this endpoint.
 fn request_kind(settings: &Settings, cell: &Cell) -> Result<&'static str, String> {
     let endpoint = cell_endpoint(settings, cell).and_then(|id| settings.endpoint(&id).cloned()).ok_or("This cell has no endpoint. Choose one for it.")?;
     let image = cell.kind == protocol::IMAGE_KIND;
     let video = cell.kind == protocol::VIDEO_KIND;
+    let sound = cell.kind == protocol::SOUND_KIND;
     let has_references = !references(cell).is_empty();
     Ok(match endpoint.kind {
         EndpointKind::Fal => "fal",
+        // A voice take or a sound bed is made through fal, as Last order's
+        // were; anywhere else it would be sent as text.
+        _ if sound => return Err(String::from(SOUND_ON_FAL)),
         EndpointKind::Openrouter if image => "openrouter-image",
         EndpointKind::Openrouter if !video => "openrouter-text",
         EndpointKind::Openai if endpoint.address.contains("openai.com") && image => {
@@ -323,8 +352,9 @@ pub(crate) fn epoch(time: &str) -> Option<u64> {
 }
 
 /// Every round a cell made: each report in `requests/` whose record names
-/// the cell in its `setup`, or its step; and each pending record, oldest
-/// first, numbered from 1.
+/// the cell in its `setup`, or its step, or whose output is the cell's
+/// file, with the rounds that file was finished from; and each pending
+/// record, oldest first, numbered from 1.
 /// What `rounds` keeps of each report, by its file and time, so a report
 /// is read once, not on every change to `requests/`.
 pub(crate) type Reports = HashMap<PathBuf, (Option<SystemTime>, Option<Value>)>;
@@ -335,24 +365,37 @@ fn slim(record: Value) -> Value {
     let references: Vec<Value> = record
         .get("references")
         .and_then(Value::as_array)
-        .map(|references| references.iter().map(|reference| json!({ "file": reference.get("file"), "role": reference.get("role") })).collect())
+        .map(|references| references.iter().map(|reference| json!({ "file": reference.get("file"), "role": reference.get("role"), "field": reference.get("field") })).collect())
         .unwrap_or_default();
     json!({
-        "setup": keep("setup"), "chain": keep("chain"), "step": keep("step"), "started": keep("started"),
+        "setup": keep("setup"), "chain": keep("chain"), "step": keep("step"), "skill": keep("skill"), "started": keep("started"),
         "outputs": keep("outputs"), "prompt": keep("prompt"), "references": references,
         "sent": { "model": record.pointer("/sent/model").cloned().unwrap_or(Value::Null) },
         "endpoint": { "model": record.pointer("/endpoint/model").cloned().unwrap_or(Value::Null) },
     })
 }
 
-pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, canon: &Canon, reports: &mut Reports) -> Vec<Round> {
+pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs: &[String], canon: &Canon, reports: &mut Reports) -> Vec<Round> {
     let mut found: Vec<(u64, Round)> = Vec::new();
+    // A report that names the step's chain and no step is a take made for
+    // the chain, as Last order's LTX trial of its final shot is: it is the
+    // step's when it follows the step's skill and no other step of the
+    // chain follows that skill.
+    let chain_take = |record: &Value, step: &StepRef| {
+        let Some(skill) = canon.step_skills.get(&(step.chain.clone(), step.step.clone())) else { return false };
+        record.get("step").and_then(Value::as_str).is_none()
+            && record.get("skill").and_then(Value::as_str) == Some(skill.as_str())
+            && canon.step_skills.iter().filter(|((chain, _), other)| *chain == step.chain && *other == skill).count() == 1
+    };
     let names_cell = |record: &Value| {
         record.pointer("/setup/cell/item").and_then(Value::as_str) == Some(cell)
             || step.is_some_and(|step| {
-                record.get("chain").and_then(Value::as_str) == Some(step.chain.as_str()) && record.get("step").and_then(Value::as_str) == Some(step.step.as_str())
+                record.get("chain").and_then(Value::as_str) == Some(step.chain.as_str())
+                    && (record.get("step").and_then(Value::as_str) == Some(step.step.as_str()) || chain_take(record, step))
             })
     };
+    // Each report, by its id, with its record and the file it is in.
+    let mut done: Vec<(String, String, Value)> = Vec::new();
     for entry in std::fs::read_dir(folder.join("requests")).into_iter().flatten().flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -376,17 +419,95 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, canon: &
                 }
             };
             let Some(record) = record else { continue };
-            if !names_cell(&record) {
-                continue;
-            }
-            let started = record.get("started").and_then(Value::as_str).and_then(epoch).unwrap_or(0);
-            let outputs: Vec<String> = record.get("outputs").and_then(Value::as_array).map(|outputs| outputs.iter().filter_map(|output| output.as_str().map(String::from)).collect()).unwrap_or_default();
-            let failed = outputs.is_empty();
-            let report = format!("requests/{name}");
-            let state = if failed { RoundState::Failed } else { RoundState::Done };
-            let error = failed.then(|| String::from("Nothing came back. Open its report to see why."));
-            found.push((started, round_of(id, &record, state, started, &outputs, error, Some(report))));
+            done.push((id.to_string(), name, record));
         }
+    }
+    let outputs_of = |record: &Value| -> Vec<String> { record.get("outputs").and_then(Value::as_array).map(|outputs| outputs.iter().filter_map(|output| output.as_str().map(String::from)).collect()).unwrap_or_default() };
+    // The cell's reports: those that name it, first, then those whose
+    // output is the cell's file, which a report that names neither cell nor
+    // step, as Last order's first pipeline's do, is found by: the cell's
+    // own outputs, and the file its step's artifact is published as.
+    let mut matched: Vec<bool> = done.iter().map(|(_, _, record)| names_cell(record)).collect();
+    let mut seeds: HashSet<String> = outputs.iter().cloned().collect();
+    if let Some(file) = step.and_then(|step| canon.step_artifacts.get(&(step.chain.clone(), step.step.clone()))).and_then(|artifact| canon.files.get(artifact)) {
+        seeds.insert(file.clone());
+    }
+    // Then the rounds a found take was finished through, as a retime or an
+    // upscale is: a request of the finishing skill, whose one reference of
+    // its own media is the take it finishes, or one of Last order's older
+    // finishing rounds, whose one reference in the finishing field is. Each found take brings what was finished from it, and each found
+    // round the take it finished, back to the round that made it; never the
+    // other rounds made from that one, nor a take made from another as a
+    // reference, such as an image from another image, and never a report
+    // that names another step or another cell.
+    let finished_from = |record: &Value| -> Option<String> {
+        let references = record.get("references").and_then(Value::as_array).into_iter().flatten();
+        let finished: Vec<&str> = match record.get("skill").and_then(Value::as_str) {
+            Some(FINISHING_SKILL) => {
+                let media = media_type(outputs_of(record).first()?);
+                references.filter_map(|reference| reference.get("file").and_then(Value::as_str)).filter(|path| media_type(path) == media).collect()
+            }
+            Some(OLDER_FINISHING_SKILL) => references.filter(|reference| reference.get("field").and_then(Value::as_str) == Some(FINISHING_FIELD)).filter_map(|reference| reference.get("file").and_then(Value::as_str)).collect(),
+            _ => return None,
+        };
+        if let [only] = finished.as_slice() { Some(only.to_string()) } else { None }
+    };
+    let own_step = |record: &Value| {
+        let named = |key: &str, own: Option<&str>| match record.get(key).and_then(Value::as_str) {
+            None => true,
+            named => named == own,
+        };
+        let other_cell = record.pointer("/setup/cell/item").and_then(Value::as_str).is_some_and(|item| item != cell);
+        !other_cell && named("step", step.map(|step| step.step.as_str())) && (step.is_none() || named("chain", step.map(|step| step.chain.as_str())))
+    };
+    for (index, (_, _, record)) in done.iter().enumerate() {
+        if outputs_of(record).iter().any(|output| seeds.contains(output)) {
+            matched[index] = true;
+        }
+    }
+    let first: Vec<bool> = matched.clone();
+    // Forward, from the found rounds' takes to what was finished from them.
+    let mut after = first.clone();
+    loop {
+        let takes: HashSet<String> = done.iter().zip(&after).filter(|(_, found)| **found).flat_map(|((_, _, record), _)| outputs_of(record)).collect();
+        let mut grew = false;
+        for (index, (_, _, record)) in done.iter().enumerate() {
+            if !after[index] && own_step(record) && finished_from(record).is_some_and(|source| takes.contains(&source)) {
+                after[index] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // Back, from the found rounds to the takes they finished.
+    let mut before = first;
+    loop {
+        let sources: HashSet<String> = done.iter().zip(&before).filter(|(_, found)| **found).filter_map(|((_, _, record), _)| finished_from(record)).collect();
+        let mut grew = false;
+        for (index, (_, _, record)) in done.iter().enumerate() {
+            if !before[index] && own_step(record) && outputs_of(record).iter().any(|output| sources.contains(output)) {
+                before[index] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let matched: Vec<bool> = after.iter().zip(&before).map(|(after, before)| *after || *before).collect();
+    for ((id, name, record), matched) in done.iter().zip(matched) {
+        if !matched {
+            continue;
+        }
+        let started = record.get("started").and_then(Value::as_str).and_then(epoch).unwrap_or(0);
+        let outputs = outputs_of(record);
+        let failed = outputs.is_empty();
+        let report = format!("requests/{name}");
+        let state = if failed { RoundState::Failed } else { RoundState::Done };
+        let error = failed.then(|| String::from("Nothing came back. Open its report to see why."));
+        found.push((started, round_of(id, record, state, started, &outputs, error, Some(report))));
     }
     found.sort_by_key(|(started, round)| (*started, round.request.clone()));
     found
@@ -739,7 +860,11 @@ impl PromptPage {
             return None;
         }
         self.sent.insert(cell.id.clone(), now);
-        Some(rounds(folder, &cell.id, cell.step.as_ref(), &canon, &mut self.reports))
+        let outputs: Vec<String> = cell.output.iter().filter_map(|part| match part {
+            CellPart::Path { path, .. } => Some(path.clone()),
+            _ => None,
+        }).collect();
+        Some(rounds(folder, &cell.id, cell.step.as_ref(), &outputs, &canon, &mut self.reports))
     }
 
     /// Saves a person's edit to a step's cell into the step, with
@@ -831,6 +956,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// Catches a voice take or a sound bed sent anywhere but fal, where it
+    /// would go as text, or its takes read as files of unknown kind.
+    #[test]
+    fn a_sound_cell_runs_through_fal() {
+        let mut settings = Settings::default();
+        let openrouter = settings.first_start("https://stand-in/v1").unwrap();
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("fal-1"), name: String::from("fal.ai"), kind: EndpointKind::Fal, address: String::from("https://fal.ai"), description: String::new() });
+        let at = ItemRef { path: String::from("work/Sound.sbx"), item: Some(String::from("c1")) };
+        let mut cell = draft(vec![CellPart::Text { text: String::from("The diner at closing: the fridge hums, a tap drips.") }]);
+        cell.kind = protocol::SOUND_KIND.to_string();
+        cell.model = Some(String::from("bytedance/seed-audio-1.0"));
+        cell.settings = Some(json!({ "output_format": "wav", "sample_rate": 48000 }));
+        cell.endpoint = Some(String::from("fal-1"));
+        let spec = draft_spec(&settings, &cell, &at).unwrap();
+        assert_eq!(spec["endpoint"]["kind"], "fal");
+        assert_eq!(spec["endpoint"]["model"], "bytedance/seed-audio-1.0");
+        assert_eq!(spec["endpoint"]["settings"]["sample_rate"], 48000);
+        assert_eq!(spec["setup"]["cell"]["item"], "c1");
+        cell.endpoint = Some(openrouter);
+        assert_eq!(draft_spec(&settings, &cell, &at).unwrap_err(), SOUND_ON_FAL, "a sound cell was sent to OpenRouter");
+        for (file, kind) in [("a.wav", "audio/wav"), ("a.mp3", "audio/mpeg"), ("a.flac", "audio/flac"), ("a.aiff", "audio/aiff")] {
+            assert_eq!(media_type(file), kind);
+        }
+    }
+
     /// Catches a cell's rounds read from requests it did not make, out of
     /// order, or with a take marked canon that is not.
     #[test]
@@ -848,7 +998,7 @@ mod tests {
         report("failed", "2026-11-16T12:10:00Z", "c1", json!([]));
         let mut canon = Canon::default();
         canon.published.insert(String::from("library/r1.png"));
-        let rounds = rounds(&folder, "c1", None, &canon, &mut Reports::default());
+        let rounds = rounds(&folder, "c1", None, &[], &canon, &mut Reports::default());
         let ids: Vec<&str> = rounds.iter().map(|round| round.request.as_str()).collect();
         assert_eq!(ids, ["r1", "r2", "failed"]);
         assert_eq!(rounds[0].number, 1);
@@ -856,6 +1006,115 @@ mod tests {
         assert_eq!(rounds[2].state, RoundState::Failed);
         assert_eq!(rounds[1].started, epoch("2026-11-16T12:05:00Z"));
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a report that names neither cell nor step, as Last order's
+    /// first pipeline's do, left out of the cell whose file it made, and the
+    /// retime and upscale made from that take, each with its own role, as
+    /// Last order's are; and catches the images a take was made from,
+    /// another step's video, or another take made from the same motion
+    /// reference, or the other images made from the same one, pulled in as
+    /// its rounds.
+    #[test]
+    fn a_report_with_no_step_opens_with_the_file_it_made() {
+        let folder = std::env::temp_dir().join(format!("prompt-rounds-by-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("requests")).unwrap();
+        let report = |id: &str, started: &str, step: Value, skill: &str, outputs: Value, references: Value| {
+            let record = json!({ "id": id, "started": started, "prompt": "p", "sent": { "model": "m" }, "outputs": outputs, "references": references, "chain": step.get("chain"), "step": step.get("step"), "skill": skill, "setup": null });
+            std::fs::write(folder.join(format!("requests/{id}.html")), format!("<script type=\"application/json\" id=\"request\">{record}</script>")).unwrap();
+        };
+        let reference = |file: &str, role: &str| json!({ "file": file, "role": role });
+        // A finishing request sends its take in the finishing field.
+        let finishes = |file: &str, role: &str| json!({ "file": file, "role": role, "field": FINISHING_FIELD });
+        let none = json!({});
+        let chain = json!({ "chain": "the final shot" });
+        report("sheet", "2026-11-14T10:00:00Z", none.clone(), "generate-model-sheet", json!(["library/sheet.png"]), json!([]));
+        report("line art", "2026-11-14T10:30:00Z", json!({ "chain": "the line-art shot", "step": "line-art shot" }), "create-line-animation", json!(["library/line-art.mp4"]), json!([]));
+        report("keyframe", "2026-11-14T11:00:00Z", none.clone(), "generate-keyframe", json!(["library/keyframe.png"]), json!([reference("library/layout.png", "image 1"), reference("library/sheet.png", "image 2")]));
+        report("shot", "2026-11-14T12:00:00Z", none.clone(), "create-final-animation", json!(["library/shot.mp4"]), json!([reference("library/keyframe.png", "start"), reference("library/line-art.mp4", "Video 1, the motion")]));
+        // Last order's older retime: its role is its own, its field is the mark.
+        report("retime", "2026-11-14T13:00:00Z", chain.clone(), "create-final-animation", json!(["library/shot-60.mp4"]), json!([finishes("library/shot.mp4", "the approved final shot, at 24 fps")]));
+        // generate-finished-shot's skill alone marks it, whatever field its model takes.
+        report("upscale", "2026-11-14T14:00:00Z", chain.clone(), "generate-finished-shot", json!(["library/shot-4k.mp4"]), json!([reference("library/shot-60.mp4", "the final shot at 60 fps, 1344x768")]));
+        report("other", "2026-11-14T15:00:00Z", none.clone(), "", json!(["library/other.mp4"]), json!([reference("library/shot.mp4", "Video 1"), reference("library/elsewhere.mp4", "Video 2")]));
+        report("sibling", "2026-11-14T16:00:00Z", none.clone(), "create-final-animation", json!(["library/sibling.mp4"]), json!([finishes("library/line-art.mp4", "the control video")]));
+        // A take made for the chain with the final shot's skill, as the LTX
+        // trial is, and a start frame made for it with the keyframes' skill,
+        // which two of the chain's steps follow.
+        report("trial", "2026-11-14T12:30:00Z", chain.clone(), "create-final-animation", json!(["library/trial.mp4"]), json!([finishes("library/previs.mp4", "the control video")]));
+        report("start frame", "2026-11-14T11:30:00Z", chain.clone(), "generate-keyframe", json!(["library/start.png"]), json!([reference("library/previs.png", "image 1")]));
+        // Images made each from one image alone, as Last order's first
+        // pipeline made its studies from its texture.
+        report("texture", "2026-11-11T09:00:00Z", none.clone(), "", json!(["library/texture.png"]), json!([]));
+        report("otis", "2026-11-11T09:30:00Z", none.clone(), "generate-canonical-image", json!(["library/otis.png"]), json!([reference("library/texture.png", "image 1")]));
+        report("dusk", "2026-11-11T10:00:00Z", none.clone(), "generate-canonical-image", json!(["library/dusk.png"]), json!([reference("library/texture.png", "image 1")]));
+        let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
+        let mut canon = Canon::default();
+        canon.step_artifacts.insert((step.chain.clone(), step.step.clone()), String::from("the final shot: final shot"));
+        canon.files.insert(String::from("the final shot: final shot"), String::from("library/shot.mp4"));
+        for (name, skill) in [("final shot", "create-final-animation"), ("final frame, waiting", "generate-keyframe"), ("final frame, wiping", "generate-keyframe")] {
+            canon.step_skills.insert((step.chain.clone(), name.to_string()), skill.to_string());
+        }
+        let ids = |rounds: Vec<Round>| rounds.iter().map(|round| round.request.clone()).collect::<Vec<_>>();
+        // The step's published take, the chain's trial, then what was finished.
+        let shot = rounds(&folder, "final", Some(&step), &[], &canon, &mut Reports::default());
+        assert_eq!(ids(shot), ["shot", "trial", "retime", "upscale"], "the final shot's rounds, with its trial and its finishing and nothing else");
+        // The start frame is neither keyframe step's alone, so it is neither's.
+        let waiting = StepRef { chain: step.chain.clone(), step: String::from("final frame, waiting") };
+        assert!(rounds(&folder, "waiting", Some(&waiting), &[], &canon, &mut Reports::default()).is_empty(), "a take two steps could own was given to one");
+        // A cell whose file is the finished take, back to its generation.
+        let finished = rounds(&folder, "finished", None, &[String::from("library/shot-4k.mp4")], &Canon::default(), &mut Reports::default());
+        assert_eq!(ids(finished), ["shot", "retime", "upscale"], "a finished take's rounds, back to its generation and no further");
+        // An image whose cell names its take, made from two images.
+        let image = rounds(&folder, "mood", None, &[String::from("library/keyframe.png")], &Canon::default(), &mut Reports::default());
+        assert_eq!(ids(image), ["keyframe"], "a take made from several images pulled them in as its rounds");
+        let dusk = rounds(&folder, "dusk", None, &[String::from("library/dusk.png")], &Canon::default(), &mut Reports::default());
+        assert_eq!(ids(dusk), ["dusk"], "an image made from another pulled in that one's family as its rounds");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a take of Last order opening with rounds it was not made in,
+    /// such as every study made from the same texture: each take its
+    /// requests made, as a cell's own, opens with its round and at most the
+    /// rounds it was finished through. It only reads: set `LAST_ORDER` to
+    /// its folder.
+    #[test]
+    fn each_of_last_orders_takes_opens_with_its_own_rounds() {
+        let Ok(folder) = std::env::var("LAST_ORDER") else { return };
+        let folder = PathBuf::from(folder);
+        let mut reports = Reports::default();
+        let takes: Vec<String> = std::fs::read_dir(folder.join("requests"))
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .filter_map(|text| crate::skills_setup::record_of(&text))
+            .flat_map(|record| record.get("outputs").and_then(Value::as_array).cloned().unwrap_or_default())
+            .filter_map(|output| output.as_str().map(String::from))
+            .collect();
+        assert!(takes.len() > 400, "Last order's takes were not read: {}", takes.len());
+        for take in &takes {
+            let found = rounds(&folder, "a take", None, std::slice::from_ref(take), &Canon::default(), &mut reports);
+            assert!(!found.is_empty() && found.len() <= 3, "{take} opens with {} rounds", found.len());
+        }
+        // The final shot's step: its nine takes and the LTX trial, then the
+        // retime and the upscale finished from the approved take; and not
+        // the start frame or the door's sound, made for its chain by skills
+        // it does not follow.
+        let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
+        let mut canon = Canon::default();
+        for (name, skill) in [("final shot", "create-final-animation"), ("final frame, waiting", "generate-keyframe"), ("final frame, wiping", "generate-keyframe"), ("plate, door closed", "generate-background"), ("plate, door open", "generate-background")] {
+            canon.step_skills.insert((step.chain.clone(), name.to_string()), skill.to_string());
+        }
+        let shot = rounds(&folder, "a take", Some(&step), &[], &canon, &mut reports);
+        let ids = found_ids(&shot);
+        assert_eq!(ids.len(), 12, "{ids:?}");
+        assert!(ids.contains(&"2026-11-14_20-41-final-shot-ltx"), "{ids:?}");
+        assert_eq!(ids[10..], ["2026-11-15_08-12-final-shot-60fps", "2026-11-15_08-17-final-shot-60fps-4k"]);
+    }
+
+    fn found_ids(rounds: &[Round]) -> Vec<&str> {
+        rounds.iter().map(|round| round.request.as_str()).collect()
     }
 
     /// Catches an edit to a step's prompt that rewrites or drops its

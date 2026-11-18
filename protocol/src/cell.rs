@@ -108,6 +108,9 @@ pub const MARKDOWN_KIND: &str = "markdown";
 /// The kind of a cell that makes a video from its prompt and frames: its
 /// first frame and, optionally, its last, in that order.
 pub const VIDEO_KIND: &str = "video";
+/// The kind of a cell that makes a sound, such as a voice take or a sound
+/// bed, through Spumcake-Skills' `request.py`, as the Audio cell does.
+pub const SOUND_KIND: &str = "sound";
 
 /// One part of a cell's prompt or result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
