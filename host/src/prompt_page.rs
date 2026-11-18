@@ -332,8 +332,9 @@ pub(crate) fn epoch(time: &str) -> Option<u64> {
 }
 
 /// Every round a cell made: each report in `requests/` whose record names
-/// the cell in its `setup`, or its step; and each pending record, oldest
-/// first, numbered from 1.
+/// the cell in its `setup`, or its step, or whose output is the cell's
+/// file, with the rounds that file was finished from; and each pending
+/// record, oldest first, numbered from 1.
 /// What `rounds` keeps of each report, by its file and time, so a report
 /// is read once, not on every change to `requests/`.
 pub(crate) type Reports = HashMap<PathBuf, (Option<SystemTime>, Option<Value>)>;
@@ -354,7 +355,7 @@ fn slim(record: Value) -> Value {
     })
 }
 
-pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, canon: &Canon, reports: &mut Reports) -> Vec<Round> {
+pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs: &[String], canon: &Canon, reports: &mut Reports) -> Vec<Round> {
     let mut found: Vec<(u64, Round)> = Vec::new();
     let names_cell = |record: &Value| {
         record.pointer("/setup/cell/item").and_then(Value::as_str) == Some(cell)
@@ -362,6 +363,8 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, canon: &
                 record.get("chain").and_then(Value::as_str) == Some(step.chain.as_str()) && record.get("step").and_then(Value::as_str) == Some(step.step.as_str())
             })
     };
+    // Each report, by its id, with its record and the file it is in.
+    let mut done: Vec<(String, String, Value)> = Vec::new();
     for entry in std::fs::read_dir(folder.join("requests")).into_iter().flatten().flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -385,17 +388,57 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, canon: &
                 }
             };
             let Some(record) = record else { continue };
-            if !names_cell(&record) {
+            done.push((id.to_string(), name, record));
+        }
+    }
+    let outputs_of = |record: &Value| -> Vec<String> { record.get("outputs").and_then(Value::as_array).map(|outputs| outputs.iter().filter_map(|output| output.as_str().map(String::from)).collect()).unwrap_or_default() };
+    // The cell's reports: those that name it, first, then those whose
+    // output is the cell's file, which a report that names neither cell nor
+    // step, as Last order's first pipeline's do, is found by: the cell's
+    // own outputs, and the file its step's artifact is published as.
+    let mut matched: Vec<bool> = done.iter().map(|(_, _, record)| names_cell(record)).collect();
+    let mut files: Vec<String> = outputs.to_vec();
+    if let Some(file) = step.and_then(|step| canon.step_artifacts.get(&(step.chain.clone(), step.step.clone()))).and_then(|artifact| canon.files.get(artifact)) {
+        files.push(file.clone());
+    }
+    // Then the rounds before each one found by its output, back through
+    // what it was made from: a report's one reference of the same media as
+    // its output, as a retime's or an upscale's source take is, each in the
+    // same role as the one before it. A take made from several images of
+    // its media, such as a keyframe from its sheets, stops there.
+    let mut wanted: Vec<(String, Option<String>)> = files.into_iter().map(|file| (file, None)).collect();
+    let mut followed: HashSet<usize> = HashSet::new();
+    while let Some((file, role)) = wanted.pop() {
+        for (index, (_, _, record)) in done.iter().enumerate() {
+            if !outputs_of(record).contains(&file) {
                 continue;
             }
-            let started = record.get("started").and_then(Value::as_str).and_then(epoch).unwrap_or(0);
-            let outputs: Vec<String> = record.get("outputs").and_then(Value::as_array).map(|outputs| outputs.iter().filter_map(|output| output.as_str().map(String::from)).collect()).unwrap_or_default();
-            let failed = outputs.is_empty();
-            let report = format!("requests/{name}");
-            let state = if failed { RoundState::Failed } else { RoundState::Done };
-            let error = failed.then(|| String::from("Nothing came back. Open its report to see why."));
-            found.push((started, round_of(id, &record, state, started, &outputs, error, Some(report))));
+            matched[index] = true;
+            if !followed.insert(index) {
+                continue;
+            }
+            let media = media_type(&file);
+            let same: Vec<&Value> = record.get("references").and_then(Value::as_array).into_iter().flatten().filter(|reference| reference.get("file").and_then(Value::as_str).is_some_and(|path| media_type(path) == media)).collect();
+            if let [reference] = same.as_slice() {
+                let source = reference.get("file").and_then(Value::as_str).unwrap_or("").to_string();
+                let its_role = reference.get("role").and_then(Value::as_str).map(String::from);
+                if role.is_none() || role == its_role {
+                    wanted.push((source, its_role));
+                }
+            }
         }
+    }
+    for ((id, name, record), matched) in done.iter().zip(matched) {
+        if !matched {
+            continue;
+        }
+        let started = record.get("started").and_then(Value::as_str).and_then(epoch).unwrap_or(0);
+        let outputs = outputs_of(record);
+        let failed = outputs.is_empty();
+        let report = format!("requests/{name}");
+        let state = if failed { RoundState::Failed } else { RoundState::Done };
+        let error = failed.then(|| String::from("Nothing came back. Open its report to see why."));
+        found.push((started, round_of(id, record, state, started, &outputs, error, Some(report))));
     }
     found.sort_by_key(|(started, round)| (*started, round.request.clone()));
     found
@@ -748,7 +791,11 @@ impl PromptPage {
             return None;
         }
         self.sent.insert(cell.id.clone(), now);
-        Some(rounds(folder, &cell.id, cell.step.as_ref(), &canon, &mut self.reports))
+        let outputs: Vec<String> = cell.output.iter().filter_map(|part| match part {
+            CellPart::Path { path, .. } => Some(path.clone()),
+            _ => None,
+        }).collect();
+        Some(rounds(folder, &cell.id, cell.step.as_ref(), &outputs, &canon, &mut self.reports))
     }
 
     /// Saves a person's edit to a step's cell into the step, with
@@ -882,13 +929,47 @@ mod tests {
         report("failed", "2026-11-16T12:10:00Z", "c1", json!([]));
         let mut canon = Canon::default();
         canon.published.insert(String::from("library/r1.png"));
-        let rounds = rounds(&folder, "c1", None, &canon, &mut Reports::default());
+        let rounds = rounds(&folder, "c1", None, &[], &canon, &mut Reports::default());
         let ids: Vec<&str> = rounds.iter().map(|round| round.request.as_str()).collect();
         assert_eq!(ids, ["r1", "r2", "failed"]);
         assert_eq!(rounds[0].number, 1);
         assert!(rounds[0].takes[0].canon && !rounds[1].takes[0].canon);
         assert_eq!(rounds[2].state, RoundState::Failed);
         assert_eq!(rounds[1].started, epoch("2026-11-16T12:05:00Z"));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a report that names neither cell nor step, as Last order's
+    /// first pipeline's do, left out of the cell whose file it made: a
+    /// step's published take with the retime and the generation it was
+    /// finished from, and a picture's own take; and catches the images a
+    /// take was made from pulled in as its rounds.
+    #[test]
+    fn a_report_with_no_step_opens_with_the_file_it_made() {
+        let folder = std::env::temp_dir().join(format!("prompt-rounds-by-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("requests")).unwrap();
+        let report = |id: &str, started: &str, outputs: Value, references: Value| {
+            let record = json!({ "id": id, "started": started, "prompt": "p", "sent": { "model": "m" }, "outputs": outputs, "references": references, "chain": null, "step": null, "setup": null });
+            std::fs::write(folder.join(format!("requests/{id}.html")), format!("<script type=\"application/json\" id=\"request\">{record}</script>")).unwrap();
+        };
+        let reference = |file: &str, role: &str| json!({ "file": file, "role": role });
+        report("sheet", "2026-11-14T10:00:00Z", json!(["library/sheet.png"]), json!([]));
+        report("keyframe", "2026-11-14T11:00:00Z", json!(["library/keyframe.png"]), json!([reference("library/layout.png", "image 1"), reference("library/sheet.png", "image 2")]));
+        report("shot", "2026-11-14T12:00:00Z", json!(["library/shot.mp4"]), json!([reference("library/keyframe.png", "start")]));
+        report("retime", "2026-11-14T13:00:00Z", json!(["library/shot-60.mp4"]), json!([reference("library/shot.mp4", "structure")]));
+        report("upscale", "2026-11-14T14:00:00Z", json!(["library/shot-4k.mp4"]), json!([reference("library/shot-60.mp4", "structure")]));
+        report("other", "2026-11-14T15:00:00Z", json!(["library/other.mp4"]), json!([reference("library/shot.mp4", "image 1")]));
+        let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
+        let mut canon = Canon::default();
+        canon.step_artifacts.insert((step.chain.clone(), step.step.clone()), String::from("the final shot: final shot"));
+        canon.files.insert(String::from("the final shot: final shot"), String::from("library/shot-4k.mp4"));
+        let ids = |rounds: Vec<Round>| rounds.iter().map(|round| round.request.clone()).collect::<Vec<_>>();
+        let shot = rounds(&folder, "final", Some(&step), &[], &canon, &mut Reports::default());
+        assert_eq!(ids(shot), ["shot", "retime", "upscale"], "the final shot's rounds, back to its generation and no further");
+        // A picture whose cell names its take, made from two images.
+        let picture = rounds(&folder, "mood", None, &[String::from("library/keyframe.png")], &Canon::default(), &mut Reports::default());
+        assert_eq!(ids(picture), ["keyframe"], "a take made from several images pulled them in as its rounds");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
