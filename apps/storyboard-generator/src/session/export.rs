@@ -1,56 +1,50 @@
-//! Exporting the animatic, by hand or through a tool: one export at a time,
-//! on a thread of its own, with a card saying how far it is, then that it
-//! is done and where its file is, or why it failed.
+//! Exporting the animatic, by hand or through a tool: the project's
+//! animatic step runs again, after the timing is saved when it differs, as
+//! `build-animatic` makes it, with a card saying it is under way, then that
+//! it is done and where its take is, or why it failed.
 
 use super::Session;
 use crate::board::{ANIMATIC, CUT};
-use crate::export::Polled;
 use protocol::{Action, Notice, NoticeAction, NoticeState};
 
 /// The id of the export's card, which each export replaces.
 const CARD: &str = "export";
 
 impl Session {
-    /// Starts exporting the active storyboard's animatic into the project's
-    /// `exports/` folder. Returns its file, relative to the project, or why
-    /// it cannot start, which the card also says.
+    /// Starts making the active storyboard's animatic with the project's
+    /// animatic step. Returns the step, or why it cannot start, which the
+    /// card also says.
     pub fn start_export(&mut self) -> Result<String, String> {
         // The card under way already says so.
-        if self.export.is_some() {
+        if self.exporting_by_step() {
             return Err("An export is already under way.".to_string());
         }
-        let refused = self.export_refusal();
-        if let Some(reason) = refused {
+        self.kept_notices.retain(|notice| notice.id != CARD);
+        if let Some(reason) = self.export_refusal() {
             self.export_failed(&reason);
             return Err(reason);
         }
-        let project = self.project.clone().expect("checked above");
-        let film = self.film().clone();
-        // Named from the title, or from the storyboard's file when it has none.
-        let file = crate::export::file_for(&crate::board::title_of(self.active_storyboard()));
+        self.export_by_step().inspect_err(|reason| self.export_failed(reason))
+    }
+
+    /// The items the animatic is made from, with their fingerprints now.
+    pub(crate) fn export_sources(&mut self) -> Vec<(String, String)> {
         let mut sources = vec![(CUT.to_string(), self.cut_fingerprint())];
-        for clip in &film.clips {
+        for clip in &self.film().clips {
             sources.push((crate::board::frames_id(clip.id), crate::board::frames_fingerprint(self.active_storyboard(), clip)));
         }
-        let tracks = self.mix_tracks();
-        let plan = crate::export::plan(self.active_storyboard(), tracks);
-        self.kept_notices.retain(|notice| notice.id != CARD);
-        self.export = Some(crate::export::start(plan, &project, file.clone(), self.active_id(), sources));
-        Ok(file)
+        sources
     }
 
     /// Why the animatic cannot be exported now, if it cannot.
     fn export_refusal(&mut self) -> Option<String> {
         if self.project.is_none() {
-            return Some("The storyboard is not in a project.".to_string());
+            return Some("No project is open.".to_string());
         }
         if self.film().clips.is_empty() {
             return Some("The film has no clips to export.".to_string());
         }
-        let absent = self.absent_sounds();
-        let file = absent.first()?;
-        let name = file.rsplit('/').next().unwrap_or(file);
-        Some(format!("{name} is missing from the sounds folder."))
+        None
     }
 
     fn export_failed(&mut self, reason: &str) {
@@ -65,76 +59,51 @@ impl Session {
         });
     }
 
-    /// Cancels the export under way. Returns whether one was.
-    pub fn cancel_export(&mut self) -> bool {
-        match &self.export {
-            Some(job) => {
-                job.cancel();
-                true
-            }
-            None => false,
+    /// The animatic's step could not make the animatic.
+    pub(crate) fn step_export_failed(&mut self, reason: &str) {
+        self.export_failed(reason);
+    }
+
+    /// The animatic's step made `storyboard`'s animatic as `take`, a file
+    /// in the project, which the publish card now offers: it is the
+    /// animatic's file from now on, as an export's is.
+    pub(crate) fn step_exported(&mut self, storyboard: draw::document::DrawingId, take: &str, sources: Vec<(String, String)>) {
+        let bytes = self.project.as_ref().and_then(|project| std::fs::read(project.join(take)).ok()).unwrap_or_default();
+        if let Some(record) = self.storyboards.iter_mut().find(|record| record.id() == storyboard) {
+            record.set_exported(Some(crate::export::Exported { file: take.to_string(), bytes: protocol::fingerprint(&bytes), sources }));
         }
+        self.keep_notice(Notice {
+            id: CARD.to_string(),
+            text: "Animatic video exported".to_string(),
+            detail: take.to_string(),
+            progress: None,
+            state: NoticeState::Done,
+            actions: Vec::new(),
+            close: Some(Action::with_arg("close_notice", serde_json::json!(CARD))),
+        });
     }
 
-    /// Whether an export is under way, and how far: frames written of all.
-    pub fn exporting(&self) -> Option<(u32, u32)> {
-        self.export.as_ref().map(|job| (job.written(), job.total))
-    }
-
-    /// Ends the export when it finished. Returns whether anything changed.
-    pub fn poll_export(&mut self) -> bool {
-        let Some(job) = &self.export else {
-            return false;
-        };
-        match job.poll() {
-            Polled::Running => job.written() > 0,
-            Polled::Failed(reason) => {
-                let cancelled = job.is_cancelled();
-                self.export = None;
-                if !cancelled {
-                    self.export_failed(&reason);
-                }
-                true
-            }
-            Polled::Done(exported) => {
-                let storyboard = job.storyboard;
-                let file = exported.file.clone();
-                self.export = None;
-                if let Some(record) = self.storyboards.iter_mut().find(|record| record.id() == storyboard) {
-                    record.set_exported(Some(exported));
-                }
-                self.keep_notice(Notice {
-                    id: CARD.to_string(),
-                    text: "Animatic video exported".to_string(),
-                    detail: file,
-                    progress: None,
-                    state: NoticeState::Done,
-                    actions: Vec::new(),
-                    close: Some(Action::with_arg("close_notice", serde_json::json!(CARD))),
-                });
-                true
-            }
-        }
-    }
-
-    /// The export's card while it runs.
+    /// The export's card while the step runs, or while the timing is saved
+    /// before it.
     pub(crate) fn export_notice(&self) -> Option<Notice> {
-        let job = self.export.as_ref()?;
-        let written = job.written();
+        if !self.exporting_by_step() {
+            return None;
+        }
         Some(Notice {
             id: CARD.to_string(),
             text: "Exporting animatic video".to_string(),
-            detail: format!("{written} of {} frames", job.total),
-            progress: Some(written as f32 / job.total.max(1) as f32),
+            detail: String::new(),
+            progress: None,
             state: NoticeState::Working,
-            actions: vec![NoticeAction { label: "Cancel".to_string(), action: Action::new("cancel_export") }],
+            actions: Vec::new(),
             close: None,
         })
     }
 
-    /// The animatic as a file for another workspace's cell.
+    /// The animatic as a file for another workspace's cell: the step's take
+    /// itself, where it is in the project.
     pub fn render_animatic(&self) -> Result<(String, String), String> {
-        let project = self.project.as_deref().ok_or("The storyboard is not in a project.")?;
+        let project = self.project.as_deref().ok_or("No project is open.")?;
         let exported = self.active_storyboard().exported().ok_or("The animatic has not been exported yet.")?;
         crate::export::render(project, exported)
     }
@@ -145,7 +114,7 @@ impl Session {
             let project = self.project.as_deref()?;
             Some(path.strip_prefix(project).ok()?.to_string_lossy().replace('\\', "/"))
         });
-        let state = if self.export.is_some() {
+        let state = if self.exporting_by_step() {
             "exporting"
         } else if self.kept_notices.iter().any(|notice| notice.id == CARD && notice.state == NoticeState::Failed) {
             "failed"
@@ -158,8 +127,6 @@ impl Session {
             "item": path.map(|path| serde_json::json!({ "path": path, "item": ANIMATIC })),
             "file": self.active_storyboard().exported().map(|exported| exported.file.clone()),
             "state": state,
-            "written": self.exporting().map(|(written, _)| written),
-            "frames": self.exporting().map(|(_, total)| total),
         })
     }
 }

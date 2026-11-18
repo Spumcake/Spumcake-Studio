@@ -24,6 +24,25 @@ pub struct Import {
     result: Receiver<Result<Imported, String>>,
 }
 
+/// An imported sound's canon artifact: under the film, named after its file,
+/// as the Studio session manager set on 2026-11-18, such as
+/// "Last order: door creak, sound".
+pub fn sound_artifact(film: &str, file_stem: &str) -> String {
+    format!("{film}: {file_stem}, sound")
+}
+
+/// A sound from outside the project, copied into `work/` and being
+/// filed into the project by the host: placed once it is filed.
+pub struct Filing {
+    notice: u64,
+    name: String,
+    storyboard: draw::document::DrawingId,
+    at: u32,
+    track: Option<u64>,
+    /// The copy in `work/`, removed once filed.
+    copy: PathBuf,
+}
+
 impl Session {
     /// The decoded sounds, with the project they are found in.
     pub fn sound_library(&mut self) -> (Option<&Path>, &mut Library) {
@@ -72,13 +91,6 @@ impl Session {
         self.sounds.tracks(self.project.as_deref(), &film)
     }
 
-    /// The files the active storyboard's sounds name that are missing or
-    /// cannot be read.
-    pub fn absent_sounds(&mut self) -> Vec<String> {
-        let film = self.film().clone();
-        self.sounds.absent(self.project.as_deref(), &film)
-    }
-
     /// The peaks of the film's sound over `frames` frames from `from`, every
     /// unmuted Sound track mixed, from the sounds already decoded.
     pub fn film_sound_peaks(&self, from: u32, frames: u32) -> Vec<f32> {
@@ -102,11 +114,15 @@ impl Session {
         crate::sounds::loudness(&tracks, from, frames)
     }
 
-    /// Decodes and copies a sound into the project, and places it, as one
+    /// Decodes a sound in the project and places it where it is, as one
     /// undo step: at `at` on the film, or the playhead, on `track` when it
     /// fits there. Returns the sound clip's id. A file that is not sound is
-    /// neither copied nor placed, and the error says why.
+    /// not placed, and the error says why; a sound from outside the project
+    /// is filed into it first, by `start_import`.
     pub fn import_sound(&mut self, path: &Path, track: Option<u64>, at: Option<u32>) -> Result<u64, String> {
+        if self.outside_project(path) {
+            return Err("that sound is outside the project, so it is filed first, as Import sound… does".to_string());
+        }
         let imported = crate::sounds::import(self.project.as_deref(), path)?;
         self.place_imported(imported, track, at).ok_or_else(|| "The sound could not be placed.".to_string())
     }
@@ -116,10 +132,86 @@ impl Session {
         self.file_intent = Some(crate::session::FileIntent::ImportSound);
     }
 
+    /// Whether a sound is from outside the project, so it is filed into the
+    /// project before it is placed.
+    pub fn outside_project(&self, path: &Path) -> bool {
+        let Some(project) = self.project.as_deref() else {
+            return false;
+        };
+        let project = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+        let source = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        !source.starts_with(&project)
+    }
+
+    /// A sound from outside the project: copied into `work/`, then
+    /// filed with Skills' `request.py resource` through the host, and
+    /// placed where it was filed when the host answers.
+    fn file_sound(&mut self, path: PathBuf) {
+        let notice = self.next_notice;
+        self.next_notice += 1;
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let work = project.join(super::WORK);
+        let copy = (1..100)
+            .map(|n| {
+                let stem = Path::new(&name).file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+                let extension = Path::new(&name).extension().map(|extension| format!(".{}", extension.to_string_lossy())).unwrap_or_default();
+                work.join(if n == 1 { name.clone() } else { format!("{stem}-{n}{extension}") })
+            })
+            .find(|copy| !copy.exists())
+            .unwrap_or_else(|| work.join(&name));
+        if let Err(error) = std::fs::create_dir_all(&work).and_then(|_| std::fs::copy(&path, &copy)) {
+            self.keep_failed(notice, "Sound not imported", &crate::store::reason(&error));
+            return;
+        }
+        let relative = copy.strip_prefix(&project).map(|relative| relative.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let id = format!("file-{notice}");
+        let storyboard = self.active_id();
+        self.outgoing.push(protocol::AppMessage::FileResource { tab: storyboard.get().to_string(), path: relative, from: Vec::new(), id: Some(id.clone()) });
+        let (at, track) = (self.view().film_frame, self.picked_track());
+        self.filing.insert(id, Filing { notice, name, storyboard, at, track, copy });
+    }
+
+    /// The host filed a sound brought in from outside as `file`: it is
+    /// imported from there, in place, or a card says why not.
+    pub(crate) fn sound_filed(&mut self, id: &str, file: &str, error: Option<&str>) {
+        let Some(filing) = self.filing.remove(id) else {
+            return;
+        };
+        let _ = std::fs::remove_file(&filing.copy);
+        match (error, self.project.clone()) {
+            (None, Some(project)) if !file.is_empty() => {
+                self.begin_import(project.join(file), filing.storyboard, filing.at, filing.track);
+                // Offered as canon, so the animatic can name it: under the
+                // film, after its file.
+                let stem = Path::new(&filing.name).file_stem().map_or_else(|| filing.name.clone(), |stem| stem.to_string_lossy().into_owned());
+                self.outgoing.push(protocol::AppMessage::Publish {
+                    tab: filing.storyboard.get().to_string(),
+                    artifact: sound_artifact(&self.film_name(), &stem),
+                    source: file.to_string(),
+                    from: Vec::new(),
+                    with: Vec::new(),
+                });
+            }
+            (error, _) => self.keep_failed(filing.notice, "Sound not imported", error.unwrap_or_default()),
+        }
+    }
+
     /// Starts importing the sound the person chose. It is placed when it
     /// is decoded, at the playhead as it is now, and a notice says it is
     /// coming.
     pub fn start_import(&mut self, path: PathBuf) {
+        if self.outside_project(&path) {
+            self.file_sound(path);
+            return;
+        }
+        let (storyboard, at, track) = (self.active_id(), self.view().film_frame, self.picked_track());
+        self.begin_import(path, storyboard, at, track);
+    }
+
+    fn begin_import(&mut self, path: PathBuf, storyboard: draw::document::DrawingId, at: u32, track: Option<u64>) {
         let (send, result) = std::sync::mpsc::channel();
         let project = self.project.clone();
         let source = path.clone();
@@ -132,9 +224,9 @@ impl Session {
         self.imports.push(Import {
             id,
             name,
-            storyboard: self.active_id(),
-            at: self.view().film_frame,
-            track: self.picked_track(),
+            storyboard,
+            at,
+            track,
             result,
         });
     }
@@ -170,7 +262,7 @@ impl Session {
         changed
     }
 
-    fn keep_failed(&mut self, id: u64, text: &str, detail: &str) {
+    pub(crate) fn keep_failed(&mut self, id: u64, text: &str, detail: &str) {
         self.kept_notices.push(Notice {
             id: format!("notice-{id}"),
             text: text.to_string(),
@@ -210,7 +302,20 @@ impl Session {
                 close: None,
             })
             .collect();
+        // Sounds from outside the project, while the host files them.
+        let mut filing: Vec<&Filing> = self.filing.values().collect();
+        filing.sort_by_key(|filing| filing.notice);
+        out.extend(filing.into_iter().map(|filing| Notice {
+            id: format!("notice-{}", filing.notice),
+            text: format!("Importing {}", filing.name),
+            detail: String::new(),
+            progress: None,
+            state: NoticeState::Working,
+            actions: Vec::new(),
+            close: None,
+        }));
         out.extend(self.playback_notice());
+        out.extend(self.retimed_notice());
         out.extend(self.export_notice());
         out.extend(self.kept_notices.iter().cloned());
         out
@@ -335,7 +440,7 @@ mod tests {
         session.seek_film(12);
         let clip = session.import_sound(&source, None, None).unwrap();
         let (track, placed) = session.film().sound(clip).unwrap();
-        assert_eq!((placed.at, placed.length, placed.file.as_str()), (12, 24, "sounds/line.wav"));
+        assert_eq!((placed.at, placed.length, placed.file.as_str()), (12, 24, "line.wav"));
         assert_eq!(track.name, "Sound");
         // The click is heard on its frame.
         let loud = session.loudness(12, 24);
@@ -343,7 +448,7 @@ mod tests {
         session.undo().unwrap();
         assert!(session.film().sound_tracks.is_empty());
         assert_eq!(session.film().clips.len(), 1);
-        assert!(project.join("sounds/line.wav").is_file());
+        assert!(project.join("line.wav").is_file());
         session.redo().unwrap();
         assert!(session.film().sound(clip).is_some());
     }

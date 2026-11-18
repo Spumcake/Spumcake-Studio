@@ -1003,5 +1003,11 @@ fn film_menu_rows() -> Vec<MenuEntry> {
         submenu: Vec::new(),
         rename: false,
     };
-    vec![row("Import sound…", "import_sound", true), row("Export animatic video", "export_animatic", false)]
+    // The animatic is the storyboard: its timing saves to the project's
+    // animatic step, and its step makes the video.
+    vec![
+        row("Import sound…", "import_sound", true),
+        row("Save timing to the project", "save_timing", false),
+        row("Export animatic video", "export_animatic", false),
+    ]
 }

@@ -18,13 +18,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+mod animatic;
 mod assist;
 mod declare;
 mod export;
 pub mod film;
 mod play;
+pub mod project;
 pub mod sound;
 pub(crate) use declare::{action_named, command_named, session_value, tool_named};
+
+/// The project's folder for its workspaces' files, as every project has,
+/// the way the Last order benchmark is organized.
+pub(crate) const WORK: &str = "work";
 
 /// How long a dirty storyboard waits between recovery copies.
 pub(crate) const RECOVERY_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -55,6 +61,8 @@ pub(crate) enum FileIntent {
     Open,
     /// Import sound…: a sound or video file from anywhere.
     ImportSound,
+    /// Insert image key…: an image of the project.
+    ImageKey,
     Save {
         id: DrawingId,
         copy: bool,
@@ -343,12 +351,49 @@ pub struct Session {
     /// Notices that stay until closed: a failed import, a finished export.
     kept_notices: Vec<protocol::Notice>,
     next_notice: u64,
-    /// The animatic export under way.
-    export: Option<crate::export::Job>,
     /// Playing and scrubbing the active storyboard.
     playback: Option<crate::playback::Playback>,
     /// The loop button inside a clip.
     looping: bool,
+    /// Image keys' images as the stage shows them, by path and size.
+    key_images: HashMap<(String, u32, u32), Option<protocol::Thumbnail>>,
+    /// Holds asked to be published, by their artifact: the storyboard, the
+    /// clip, and the hold's first frame in it.
+    publishing: HashMap<String, (DrawingId, u64, u32, String, PathBuf)>,
+    /// Publishes asked for and not yet sent to the host: the artifact, the
+    /// file, and where it came from.
+    to_publish: Vec<(String, String, Vec<String>)>,
+    /// Messages for the host: canon reads, files to file, and step edits.
+    outgoing: Vec<protocol::AppMessage>,
+    /// Canon reads waiting for their answer, and what each was for.
+    canon_asked: HashMap<String, project::Asked>,
+    /// The project's animatic steps as last read, by "chain: name".
+    steps: HashMap<String, project::AnimaticStep>,
+    /// Published files and their artifacts, as last read or published.
+    canon_files: HashMap<String, String>,
+    published_files: HashMap<String, String>,
+    /// A Save timing to the project under way.
+    saving: Option<project::Saving>,
+    /// A storyboard opened from the animatic, and the assembly the step
+    /// names now, when it was retimed in another tool.
+    retimed: Option<(DrawingId, String)>,
+    /// The last Save timing to the project that finished: the storyboard
+    /// and the assembly it filed.
+    last_saved: Option<(DrawingId, String)>,
+    /// The project's film, its canon element of kind film, once read.
+    film_element: Option<String>,
+    /// Where the project's chains stand, once read, for a new animatic step.
+    chain_orders: Option<project::ChainOrders>,
+    /// The project's film and its animatic steps were read, so a first
+    /// save knows what is there: the host answers reads in any order.
+    film_read: bool,
+    steps_read: bool,
+    /// Export animatic video, running the project's animatic step.
+    stepping: Option<project::Stepping>,
+    /// Sounds from outside the project being filed into it, by the
+    /// filing's id.
+    filing: HashMap<String, sound::Filing>,
+    last_check: Option<std::time::Instant>,
 }
 
 impl Session {
@@ -403,9 +448,26 @@ impl Session {
             imports: Vec::new(),
             kept_notices: Vec::new(),
             next_notice: 1,
-            export: None,
             playback: None,
             looping: false,
+            key_images: HashMap::new(),
+            publishing: HashMap::new(),
+            to_publish: Vec::new(),
+            outgoing: Vec::new(),
+            canon_asked: HashMap::new(),
+            steps: HashMap::new(),
+            canon_files: HashMap::new(),
+            published_files: HashMap::new(),
+            saving: None,
+            retimed: None,
+            last_saved: None,
+            film_element: None,
+            chain_orders: None,
+            film_read: false,
+            steps_read: false,
+            stepping: None,
+            filing: HashMap::new(),
+            last_check: None,
         };
         session.push_blank();
         session
@@ -641,7 +703,7 @@ impl Session {
 
     /// The name a new storyboard takes: "Untitled Storyboard", or the next
     /// free one, among the open tabs other than `skip` and, in a project,
-    /// the `.smx` files in its folder.
+    /// the `.smx` files in its `work/` folder.
     fn fresh_name(&self, skip: Option<DrawingId>) -> String {
         protocol::free_name(&protocol::untitled("Storyboard"), |name| {
             let open = self
@@ -651,7 +713,7 @@ impl Session {
             let filed = self
                 .project
                 .as_ref()
-                .is_some_and(|folder| folder.join(format!("{name}.smx")).exists());
+                .is_some_and(|folder| folder.join(WORK).join(format!("{name}.smx")).exists());
             open || filed
         })
     }
@@ -661,6 +723,13 @@ impl Session {
     pub(crate) fn set_project(&mut self, folder: &Path) {
         let folder = crate::store::normalize(folder);
         self.project = Some(folder.canonicalize().unwrap_or(folder));
+        // What was read of another project's canon is not this one's.
+        self.film_element = None;
+        self.chain_orders = None;
+        self.film_read = false;
+        self.steps_read = false;
+        self.steps.clear();
+        self.canon_files.clear();
         let blank = self.storyboards.len() == 1
             && self.storyboards[0].is_clean()
             && self.storyboards[0].path().is_none()
@@ -709,9 +778,12 @@ impl Session {
     /// nothing, such as `Beach.smx`, then `Beach 2.smx`. Returns the
     /// file, or none for an untouched storyboard that has nothing to write.
     pub(crate) fn write_into_project(&mut self, id: DrawingId) -> Result<Option<PathBuf>, String> {
-        let Some(folder) = self.project.clone() else {
-            return Err("No project folder.".to_string());
+        let Some(project) = self.project.clone() else {
+            return Err("No project is open.".to_string());
         };
+        // A workspace's files are kept in the project's `work/`.
+        let folder = project.join(WORK);
+        std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
         let Some(index) = self.index_of(id) else {
             return Ok(None);
         };

@@ -10,6 +10,7 @@ base64 = "=0.22.1"
 directories = "=6.0.0"
 draw = { path = "../../draw" }
 egui = "=0.36.2"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 kurbo = "=0.13.1"
 media = { path = "../../media" }
 protocol = { path = "../../protocol" }

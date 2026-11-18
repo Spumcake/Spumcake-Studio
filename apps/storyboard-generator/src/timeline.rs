@@ -325,7 +325,8 @@ fn sound_row(session: &Session, track: &SoundTrack, picked: &[u64]) -> protocol:
             };
             let tip = match state {
                 Some(State::Unreadable(reason)) => reason.clone(),
-                Some(State::Missing) => format!("{} is missing from the sounds folder.", clip.name),
+                // As a layer's missing file says it, by its place in the project.
+                Some(State::Missing) => format!("Missing: {}", clip.file),
                 _ => String::new(),
             };
             TimelineItem {
@@ -396,6 +397,8 @@ fn frame_menu(session: &Session) -> Vec<MenuEntry> {
         entry("Insert frame\tF5", action("insert_frame"), true),
         entry("Insert keyframe\tF6", action("insert_keyframe"), true),
         entry("Insert blank keyframe\tF7", action("insert_blank_keyframe"), true),
+        entry("Insert image key…", action("insert_image_key"), true),
+        entry("Publish hold", action("publish_hold"), session.project().is_some()),
         entry("Clear keyframe\t⇧F6", action("clear_keyframe"), true),
         entry("Remove frames\t⇧F5", action("remove_frames"), true),
         divider(),
@@ -656,9 +659,21 @@ pub fn panel_sections(session: &Session) -> Option<Vec<Section>> {
                             kind: RowKind::Number { min: 0.0, max: 1.0, percent: true, places: 0, centered: false },
                             value: PropValue::Number(sound.volume),
                         },
+                    ]
+                    .into_iter()
+                    // A gain above 0 dB, which 0–100% cannot show, plays at
+                    // 100% and is written back as read until it is changed.
+                    .chain(session.kept_gain(sound.id).map(|gain_db| Row {
+                        prop: json!({ "film": "note" }),
+                        label: format!("+{} dB, kept as read", crate::assembly::said_gain(gain_db).trim_end_matches(" dB")),
+                        kind: RowKind::Note,
+                        value: PropValue::Idle,
+                    }))
+                    .chain([
                         text_row(prop("at"), "Starts at", &timecode(sound.at), 1),
                         text_row(prop("from"), "From", &timecode(sound.from), 1),
-                    ],
+                    ])
+                    .collect(),
                     icon: None,
                 }]);
             }
@@ -973,11 +988,24 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
         }
         "timeline_page" => {}
         "import_sound" => session.ask_import_sound(),
+        "insert_image_key" => session.ask_image_key(),
+        "publish_hold" if session.open_clip().is_some() => {
+            if let Err(reason) = session.publish_hold() {
+                session.failed_by_hand(Some("Hold not published"), &reason);
+            }
+        }
+        "save_timing" => {
+            if let Err(reason) = session.save_timing() {
+                session.timing_refused(&reason);
+            }
+        }
+        "follow_retime" => {
+            if let Err(reason) = session.follow_retime() {
+                session.failed_by_hand(None, &reason);
+            }
+        }
         "export_animatic" => {
             let _ = session.start_export();
-        }
-        "cancel_export" => {
-            session.cancel_export();
         }
         "close_notice" => {
             if let Some(id) = arg.and_then(Value::as_str).or_else(|| arg.and_then(|arg| arg.get("arg")).and_then(Value::as_str)) {

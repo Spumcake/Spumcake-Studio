@@ -1,8 +1,8 @@
-//! The second slice's checks of sound and the animatic: an export is
-//! checked by decoding the video it wrote, against what the test drew and
-//! where it put a click, never against the code that wrote it; the cut and
-//! each clip's frames change exactly when what the animatic would show or
-//! play does.
+//! The second slice's checks of sound and the animatic: the cut and each
+//! clip's frames change exactly when what the animatic would show or play
+//! does, and the animatic the project's step made is kept beside the film.
+//! The step's own take is checked against playback on Last order, in
+//! `last_order_checks`.
 
 use crate::board::{self, Boards};
 use crate::look::Looker;
@@ -12,7 +12,7 @@ use crate::soundtrack::{TrackFlag, TrackRef};
 use crate::sounds::{RATE, clicks, wav_bytes};
 use draw::document::Sample;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The film's frame size in these checks: small, so they run quickly.
 const SIZE: [u32; 2] = [320, 180];
@@ -61,133 +61,18 @@ fn film(label: &str) -> (Session, PathBuf) {
     (session, project)
 }
 
-/// Exports and waits for it. Returns the export's path.
+/// The project's step made the animatic, as the host answers when the
+/// step ran: a take of the storyboard as it is now, standing in for
+/// `assemble.py`'s. Returns the take's path.
 fn export(session: &mut Session, project: &Path) -> PathBuf {
-    let file = session.start_export().expect("the export starts");
-    let started = Instant::now();
-    while session.exporting().is_some() {
-        assert!(started.elapsed() < Duration::from_secs(120), "the export never finished");
-        std::thread::sleep(Duration::from_millis(20));
-        session.poll_export();
-    }
+    let count = std::fs::read_dir(project.join("library")).map(|files| files.count()).unwrap_or(0);
+    let take = format!("library/animatic-{count}.mp4");
+    std::fs::create_dir_all(project.join("library")).unwrap();
+    std::fs::write(project.join(&take), take.as_bytes()).unwrap();
+    let sources = session.export_sources();
+    session.step_exported(session.active_id(), &take, sources);
     assert!(session.active_storyboard().exported().is_some(), "{:?}", session.sound_notices());
-    project.join(file)
-}
-
-/// How dark the decoded frame is around `(x, y)`, 0 white to 1 black.
-fn darkness(frame: &media::Frame, x: u32, y: u32) -> f64 {
-    let mut sum = 0.0;
-    let mut count = 0.0;
-    for dy in 0..4 {
-        for dx in 0..4 {
-            let at = (((y + dy) * frame.width + x + dx) * 4) as usize;
-            let light = (f64::from(frame.rgba[at]) + f64::from(frame.rgba[at + 1]) + f64::from(frame.rgba[at + 2])) / (3.0 * 255.0);
-            sum += 1.0 - light;
-            count += 1.0;
-        }
-    }
-    sum / count
-}
-
-fn frames(path: &Path) -> Vec<media::Frame> {
-    let mut video = media::Video::open(path).expect("the export opens");
-    let info = video.info();
-    video.frames(0, (info.width, info.height)).map(|frame| frame.expect("a frame")).collect()
-}
-
-#[test]
-fn the_export_shows_each_clip_in_its_place_with_its_sound() {
-    let (mut session, project) = film("export");
-    let path = export(&mut session, &project);
-    assert_eq!(path.file_name().unwrap().to_string_lossy(), "Checks — animatic.mp4");
-    let video = media::Video::open(&path).unwrap();
-    let info = video.info();
-    assert_eq!((info.width, info.height, info.frames, info.sound), (SIZE[0], SIZE[1], 60, true));
-    let frames = frames(&path);
-    assert_eq!(frames.len(), 60);
-    // Clip 1: its dab on the left, nothing on the right.
-    for frame in [0, 12, 23] {
-        assert!(darkness(&frames[frame], 62, 58) > 0.5, "frame {frame} lacks clip 1's dab");
-        assert!(darkness(&frames[frame], 252, 58) < 0.1, "frame {frame} shows clip 2's dab");
-    }
-    // The gap is black.
-    for frame in [24, 30, 35] {
-        assert!(darkness(&frames[frame], 160, 90) > 0.9, "frame {frame} of the gap is not black");
-    }
-    // Clip 2: its dab on the right; the one at the bottom from its frame 6.
-    assert!(darkness(&frames[36], 252, 58) > 0.5);
-    assert!(darkness(&frames[36], 62, 58) < 0.1);
-    assert!(darkness(&frames[41], 152, 148) < 0.1, "the key at frame 6 shows early");
-    assert!(darkness(&frames[42], 152, 148) > 0.5, "the key at frame 6 does not show at 36 + 6");
-    // The click is heard on frame 30, give or take one.
-    let sound = media::Sound::open(&path, RATE).unwrap();
-    let per_frame = (RATE / crate::film::FPS) as usize * media::Sound::CHANNELS;
-    let loudness: Vec<f32> = sound.samples.chunks(per_frame).map(|chunk| chunk.iter().fold(0.0f32, |most, sample| most.max(sample.abs()))).collect();
-    let loudest = loudness.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-    assert!(loudest.abs_diff(30) <= 1, "the click is loudest on frame {loudest}");
-    // As loud as the mix the player plays, frame by frame.
-    let mix = session.loudness(0, 60);
-    for frame in [29, 30, 31] {
-        let (heard, mixed) = (f64::from(loudness[frame]), f64::from(mix[frame]));
-        if mixed > 0.05 {
-            assert!((20.0 * (heard / mixed).log10()).abs() < 1.0, "frame {frame}: {heard} against {mixed}");
-        }
-    }
-}
-
-#[test]
-fn muted_sound_and_a_hidden_shots_track_leave_the_export() {
-    let (mut session, project) = film("muted");
-    let track = session.film().sound_tracks[0].id;
-    assert!(session.set_track_flag(TrackRef::Sound(track), TrackFlag::Muted, true));
-    assert!(session.set_track_flag(TrackRef::Shots, TrackFlag::Visible, false));
-    let path = export(&mut session, &project);
-    assert!(!media::Video::open(&path).unwrap().info().sound, "a muted film has no sound");
-    for frame in frames(&path).iter().step_by(10) {
-        assert!(darkness(frame, 62, 58) < 0.1 && darkness(frame, 160, 90) < 0.1, "a hidden Shots track shows white");
-    }
-}
-
-#[test]
-fn a_cancelled_export_leaves_the_previous_one_whole() {
-    let (mut session, project) = film("cancel");
-    let path = export(&mut session, &project);
-    let before = std::fs::read(&path).unwrap();
-    let record = session.active_storyboard().exported().cloned();
-    // A changed and longer film, cancelled once it is under way: had the
-    // cancel done nothing, the file would differ.
-    let first = session.film().clips[0].id;
-    assert!(session.resize_clip(first, true, 600));
-    session.start_export().unwrap();
-    let started = Instant::now();
-    while session.exporting().is_some_and(|(written, _)| written == 0) {
-        assert!(started.elapsed() < Duration::from_secs(60), "the export never began");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    let (written, total) = session.exporting().expect("still under way");
-    assert!(written < total, "it finished before it could be cancelled");
-    session.cancel_export();
-    let started = Instant::now();
-    while session.exporting().is_some() {
-        assert!(started.elapsed() < Duration::from_secs(60));
-        std::thread::sleep(Duration::from_millis(5));
-        session.poll_export();
-    }
-    assert_eq!(std::fs::read(&path).unwrap(), before, "the previous export changed");
-    assert_eq!(session.active_storyboard().exported().cloned(), record, "a cancelled export was recorded");
-    let left: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
-    assert_eq!(left.len(), 1, "a partial file remains: {left:?}");
-}
-
-#[test]
-fn a_missing_sound_refuses_the_export_and_names_its_file() {
-    let (mut session, project) = film("missing");
-    // Removed while the storyboard is open, and decoded: it is still missed.
-    session.load_sounds();
-    std::fs::remove_file(project.join("sounds/click.wav")).unwrap();
-    let reason = session.start_export().unwrap_err();
-    assert_eq!(reason, "click.wav is missing from the sounds folder.");
-    assert!(session.sound_notices().iter().any(|notice| notice.detail == reason));
+    project.join(take)
 }
 
 #[test]
@@ -196,7 +81,7 @@ fn a_sound_replaced_while_open_changes_the_cut() {
     let cut = item(&mut session, board::CUT);
     // The same length, a click on another frame: only the content differs.
     std::thread::sleep(Duration::from_millis(20));
-    std::fs::write(project.join("sounds/click.wav"), wav_bytes(RATE, &clicks(60, &[10]))).unwrap();
+    std::fs::write(project.join("click.wav"), wav_bytes(RATE, &clicks(60, &[10]))).unwrap();
     assert_ne!(item(&mut session, board::CUT), cut, "the cut kept the old sound");
     assert!(session.loudness(10, 1)[0] > 0.5, "the new sound is not what plays");
 }
@@ -269,15 +154,15 @@ fn undoing_an_edit_made_before_an_export_keeps_the_export() {
     session.undo().unwrap();
     assert_eq!(item(&mut session, board::ANIMATIC), exported, "the export was lost or changed by undo");
     assert_eq!(changed_sources(&mut session), [board::CUT], "after the undo the film differs from its export");
-    // Rendered, it is copied once and named by its fingerprint.
+    // Rendered, it is the step's take, where the step filed it.
     let (rendered, fingerprint) = session.render_animatic().unwrap();
     assert_eq!(fingerprint, exported);
-    assert!(project.join(&rendered).is_file());
-    // Exported again after an edit, the first render is untouched.
-    let first_render = std::fs::read(project.join(&rendered)).unwrap();
+    assert_eq!(rendered, session.active_storyboard().exported().unwrap().file);
+    // Exported again after an edit, the first take is untouched.
+    let first_take = std::fs::read(project.join(&rendered)).unwrap();
     session.move_clips(&[first], 3, true);
     export(&mut session, &project);
-    assert_eq!(std::fs::read(project.join(&rendered)).unwrap(), first_render);
+    assert_eq!(std::fs::read(project.join(&rendered)).unwrap(), first_take);
     // Exporting again clears the mark, and gives the animatic a new fingerprint.
     assert!(changed_sources(&mut session).is_empty());
     assert_ne!(item(&mut session, board::ANIMATIC), exported);
@@ -285,7 +170,6 @@ fn undoing_an_edit_made_before_an_export_keeps_the_export() {
     let exported = session.active_storyboard().exported().unwrap().clone();
     std::fs::remove_file(project.join(&exported.file)).unwrap();
     assert_eq!(session.render_animatic().unwrap_err(), "The animatic video has been moved or replaced. Export it again.");
-    assert!(session.exporting().is_none());
 }
 
 /// One tool of a request, through the protocol as the host sends it.
@@ -527,7 +411,7 @@ fn playback_shows_the_exports_own_image() {
     let image = stage(&session).image.expect("an image");
     let shown = std::fs::read(&image.path).unwrap();
     let tracks = session.mix_tracks();
-    let mut plan = crate::export::plan(session.active_storyboard(), tracks);
+    let mut plan = crate::export::plan(session.active_storyboard(), tracks, session.project());
     let frame = plan.frames[40];
     let exported = crate::export::pixels(&mut Looker::new(), &mut plan, frame);
     assert_eq!((image.width, image.height), plan.size);
@@ -579,9 +463,9 @@ fn a_storyboard_with_sound_reopens_through_the_protocol() {
     invoke(&mut server, &tab, "add_clip", serde_json::json!({}), "one");
     invoke(&mut server, &tab, "import_sound", serde_json::json!({ "path": source.display().to_string(), "frame": 3 }), "one");
     server.handle(protocol::HostMessage::Command { id: "save".into(), tab: Some(tab.clone()), arg: None, node: None, viewport: [800.0, 600.0] });
-    let saved: Vec<_> = std::fs::read_dir(&project).unwrap().filter_map(|entry| entry.ok()).map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|extension| extension == "smx")).collect();
+    let saved: Vec<_> = std::fs::read_dir(project.join("work")).unwrap().filter_map(|entry| entry.ok()).map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|extension| extension == "smx")).collect();
     assert_eq!(saved.len(), 1, "the storyboard was not written into the project");
-    // A new program opens it: the sound is decoded again from sounds/.
+    // A new program opens it: the sound is decoded again from where it is.
     let mut again = crate::serve::Server::new(None);
     again.greeting();
     again.handle(protocol::HostMessage::Project { folder: project.display().to_string(), skills: false });

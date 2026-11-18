@@ -72,7 +72,7 @@ impl Session {
             return;
         }
         let tracks = self.heard_tracks();
-        let plan = crate::export::plan(self.active_storyboard(), tracks);
+        let plan = crate::export::plan(self.active_storyboard(), tracks, self.project.as_deref());
         self.playback_mut().prepare(plan);
     }
 
