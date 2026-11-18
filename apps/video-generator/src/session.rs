@@ -213,7 +213,7 @@ impl Tab {
         let tile = self.rounds.tiles.get(self.rounds.shown?)?;
         let round = self.rounds.round_of(tile)?;
         let count = self.rounds.round_tiles(tile).len();
-        let title = format!("Round {} · {} · {}", round.number, crate::rounds::model_name(round), layers::words::takes_word(count));
+        let title = format!("{} · {}", crate::rounds::round_title(round.number, crate::rounds::model_name(round)), layers::words::takes_word(count));
         let references =
             round.references.iter().enumerate().map(|(index, reference)| layers::words::sheet_label(index, reference, &crate::rounds::ROLES)).collect();
         Some(view::Sheet { title, references })
