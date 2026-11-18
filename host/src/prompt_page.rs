@@ -25,6 +25,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::workspace::{EndpointKind, Settings};
 
+/// The skill whose every request finishes a take, as Spumcake-Skills'
+/// reports record it.
+const FINISHING_SKILL: &str = "generate-finished-shot";
+/// The skill of Last order's older finishing rounds, which
+/// generate-finished-shot claims as its own: one of its requests finishes
+/// a take when it sends exactly one file in `FINISHING_FIELD`.
+const OLDER_FINISHING_SKILL: &str = "create-final-animation";
+/// The field Last order's older finishing rounds sent their take in.
+const FINISHING_FIELD: &str = "video_url";
+
 /// How long a cell stands still before its cost is asked again.
 const COST_PAUSE: Duration = Duration::from_millis(700);
 
@@ -38,6 +48,8 @@ pub(crate) struct Canon {
     pub published: HashSet<String>,
     /// The artifact each step makes, by its chain and its name.
     pub step_artifacts: HashMap<(String, String), String>,
+    /// The skill each step follows, by its chain and its name.
+    pub step_skills: HashMap<(String, String), String>,
 }
 
 /// The living pipeline: the highest-numbered folder in `pipeline/`, as the
@@ -88,6 +100,14 @@ pub(crate) fn read_canon(scripts: &Path, folder: &Path, setup: &[(String, String
             && let [Value::String(chain), Value::String(step), Value::String(artifact)] = cells.as_slice()
         {
             canon.step_artifacts.insert((chain.clone(), step.clone()), artifact.clone());
+        }
+    }
+    let skills = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(chain, name, skill) FROM step WHERE skill IS NOT NULL AND skill != ''", "--read-only"]).unwrap_or_default();
+    for row in skills.lines() {
+        if let Ok(Value::Array(cells)) = serde_json::from_str::<Value>(row)
+            && let [Value::String(chain), Value::String(step), Value::String(skill)] = cells.as_slice()
+        {
+            canon.step_skills.insert((chain.clone(), step.clone()), skill.clone());
         }
     }
     Ok(canon)
@@ -345,10 +365,10 @@ fn slim(record: Value) -> Value {
     let references: Vec<Value> = record
         .get("references")
         .and_then(Value::as_array)
-        .map(|references| references.iter().map(|reference| json!({ "file": reference.get("file"), "role": reference.get("role") })).collect())
+        .map(|references| references.iter().map(|reference| json!({ "file": reference.get("file"), "role": reference.get("role"), "field": reference.get("field") })).collect())
         .unwrap_or_default();
     json!({
-        "setup": keep("setup"), "chain": keep("chain"), "step": keep("step"), "started": keep("started"),
+        "setup": keep("setup"), "chain": keep("chain"), "step": keep("step"), "skill": keep("skill"), "started": keep("started"),
         "outputs": keep("outputs"), "prompt": keep("prompt"), "references": references,
         "sent": { "model": record.pointer("/sent/model").cloned().unwrap_or(Value::Null) },
         "endpoint": { "model": record.pointer("/endpoint/model").cloned().unwrap_or(Value::Null) },
@@ -357,10 +377,21 @@ fn slim(record: Value) -> Value {
 
 pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs: &[String], canon: &Canon, reports: &mut Reports) -> Vec<Round> {
     let mut found: Vec<(u64, Round)> = Vec::new();
+    // A report that names the step's chain and no step is a take made for
+    // the chain, as Last order's LTX trial of its final shot is: it is the
+    // step's when it follows the step's skill and no other step of the
+    // chain follows that skill.
+    let chain_take = |record: &Value, step: &StepRef| {
+        let Some(skill) = canon.step_skills.get(&(step.chain.clone(), step.step.clone())) else { return false };
+        record.get("step").and_then(Value::as_str).is_none()
+            && record.get("skill").and_then(Value::as_str) == Some(skill.as_str())
+            && canon.step_skills.iter().filter(|((chain, _), other)| *chain == step.chain && *other == skill).count() == 1
+    };
     let names_cell = |record: &Value| {
         record.pointer("/setup/cell/item").and_then(Value::as_str) == Some(cell)
             || step.is_some_and(|step| {
-                record.get("chain").and_then(Value::as_str) == Some(step.chain.as_str()) && record.get("step").and_then(Value::as_str) == Some(step.step.as_str())
+                record.get("chain").and_then(Value::as_str) == Some(step.chain.as_str())
+                    && (record.get("step").and_then(Value::as_str) == Some(step.step.as_str()) || chain_take(record, step))
             })
     };
     // Each report, by its id, with its record and the file it is in.
@@ -402,19 +433,24 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
         seeds.insert(file.clone());
     }
     // Then the rounds a found take was finished through, as a retime or an
-    // upscale is: a request with no prompt that sends one file of its own
-    // media, the take it finishes. Each found take brings what was finished
-    // from it, and each found round the take it finished, back to the round
-    // that made it; never the other rounds made from that one, nor a take
-    // made with a prompt, such as an image made from another image, and
-    // never a report that names another step or another cell.
+    // upscale is: a request of the finishing skill, whose one reference of
+    // its own media is the take it finishes, or one of Last order's older
+    // finishing rounds, whose one reference in the finishing field is. Each found take brings what was finished from it, and each found
+    // round the take it finished, back to the round that made it; never the
+    // other rounds made from that one, nor a take made from another as a
+    // reference, such as an image from another image, and never a report
+    // that names another step or another cell.
     let finished_from = |record: &Value| -> Option<String> {
-        if record.get("prompt").and_then(Value::as_str).is_some_and(|prompt| !prompt.trim().is_empty()) {
-            return None;
-        }
-        let media = media_type(outputs_of(record).first()?);
-        let same: Vec<&str> = record.get("references").and_then(Value::as_array).into_iter().flatten().filter_map(|reference| reference.get("file").and_then(Value::as_str)).filter(|path| media_type(path) == media).collect();
-        if let [only] = same.as_slice() { Some(only.to_string()) } else { None }
+        let references = record.get("references").and_then(Value::as_array).into_iter().flatten();
+        let finished: Vec<&str> = match record.get("skill").and_then(Value::as_str) {
+            Some(FINISHING_SKILL) => {
+                let media = media_type(outputs_of(record).first()?);
+                references.filter_map(|reference| reference.get("file").and_then(Value::as_str)).filter(|path| media_type(path) == media).collect()
+            }
+            Some(OLDER_FINISHING_SKILL) => references.filter(|reference| reference.get("field").and_then(Value::as_str) == Some(FINISHING_FIELD)).filter_map(|reference| reference.get("file").and_then(Value::as_str)).collect(),
+            _ => return None,
+        };
+        if let [only] = finished.as_slice() { Some(only.to_string()) } else { None }
     };
     let own_step = |record: &Value| {
         let named = |key: &str, own: Option<&str>| match record.get(key).and_then(Value::as_str) {
@@ -984,35 +1020,49 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("prompt-rounds-by-file-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(folder.join("requests")).unwrap();
-        // A finishing request sends no prompt; every other one does.
-        let report = |id: &str, started: &str, step: Value, outputs: Value, references: Value| {
-            let prompt = if id == "retime" || id == "upscale" { "" } else { "p" };
-            let record = json!({ "id": id, "started": started, "prompt": prompt, "sent": { "model": "m" }, "outputs": outputs, "references": references, "chain": step.get("chain"), "step": step.get("step"), "setup": null });
+        let report = |id: &str, started: &str, step: Value, skill: &str, outputs: Value, references: Value| {
+            let record = json!({ "id": id, "started": started, "prompt": "p", "sent": { "model": "m" }, "outputs": outputs, "references": references, "chain": step.get("chain"), "step": step.get("step"), "skill": skill, "setup": null });
             std::fs::write(folder.join(format!("requests/{id}.html")), format!("<script type=\"application/json\" id=\"request\">{record}</script>")).unwrap();
         };
         let reference = |file: &str, role: &str| json!({ "file": file, "role": role });
+        // A finishing request sends its take in the finishing field.
+        let finishes = |file: &str, role: &str| json!({ "file": file, "role": role, "field": FINISHING_FIELD });
         let none = json!({});
-        report("sheet", "2026-11-14T10:00:00Z", none.clone(), json!(["library/sheet.png"]), json!([]));
-        report("line art", "2026-11-14T10:30:00Z", json!({ "chain": "the line-art shot", "step": "line-art shot" }), json!(["library/line-art.mp4"]), json!([]));
-        report("keyframe", "2026-11-14T11:00:00Z", none.clone(), json!(["library/keyframe.png"]), json!([reference("library/layout.png", "image 1"), reference("library/sheet.png", "image 2")]));
-        report("shot", "2026-11-14T12:00:00Z", none.clone(), json!(["library/shot.mp4"]), json!([reference("library/keyframe.png", "start"), reference("library/line-art.mp4", "Video 1, the motion")]));
-        report("retime", "2026-11-14T13:00:00Z", none.clone(), json!(["library/shot-60.mp4"]), json!([reference("library/shot.mp4", "the approved final shot, at 24 fps")]));
-        report("upscale", "2026-11-14T14:00:00Z", none.clone(), json!(["library/shot-4k.mp4"]), json!([reference("library/shot-60.mp4", "the final shot at 60 fps, 1344x768")]));
-        report("other", "2026-11-14T15:00:00Z", none.clone(), json!(["library/other.mp4"]), json!([reference("library/shot.mp4", "Video 1"), reference("library/elsewhere.mp4", "Video 2")]));
-        report("sibling", "2026-11-14T16:00:00Z", none.clone(), json!(["library/sibling.mp4"]), json!([reference("library/line-art.mp4", "the control video")]));
-        // Images made each from one image alone, with a prompt, as Last
-        // order's first pipeline made its studies from its texture.
-        report("texture", "2026-11-11T09:00:00Z", none.clone(), json!(["library/texture.png"]), json!([]));
-        report("otis", "2026-11-11T09:30:00Z", none.clone(), json!(["library/otis.png"]), json!([reference("library/texture.png", "image 1")]));
-        report("dusk", "2026-11-11T10:00:00Z", none.clone(), json!(["library/dusk.png"]), json!([reference("library/texture.png", "image 1")]));
+        let chain = json!({ "chain": "the final shot" });
+        report("sheet", "2026-11-14T10:00:00Z", none.clone(), "generate-model-sheet", json!(["library/sheet.png"]), json!([]));
+        report("line art", "2026-11-14T10:30:00Z", json!({ "chain": "the line-art shot", "step": "line-art shot" }), "create-line-animation", json!(["library/line-art.mp4"]), json!([]));
+        report("keyframe", "2026-11-14T11:00:00Z", none.clone(), "generate-keyframe", json!(["library/keyframe.png"]), json!([reference("library/layout.png", "image 1"), reference("library/sheet.png", "image 2")]));
+        report("shot", "2026-11-14T12:00:00Z", none.clone(), "create-final-animation", json!(["library/shot.mp4"]), json!([reference("library/keyframe.png", "start"), reference("library/line-art.mp4", "Video 1, the motion")]));
+        // Last order's older retime: its role is its own, its field is the mark.
+        report("retime", "2026-11-14T13:00:00Z", chain.clone(), "create-final-animation", json!(["library/shot-60.mp4"]), json!([finishes("library/shot.mp4", "the approved final shot, at 24 fps")]));
+        // generate-finished-shot's skill alone marks it, whatever field its model takes.
+        report("upscale", "2026-11-14T14:00:00Z", chain.clone(), "generate-finished-shot", json!(["library/shot-4k.mp4"]), json!([reference("library/shot-60.mp4", "the final shot at 60 fps, 1344x768")]));
+        report("other", "2026-11-14T15:00:00Z", none.clone(), "", json!(["library/other.mp4"]), json!([reference("library/shot.mp4", "Video 1"), reference("library/elsewhere.mp4", "Video 2")]));
+        report("sibling", "2026-11-14T16:00:00Z", none.clone(), "create-final-animation", json!(["library/sibling.mp4"]), json!([finishes("library/line-art.mp4", "the control video")]));
+        // A take made for the chain with the final shot's skill, as the LTX
+        // trial is, and a start frame made for it with the keyframes' skill,
+        // which two of the chain's steps follow.
+        report("trial", "2026-11-14T12:30:00Z", chain.clone(), "create-final-animation", json!(["library/trial.mp4"]), json!([finishes("library/previs.mp4", "the control video")]));
+        report("start frame", "2026-11-14T11:30:00Z", chain.clone(), "generate-keyframe", json!(["library/start.png"]), json!([reference("library/previs.png", "image 1")]));
+        // Images made each from one image alone, as Last order's first
+        // pipeline made its studies from its texture.
+        report("texture", "2026-11-11T09:00:00Z", none.clone(), "", json!(["library/texture.png"]), json!([]));
+        report("otis", "2026-11-11T09:30:00Z", none.clone(), "generate-canonical-image", json!(["library/otis.png"]), json!([reference("library/texture.png", "image 1")]));
+        report("dusk", "2026-11-11T10:00:00Z", none.clone(), "generate-canonical-image", json!(["library/dusk.png"]), json!([reference("library/texture.png", "image 1")]));
         let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
         let mut canon = Canon::default();
         canon.step_artifacts.insert((step.chain.clone(), step.step.clone()), String::from("the final shot: final shot"));
         canon.files.insert(String::from("the final shot: final shot"), String::from("library/shot.mp4"));
+        for (name, skill) in [("final shot", "create-final-animation"), ("final frame, waiting", "generate-keyframe"), ("final frame, wiping", "generate-keyframe")] {
+            canon.step_skills.insert((step.chain.clone(), name.to_string()), skill.to_string());
+        }
         let ids = |rounds: Vec<Round>| rounds.iter().map(|round| round.request.clone()).collect::<Vec<_>>();
-        // The step's published take, then what was finished from it.
+        // The step's published take, the chain's trial, then what was finished.
         let shot = rounds(&folder, "final", Some(&step), &[], &canon, &mut Reports::default());
-        assert_eq!(ids(shot), ["shot", "retime", "upscale"], "the final shot's rounds, with its finishing and nothing else");
+        assert_eq!(ids(shot), ["shot", "trial", "retime", "upscale"], "the final shot's rounds, with its trial and its finishing and nothing else");
+        // The start frame is neither keyframe step's alone, so it is neither's.
+        let waiting = StepRef { chain: step.chain.clone(), step: String::from("final frame, waiting") };
+        assert!(rounds(&folder, "waiting", Some(&waiting), &[], &canon, &mut Reports::default()).is_empty(), "a take two steps could own was given to one");
         // A cell whose file is the finished take, back to its generation.
         let finished = rounds(&folder, "finished", None, &[String::from("library/shot-4k.mp4")], &Canon::default(), &mut Reports::default());
         assert_eq!(ids(finished), ["shot", "retime", "upscale"], "a finished take's rounds, back to its generation and no further");
@@ -1047,14 +1097,20 @@ mod tests {
             let found = rounds(&folder, "a take", None, std::slice::from_ref(take), &Canon::default(), &mut reports);
             assert!(!found.is_empty() && found.len() <= 3, "{take} opens with {} rounds", found.len());
         }
-        // The final shot's step: its nine takes, then the retime and the
-        // upscale finished from the approved one, and not the LTX attempt.
+        // The final shot's step: its nine takes and the LTX trial, then the
+        // retime and the upscale finished from the approved take; and not
+        // the start frame or the door's sound, made for its chain by skills
+        // it does not follow.
         let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
-        let shot = rounds(&folder, "a take", Some(&step), &[], &Canon::default(), &mut reports);
+        let mut canon = Canon::default();
+        for (name, skill) in [("final shot", "create-final-animation"), ("final frame, waiting", "generate-keyframe"), ("final frame, wiping", "generate-keyframe"), ("plate, door closed", "generate-background"), ("plate, door open", "generate-background")] {
+            canon.step_skills.insert((step.chain.clone(), name.to_string()), skill.to_string());
+        }
+        let shot = rounds(&folder, "a take", Some(&step), &[], &canon, &mut reports);
         let ids = found_ids(&shot);
-        assert_eq!(ids.len(), 11, "{ids:?}");
-        assert_eq!(ids[9..], ["2026-11-15_08-12-final-shot-60fps", "2026-11-15_08-17-final-shot-60fps-4k"]);
-        assert!(!ids.iter().any(|id| id.ends_with("-ltx")), "{ids:?}");
+        assert_eq!(ids.len(), 12, "{ids:?}");
+        assert!(ids.contains(&"2026-11-14_20-41-final-shot-ltx"), "{ids:?}");
+        assert_eq!(ids[10..], ["2026-11-15_08-12-final-shot-60fps", "2026-11-15_08-17-final-shot-60fps-4k"]);
     }
 
     fn found_ids(rounds: &[Round]) -> Vec<&str> {
