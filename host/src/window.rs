@@ -3690,7 +3690,7 @@ mod tests {
         assert_eq!(out, vec![Command::Result(answer("c2"))]);
         assert!(routing.poll(&mut apps).is_empty());
 
-        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default(), None);
+        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default(), None, &Default::default());
         assert!(targets.iter().all(|target| target.app != "gone"), "an exited process is offered");
         let here = targets.iter().find(|target| target.app == "here").expect("the living process was dropped");
         assert_eq!(here.tabs[0].label, "Template");

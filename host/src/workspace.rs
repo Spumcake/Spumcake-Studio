@@ -1961,7 +1961,7 @@ mod tests {
         let skill = settings.image_skill().cloned().expect("an image skill");
         assert_eq!(skill.makes, Makes::Images);
         assert_eq!(settings.skill_route(&skill).map(|(_, model)| model).as_deref(), Some(IMAGE_MODEL));
-        settings.endpoints.push(EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into(), description: String::new() });
+        settings.update(|settings| settings.endpoints.push(EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into(), description: String::new() }));
         settings.remember_route(&skill.id, "local", "llama3.2");
         assert!(!settings.skill_runs(&skill), "an image skill runs where Studio cannot make images");
         settings.update(|settings| settings.skills.retain(|known| known.makes != Makes::Images));
