@@ -3,16 +3,14 @@
 //! `Publishing::asked` for the runner, which fills the publish card or the
 //! history card. The window draws them, keeps what the person chose in
 //! `Publishing::confirmed` for the runner to carry out, and sends the
-//! runner's answer back to whoever asked: a workspace, or the assistant's
-//! `publish_take`, through the same card. With no project open, or no
+//! runner's answer back to the workspace that asked. With no project open, or no
 //! Spumcake-Skills found, a workspace's publish is refused with why.
 
 use super::HostWindow;
 use crate::history_card::History;
 use crate::publish_card::{PublishCardEvent, PublishCardView, RefusedEvent};
 use eframe::egui;
-use protocol::{HostMessage, ToolResult};
-use serde_json::json;
+use protocol::HostMessage;
 use std::collections::VecDeque;
 
 /// Who asked to publish, and so hears the answer.
@@ -20,31 +18,19 @@ use std::collections::VecDeque;
 pub(crate) enum Asker {
     /// A workspace's tab, by the workspace's index.
     Workspace { app: usize, tab: String },
-    /// The assistant's `publish_take`, by its call.
-    Assistant { call: String },
 }
 
 /// The answer one asker hears.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Reply {
     Workspace(usize, HostMessage),
-    Assistant(ToolResult),
 }
 
 /// The answer to a publish or revert: the file published and its version,
 /// or why not. `declined` is the user's Cancel, which is no failure.
-pub(crate) fn published_reply(asker: Asker, artifact: String, file: String, version: Option<u32>, error: Option<String>, declined: bool) -> Reply {
-    match asker {
-        Asker::Workspace { app, tab } => Reply::Workspace(app, HostMessage::Published { tab, artifact, file, version, error }),
-        Asker::Assistant { call } => {
-            let output = match (&error, declined) {
-                (_, true) => json!({ "error": "The user did not approve it, so nothing was published.", "declined": true }),
-                (Some(error), false) => json!({ "error": error, "artifact": artifact }),
-                (None, false) => json!({ "artifact": artifact, "file": file, "version": version }),
-            };
-            Reply::Assistant(ToolResult { call, ok: error.is_none() && !declined, output, images: Vec::new() })
-        }
-    }
+pub(crate) fn published_reply(asker: Asker, artifact: String, file: String, version: Option<u32>, error: Option<String>, _declined: bool) -> Reply {
+    let Asker::Workspace { app, tab } = asker;
+    Reply::Workspace(app, HostMessage::Published { tab, artifact, file, version, error })
 }
 
 /// A film a workspace asked to deliver: published as `artifact` and
@@ -184,14 +170,12 @@ impl HostWindow {
     pub(crate) fn reply(&mut self, reply: Reply) {
         match reply {
             Reply::Workspace(app, message) => self.send(app, message),
-            Reply::Assistant(answer) => self.assistant.send(assistant::Command::Result(answer)),
         }
     }
 
     /// The runner's answer to a confirmed card: the workspace hears it and
     /// says the publish with its version, and a refusal shows with "Ask the
     /// assistant".
-    /// The assistant hears it on its call instead, and needs no refusal card.
     pub(crate) fn answer_published(&mut self, asker: Asker, artifact: String, file: String, version: Option<u32>, error: Option<String>) {
         if let (Some(sentence), Asker::Workspace { app, tab }) = (&error, &asker) {
             self.publishing.refused = Some(Refusal { app: *app, tab: tab.clone(), artifact: artifact.clone(), file: file.clone(), sentence: sentence.clone() });
@@ -298,9 +282,8 @@ mod tests {
         assert_eq!(output_name("2026-11-15_08-25", "002", "last-order", "library/2026-11-15_08-20-final-shot-mix.mp4"), "output/2026-11-15_08-25-002-last-order.mp4");
     }
 
-    /// Catches a Cancel heard as a publish, or heard by the wrong asker: a
-    /// workspace hears `published` with no file and no error, and the
-    /// assistant hears on its own call that nothing was published.
+    /// Catches a Cancel heard as a publish: the workspace hears
+    /// `published` with no file and no error.
     #[test]
     fn cancel_answers_whoever_asked() {
         let workspace = published_reply(Asker::Workspace { app: 2, tab: String::from("1") }, String::from("the diner: layout"), String::new(), None, None, true);
@@ -308,14 +291,5 @@ mod tests {
             workspace,
             Reply::Workspace(2, HostMessage::Published { tab: String::from("1"), artifact: String::from("the diner: layout"), file: String::new(), version: None, error: None })
         );
-        let Reply::Assistant(answer) = published_reply(Asker::Assistant { call: String::from("c7") }, String::from("the diner: layout"), String::new(), None, None, true) else {
-            panic!("the assistant's Cancel went to a workspace");
-        };
-        assert_eq!(answer.call, "c7");
-        assert!(!answer.ok && answer.output["declined"] == true);
-        let Reply::Assistant(published) = published_reply(Asker::Assistant { call: String::from("c8") }, String::from("the diner: layout"), String::from("library/x.png"), Some(3), None, false) else {
-            panic!("the assistant's publish went to a workspace");
-        };
-        assert!(published.ok && published.output["version"] == 3);
     }
 }

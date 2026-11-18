@@ -26,7 +26,9 @@
 //!   card, answered `step_ran` with the take it made. It needs no assistant.
 
 use super::HostWindow;
-use super::publishing::{Asked, Asker, Card, Delivery};
+use super::publishing::{Asked, Card, Delivery};
+#[cfg(test)]
+use super::publishing::Asker;
 use crate::publish_card::PublishCardView;
 use crate::runner::ScriptEnv;
 use protocol::{CanonVersion, HostMessage};
@@ -544,33 +546,6 @@ impl HostWindow {
         Some(Place { scripts: env.scripts?, vars: env.vars, folder, pipeline })
     }
 
-    /// The assistant's `publish_take`: a take published as a canon
-    /// artifact through the same publish card a workspace's publish shows.
-    /// Its answer comes on the call when the card is answered.
-    pub(super) fn publish_take(&mut self, call: String, input: &Value) -> Option<protocol::ToolResult> {
-        let text = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let (artifact, take) = (text("artifact"), text("take"));
-        if artifact.is_empty() || take.is_empty() {
-            return Some(protocol::ToolResult { call, ok: false, output: serde_json::json!({ "error": "Name the take's file and the canon artifact, \"<element>: <role>\", it is published as." }), images: Vec::new() });
-        }
-        let with = input.get("with").and_then(Value::as_array).map(|with| with.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default();
-        let sources = input
-            .get("from")
-            .and_then(Value::as_array)
-            .map(|from| {
-                from.iter()
-                    .filter_map(|source| {
-                        let artifact = source.get("artifact").and_then(Value::as_str)?.trim().to_string();
-                        let role = source.get("role").and_then(Value::as_str).unwrap_or("").trim().to_string();
-                        (!artifact.is_empty()).then_some((artifact, role))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.publishing.asked.push_back(Asked::Publish { asker: Asker::Assistant { call }, artifact, source: take, from: Vec::new(), with, sources });
-        None
-    }
-
     /// The user's answer on the Deliver card: a yes carries it out, a
     /// Cancel answers the workspace with no file and no error.
     pub(crate) fn answer_delivery(&mut self, yes: bool) {
@@ -874,29 +849,29 @@ mod tests {
         assert!(run("git", &["status", "--porcelain", "--", "pipeline", file.as_str()]).trim().is_empty(), "the publish was not committed");
         assert_eq!(versions(&place, "the diner: layout").unwrap().len(), 1);
 
-        // The assistant's take of a step that refers to the layout records
+        // A take of a step that refers to the layout records
         // it, with its role, as publishing it by hand does.
         skills("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", r#"{"kind": "fal", "model": "stand-in"}"#, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: layout", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
         std::fs::create_dir_all(folder.join("agent")).unwrap();
         std::fs::write(folder.join("agent/keyframe.json"), skills("pipeline.py", &["fill", "001", "the diner", "keyframe"])).unwrap();
         skills("request.py", &["run", "agent/keyframe.json", "--stand-in"]);
         let take = std::fs::read_dir(folder.join("library")).unwrap().flatten().map(|entry| format!("library/{}", entry.file_name().to_string_lossy())).next().unwrap();
-        let by_assistant = |artifact: &str, source: &str| {
-            let asked = Asked::Publish { asker: Asker::Assistant { call: String::from("c1") }, artifact: artifact.into(), source: source.into(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+        let publish_as = |artifact: &str, source: &str| {
+            let asked = Asked::Publish { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: artifact.into(), source: source.into(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
             let view = prepare(&place, &asked).unwrap();
             carry(&place, &Card { asked, view }, false)
         };
-        by_assistant("the diner: keyframe", &take).unwrap();
+        publish_as("the diner: keyframe", &take).unwrap();
         let recorded = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: keyframe' AND source='the diner: layout'", "--read-only"]);
         assert_eq!(recorded.trim(), "image 1", "the take's made_from was lost");
 
-        // A take whose step lists nothing records what the assistant names,
+        // A take whose step lists nothing records the sources named with it,
         // as the skill has the agent pass it by hand.
         skills("pipeline.py", &["step", "001", "the diner", "sound bed", "--order", "4", "--skill", "generate-sound", "--artifact", "the diner: sound bed"]);
         std::fs::write(folder.join("agent/bed.wav"), b"RIFF").unwrap();
         let bed = skills("request.py", &["resource", "agent/bed.wav", "--name", "bed", "--from", &take]).lines().last().unwrap().trim().to_string();
         let bed_asked = Asked::Publish {
-            asker: Asker::Assistant { call: String::from("c2") },
+            asker: Asker::Workspace { app: 0, tab: String::from("1") },
             artifact: String::from("the diner: sound bed"),
             source: bed,
             from: Vec::new(),
@@ -906,9 +881,9 @@ mod tests {
         let view = prepare(&place, &bed_asked).unwrap();
         carry(&place, &Card { asked: bed_asked, view }, false).unwrap();
         let named = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
-        assert_eq!(named.trim(), "the beat it scores", "a source the assistant named was lost");
+        assert_eq!(named.trim(), "the beat it scores", "a source named with it was lost");
         // A revert to the bed keeps the source named when it was published.
-        let revert = Asked::Revert { asker: Asker::Assistant { call: String::from("c3") }, artifact: String::from("the diner: sound bed"), file: skills("pipeline.py", &["sql", "001", "SELECT file FROM artifact WHERE id='the diner: sound bed'", "--read-only"]).trim().to_string() };
+        let revert = Asked::Revert { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: String::from("the diner: sound bed"), file: skills("pipeline.py", &["sql", "001", "SELECT file FROM artifact WHERE id='the diner: sound bed'", "--read-only"]).trim().to_string() };
         let view = prepare(&place, &revert).unwrap();
         carry(&place, &Card { asked: revert, view }, false).unwrap();
         let kept = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
@@ -923,7 +898,7 @@ mod tests {
         let view = prepare(&place, &asked(vec![String::from("work/Layout.ipx")])).unwrap();
         assert_eq!(view.version, 2);
         carry(&place, &Card { asked: asked(vec![String::from("work/Layout.ipx")]), view }, false).unwrap();
-        let refused = by_assistant("the diner: floor plan", &plan);
+        let refused = publish_as("the diner: floor plan", &plan);
         assert!(refused.as_ref().is_err_and(|error| error.contains("refused")), "a take made from an old input was published: {refused:?}");
         let _ = std::fs::remove_dir_all(&folder);
     }
