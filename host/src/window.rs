@@ -1169,6 +1169,8 @@ impl HostWindow {
                 };
                 let run_on = match self.skill_route_named(&skill, &text("endpoint"), &text("model")) {
                     Some(named) => named,
+                    // Its own choice cannot run it: the assistant names one.
+                    None if !self.settings.skill_runs(&skill) => Err(format!("{} cannot run where it was last chosen to. Name an endpoint and model that can.", skill.name)),
                     None => {
                         let keys = &mut self.keys;
                         crate::endpoints::skill_route(&self.settings, &skill, |id| keys.get(id))

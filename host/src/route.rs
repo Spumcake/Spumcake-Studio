@@ -112,16 +112,13 @@ pub(crate) fn current_host_tool_key(key: &str) -> String {
 const RUN_PROMPT: &str = "run_text_prompt";
 
 /// The skills the person made that the assistant may call: every skill
-/// but Discussion whose chosen endpoint answers prompts. Each with its
-/// tool's name: a slug of the skill's name, made unique.
+/// but Discussion that some endpoint the user set up could run, whether or
+/// not its own choice can, so the assistant may pair it with one that can.
+/// Each with its tool's name: a slug of the skill's name, made unique.
 pub(crate) fn offered_skills(settings: &Settings) -> Vec<(String, SkillSetting)> {
     let mut offered: Vec<(String, SkillSetting)> = Vec::new();
     for skill in &settings.skills {
-        let chats = settings.skill_runs(skill);
-        // A skill with no model chosen yet, and none to fall back on, is not
-        // offered.
-        let model = settings.skill_route(skill).is_some_and(|(_, model)| !model.trim().is_empty());
-        if skill.id == DISCUSSION || !chats || !model {
+        if skill.id == DISCUSSION || !settings.skill_could_run(skill) {
             continue;
         }
         let mut slug: String = skill
@@ -175,8 +172,11 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
             // Where it runs now, so the assistant can keep it there or name
             // another endpoint and model.
             let described = match settings.skill_route(&skill) {
-                Some((endpoint, model)) => format!("{described}. Runs on {} with {model} unless you name another endpoint and model", endpoint.name),
-                None => described,
+                Some((endpoint, model)) if settings.skill_runs(&skill) && !model.trim().is_empty() => {
+                    format!("{described}. Runs on {} with {model} unless you name another endpoint and model", endpoint.name)
+                }
+                Some((endpoint, _)) => format!("{described}. Its chosen endpoint, {}, cannot run it: name an endpoint and model that can", endpoint.name),
+                None => format!("{described}. It has no endpoint chosen: name an endpoint and model that can run it"),
             };
             // An image skill makes one image from a prompt, shown as an
             // Image cell; the assistant writes the whole description.
@@ -514,11 +514,15 @@ mod tests {
         let names: Vec<String> = offered_skills(&settings).into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, ["story_notes", "story_notes_2"]);
         assert!(skill_for_tool(&settings, "inpainter__skills__story_notes").is_some());
-        // One whose chosen endpoint is gone, and with no endpoint to fall
-        // back on, is not offered.
+        // One no endpoint could run is not offered; one whose own choice
+        // cannot run it is, for the assistant to pair.
         let mut lone = Settings::default();
         lone.skills.push(skill("Story notes"));
         assert!(offered_skills(&lone).is_empty(), "a skill with nowhere to run was offered");
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("comfy"), name: String::from("ComfyUI"), kind: crate::workspace::EndpointKind::Comfyui, address: String::from("http://comfy"), description: String::new() });
+        settings.skill_routes.insert(String::from("Story notes"), crate::workspace::SkillRoute { endpoint: String::from("comfy"), model: String::from("graph") });
+        let names: Vec<String> = offered_skills(&settings).into_iter().map(|(name, _)| name).collect();
+        assert!(names.contains(&String::from("story_notes")), "a skill its own choice cannot run was hidden: {names:?}");
     }
 
     /// Catches the assistant running a skill on an endpoint that cannot run

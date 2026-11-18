@@ -498,11 +498,10 @@ fn is_lfs_pointer(bytes: &[u8]) -> bool {
     bytes.starts_with(b"version https://git-lfs.github.com/spec/")
 }
 
-/// The agent's folder: `agent/`, or `working/` in a project that has not
-/// moved it yet.
+/// The agent's folder, `agent/`: Spumcake-Skills accepts no other since
+/// dev `02e1430`, and Last order has moved its own.
 fn agent_folder(folder: &Path) -> PathBuf {
-    let former = folder.join("working");
-    if !folder.join("agent").is_dir() && former.is_dir() { former } else { folder.join("agent") }
+    folder.join("agent")
 }
 
 /// A name the agent gives a file, as one plain file name.

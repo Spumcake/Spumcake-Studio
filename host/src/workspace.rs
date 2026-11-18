@@ -1238,6 +1238,17 @@ impl Settings {
         }
     }
 
+    /// Whether any endpoint the user has set up could run a skill: an
+    /// OpenRouter one for a skill that makes images, any that chats for one
+    /// that makes text. A skill whose own choice cannot run it may still be
+    /// paired with one that can.
+    pub(crate) fn skill_could_run(&self, skill: &SkillSetting) -> bool {
+        self.endpoints.iter().any(|endpoint| match skill.makes {
+            Makes::Images => endpoint.kind == EndpointKind::Openrouter,
+            Makes::Text => endpoint.kind.chats(),
+        })
+    }
+
     /// The first image skill that can run, which a new Image cell runs on.
     pub(crate) fn image_skill(&self) -> Option<&SkillSetting> {
         self.skills.iter().find(|skill| skill.makes == Makes::Images && self.skill_runs(skill))
