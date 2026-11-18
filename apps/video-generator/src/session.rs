@@ -3,11 +3,10 @@
 //! the keys that step frames, files, and the project.
 //!
 //! Inside a project, which the host names with `project`, every tab is
-//! written into the project's folder as a `.vgx` file by itself, a second
-//! after it changes, and before its tab closes, a `keep` is answered, or
-//! the host quits, as the Image Generator's images are; in a Skills
-//! project, into its `work/` folder. Save and Save As are offered only
-//! outside a project.
+//! written into the project's `work/` folder as a `.vgx` file by itself, a
+//! second after it changes, and before its tab closes, a `keep` is
+//! answered, or the host quits, as the Image Generator's images are. Save
+//! and Save As are offered only with no project open.
 //!
 //! Each tab has cells, the Prompt page's, and the rounds the host says
 //! they made, with `takes`, shown on the filmstrip and never kept.
@@ -33,6 +32,7 @@ use std::time::{Duration, Instant};
 
 mod animatic;
 mod deliver;
+mod filing;
 mod mix;
 mod notes;
 mod play;
@@ -51,17 +51,9 @@ pub const ITEM: &str = "Video";
 const FILM_SIZE: [u32; 2] = [176, 44];
 /// The image's size before the host says how large its area is.
 const FIRST_VIEWPORT: [f64; 2] = [1200.0, 800.0];
-/// This workspace's id, as its renders are filed under it.
-const OWNER: &str = "video-generator";
-/// How an item of a tab's file names a marked frame a next round sends:
-/// this, then its fingerprint.
-const MARKED_ITEM: &str = "marked ";
 /// The words a next round's prompt gives a take's notes, and the role of
 /// the marked frame it sends, as the Image Generator's.
 const NOTES_WORDS: &str = "Notes on the last round";
-/// How an item of a tab's file names a Start frame taken from the
-/// animatic: this, then its fingerprint.
-const ANIMATIC_ITEM: &str = "animatic ";
 /// The tip of the reference menu's row taking the animatic's frame while
 /// the cell has no Motion reference, pending the owner's word.
 pub const NO_ANIMATIC: &str = "Add the shot's animatic as a Motion reference first.";
@@ -98,18 +90,11 @@ pub struct Tab {
     /// The rounds its cells made, as the host last sent them, and the take
     /// shown, if one is. Never kept in its file.
     pub rounds: Rounds,
-    /// What the host was last told of its cells and of its file's items.
+    /// What the host was last told of its cells.
     cells_sent: Option<(Vec<protocol::Cell>, Option<String>)>,
-    items_sent: Option<(String, Vec<protocol::Item>)>,
     /// The artifact each cell's step publishes, by the cell's id, as the
     /// host says it, while the program runs; never in the file.
     pub artifacts: HashMap<String, String>,
-    /// The marked frames its next rounds sent, by item id, with their
-    /// fingerprints, while the program runs.
-    marked: Vec<(String, String)>,
-    /// The Start frames taken from the animatic, by item id, with their
-    /// fingerprints, while the program runs.
-    frames_taken: Vec<(String, String)>,
     /// The pre-vis check: a round's take shown over its animatic. For the
     /// tab while the program runs, never kept.
     pub over_animatic: bool,
@@ -251,9 +236,6 @@ pub struct Session {
     pub active: usize,
     next_tab: u64,
     pub project: Option<PathBuf>,
-    /// The host says the project is a Skills project: videos are kept in
-    /// its `work/` folder.
-    pub skills: bool,
     /// Whether the properties panel, with the Prompt page, is open.
     pub panel_open: bool,
     /// Where images and thumbnails for the host are written, and whether it
@@ -289,6 +271,8 @@ pub struct Session {
     /// A Deliver under way: its sound layers being filed, its mix being
     /// made, or the host's card asked.
     delivery: Option<deliver::Delivery>,
+    /// The files written for drafts, being filed.
+    filings: Vec<filing::Filing>,
     /// Tab ids still to ask about while quitting, after the one asked.
     quit_rest: Vec<String>,
     quitting: bool,
@@ -321,7 +305,6 @@ impl Session {
             active: 0,
             next_tab: 1,
             project: None,
-            skills: false,
             panel_open: true,
             in_memory: memory.is_some(),
             cache: memory.unwrap_or_else(scratch_folder),
@@ -339,6 +322,7 @@ impl Session {
             animatics: HashMap::new(),
             page: Page::default(),
             delivery: None,
+            filings: Vec::new(),
             marking: None,
             quit_rest: Vec::new(),
             quitting: false,
@@ -404,8 +388,9 @@ impl Session {
                 }
                 self.note_quit(&mut out);
             }
-            HostMessage::Project { folder, skills } => {
-                self.skills = skills;
+            // Every project is organized one way, so nothing but its folder
+            // is read.
+            HostMessage::Project { folder, .. } => {
                 let folder = PathBuf::from(folder);
                 let folder = folder.canonicalize().unwrap_or(folder);
                 if !self.in_memory {
@@ -421,10 +406,6 @@ impl Session {
                 }
                 self.project = Some(folder);
                 out.extend(self.emit());
-                for index in 0..self.tabs.len() {
-                    self.restore_items(index);
-                }
-                out.extend(self.items_due());
             }
             // A video's file from outside the project opens nothing.
             HostMessage::Open { path: Some(path) } if files::is_vgx(Path::new(&path)) && !self.in_project(Path::new(&path)) => {}
@@ -555,14 +536,13 @@ impl Session {
                     Ok(path) => AppMessage::Kept { tab, path: path.map(|path| path.display().to_string()), error: None },
                     Err(error) => AppMessage::Kept { tab, path: None, error: Some(error) },
                 });
-                // A file written for the first time has items to declare.
-                out.extend(self.items_due());
             }
             HostMessage::Claim { id, path } => {
                 let path = Path::new(&path);
                 out.push(AppMessage::Claimed { id, yours: files::is_vgx(path) && self.in_project(path) });
             }
-            HostMessage::Render { id, item, media_type, .. } => out.push(self.render(id, &item, &media_type)),
+            // Nothing is an item: the protocol may still ask.
+            HostMessage::Render { id, .. } => out.push(self.render(id)),
             HostMessage::Takes { cell, rounds } => {
                 if let Some(id) = cell.item {
                     self.takes(&id, rounds, &mut out);
@@ -591,7 +571,10 @@ impl Session {
             // Each also declares the filmstrip again, so Deliver… is off while
             // a delivery is under way and on again after.
             HostMessage::Filed { id, file, error } => {
-                self.filed(&id, &file, error, &mut out);
+                // A draft's file, or else a sound layer Deliver… files.
+                if !self.filed_for_draft(&id, &file, error.clone(), &mut out) {
+                    self.filed(&id, &file, error, &mut out);
+                }
                 out.extend(self.raster());
             }
             HostMessage::SkillScriptRan { id, output, error } => {
@@ -677,10 +660,7 @@ impl Session {
         if !wrote {
             return Vec::new();
         }
-        // A file written for the first time has items to declare.
-        let mut out = self.declared();
-        out.extend(self.items_due());
-        out
+        self.declared()
     }
 
     /// Inside a project, writes every tab not yet written, as when the host
@@ -746,12 +726,10 @@ impl Session {
         })
     }
 
-    /// Where a tab never written goes: the project's folder, or in a
-    /// Skills project its `work/` folder, as the contract with
-    /// Spumcake-Skills keeps workspace files.
+    /// Where a tab never written goes: the project's `work/` folder, as the
+    /// contract with Spumcake-Skills keeps workspace files.
     fn work_folder(&self) -> Option<PathBuf> {
-        let project = self.project.as_ref()?;
-        Some(if self.skills { project.join("work") } else { project.clone() })
+        Some(self.project.as_ref()?.join("work"))
     }
 
     fn push_tab(&mut self, gallery: Gallery, path: Option<PathBuf>, label: Option<String>) -> usize {
@@ -774,10 +752,7 @@ impl Session {
             drag: None,
             rounds: Rounds::default(),
             cells_sent: None,
-            items_sent: None,
             artifacts: HashMap::new(),
-            marked: Vec::new(),
-            frames_taken: Vec::new(),
             over_animatic: false,
             sound: None,
             mix_before: None,
@@ -1370,9 +1345,6 @@ impl Session {
                     let index = self.push_tab(gallery, Some(path), None);
                     self.tabs[index].frame = read.frame;
                     self.declare_new(out);
-                    // What its drafts name of its own items, declared again.
-                    self.restore_items(index);
-                    out.extend(self.items_due());
                 }
                 Err(reason) => out.push(notice("This video could not be opened", &reason)),
             }
@@ -1424,7 +1396,7 @@ impl Session {
     /// replaces nothing. Returns the file, or none for an untouched tab.
     fn write_into_project(&mut self, index: usize) -> Result<Option<PathBuf>, String> {
         let (Some(project), Some(folder)) = (self.project.clone(), self.work_folder()) else {
-            return Err("No project folder.".into());
+            return Err("No project is open.".into());
         };
         let Some(tab) = self.tabs.get(index) else {
             return Ok(None);

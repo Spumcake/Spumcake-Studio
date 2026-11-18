@@ -166,6 +166,13 @@ fn is(pixel: [u8; 3], colour: fn(u32) -> [u8; 3], frames: u32, index: u32) -> bo
     nearest == index && distance(pixel, colour(index)) <= 6
 }
 
+/// The host's `project` for `folder`, read from its line, so it says
+/// nothing but the folder: every project is organized one way.
+fn in_project(folder: &Path) -> HostMessage {
+    let line = json!({ "type": "project", "folder": folder.display().to_string() }).to_string();
+    protocol::parse_host_message(&line).expect("a project")
+}
+
 fn scratch(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("video-generator-session-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -225,7 +232,7 @@ fn a_gallery_of_takes_is_shown_kept_and_reopened() {
     let tools: Vec<&str> = groups[0].tools.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!((groups[0].name.as_str(), tools), ("Video Generator", vec!["list_takes", "open_video", "show_take", "set_view"]));
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     let (empty, image) = program.view("an empty view at the area's size", |view, _| view.width == 1200);
     assert_eq!((empty.width, empty.height), (1200, 800));
     assert_eq!(image.bytes.len(), 1200 * 800 * 4, "the image file is not the area's size");
@@ -347,7 +354,7 @@ fn a_gallery_of_takes_is_shown_kept_and_reopened() {
 
     // Nothing asks it to save: in a project, the gallery is written by
     // itself about a second after its last change.
-    let kept = dir.join("Untitled Video.vgx");
+    let kept = dir.join("work/Untitled Video.vgx");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !kept.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -364,7 +371,7 @@ fn a_gallery_of_takes_is_shown_kept_and_reopened() {
     let _ = std::fs::remove_dir_all(dir.join(protocol::PROJECT_DIR));
     let mut program = Program::start(true);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.send(HostMessage::Open { path: Some(kept.display().to_string()) });
     let (view, _) = program.view("the gallery reopened", |view, image| {
         names(view) == ["Dusk", "Dawn take"]
@@ -390,7 +397,7 @@ fn the_assistant_opens_shows_and_switches_takes() {
     let (dir, _, _) = project("assistant");
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     let opened = program.invoke("open_video", json!({"path": "takes/Dawn.mp4"})).unwrap();
     assert_eq!((opened["take"].as_u64(), opened["name"].as_str(), opened["frames"].as_u64()), (Some(0), Some("Dawn"), Some(48)));
     let opened = program.invoke("open_video", json!({"path": dir.join("takes/Dusk.mp4").display().to_string(), "name": "Last light"})).unwrap();
@@ -430,7 +437,7 @@ fn a_video_is_previewed_with_its_length() {
         _ => None,
     });
     assert!(edits.iter().any(|kind| kind == "video/mp4"), "{edits:?}");
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: true });
+    program.send(in_project(&dir));
     program.send(HostMessage::Preview { id: "p1".into(), path: "takes/Dawn.mp4".into(), media_type: "video/mp4".into() });
     let (thumbnail, badge, error) = program.wait("the preview", |message| match message {
         AppMessage::Previewed { id, thumbnail, badge, error, .. } if id == "p1" => Some((thumbnail.clone(), badge.clone(), error.clone())),
@@ -467,7 +474,7 @@ fn a_video_opens_as_new_work() {
     let sum = layers::link::sha256_file(&first).unwrap();
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.send(HostMessage::OpenAsNew { path: first.display().to_string(), name: "Dawn/take".into(), from: None });
     let tab = program.wait("the new tab", |message| match message {
         AppMessage::Tabs(tabs) => tabs.tabs.iter().find(|tab| tab.label == "Dawn take").map(|tab| tab.id.clone()),
@@ -482,7 +489,7 @@ fn a_video_opens_as_new_work() {
     });
     assert_eq!(kept.1, None);
     let file = PathBuf::from(kept.0.expect("no file"));
-    assert_eq!(file, dir.join("Dawn take.vgx"));
+    assert_eq!(file, dir.join("work/Dawn take.vgx"));
     let text = String::from_utf8_lossy(&std::fs::read(&file).unwrap()).into_owned();
     assert!(text.contains("\"takes/Dawn.mp4\""), "{text}");
     assert_eq!(layers::link::sha256_file(&first).unwrap(), sum, "the video was written to");
@@ -527,7 +534,7 @@ fn a_view_gesture_zooms_about_its_point() {
     let near = |pixel: [u8; 3], colour: [u8; 3]| distance(pixel, colour) <= 30;
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.open_take(&file);
     // Fitted at its own pixels: 280 to 920 across, 220 to 580 down.
     program.view("the take fitted", |_, image| near(image.at(300, 400), LEFT_HALF) && near(image.at(900, 400), RIGHT_HALF) && image.at(260, 400) == [255, 255, 255]);
@@ -571,13 +578,13 @@ fn round(request: &str, number: u32, takes: Vec<protocol::TakeFile>) -> protocol
     }
 }
 
-/// A Skills project with the two videos, and the program in it: tab 1's
+/// A project with the two videos, and the program in it: tab 1's
 /// cell, from the first `cells` that names one.
 fn requests(label: &str) -> (PathBuf, Program, String) {
     let (dir, _, _) = project(label);
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: true });
+    program.send(in_project(&dir));
     let cell = program.wait("the tab's cell", |message| match message {
         AppMessage::Cells { tab, selected: Some(cell), .. } if tab == "1" => Some(cell.clone()),
         _ => None,
@@ -619,7 +626,7 @@ fn vgx_header(path: &Path) -> Value {
 /// follow the requests' records: `takes` fills the strip with each round
 /// under "Round N · model", each take its first frame with its length, a
 /// canon take sealed, a round being made as its waiting places; and the
-/// tab's file, in the Skills project's `work/` folder, names no round.
+/// tab's file, in the project's `work/` folder, names no round.
 #[test]
 fn takes_fill_the_strip_by_round_and_are_never_kept() {
     let (dir, mut program, cell) = requests("takes");
@@ -654,7 +661,7 @@ fn takes_fill_the_strip_by_round_and_are_never_kept() {
         _ => None,
     });
     let file = PathBuf::from(kept.expect("no file"));
-    assert_eq!(file, dir.join("work/Untitled Video.vgx"), "a Skills project's video is not in work/");
+    assert_eq!(file, dir.join("work/Untitled Video.vgx"), "a project's video is not in work/");
     let header = vgx_header(&file).to_string();
     assert!(!header.contains("\"q1\"") && !header.contains("Model A") && !header.contains("Dawn"), "a round was kept in the file: {header}");
     assert_eq!(vgx_header(&file)["cell"], json!(cell));
@@ -844,7 +851,7 @@ fn a_take_plays_pauses_steps_and_scrubs() {
     let (dir, first, _) = project("play");
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.open_take(&first);
     let (view, _) = program.view("the take at frame 0", |view, image| {
         transport(view).is_some_and(|transport| transport.time == 0.0) && is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0)
@@ -891,7 +898,7 @@ fn side_by_side_shows_one_time() {
     write_video_at(&first, DAWN_FRAMES, dawn, 30);
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.open_take(&first);
     program.open_take(&second);
     program.view("the second take", |view, _| names(view).len() == 2);
@@ -917,7 +924,7 @@ fn a_take_with_sound_has_its_waveform() {
     write_sounding_video(&file);
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.open_take(&file);
     let (view, _) = program.view("the waveform", |view, _| transport(view).is_some_and(|transport| !transport.rows.is_empty()));
     let rows = transport(&view).unwrap().rows;
@@ -956,7 +963,7 @@ fn at_one_second(label: &str) -> (PathBuf, PathBuf, Program) {
     let (dir, first, _) = project(label);
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.open_take(&first);
     program.view("the take", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0));
     program.send(HostMessage::TransportTime { tab: "1".into(), time: 1.0 });
@@ -1061,7 +1068,7 @@ fn notes_are_kept_by_take_through_a_restart() {
 
     let mut program = Program::start(true);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.send(HostMessage::Open { path: Some(kept) });
     let (view, _) = program.view("the pin's cue again", |view, _| !cues(view).is_empty());
     assert_eq!(cues(&view), [(1.0, "1 — 1.0 s".to_string(), Some(RED))]);
@@ -1069,11 +1076,30 @@ fn notes_are_kept_by_take_through_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Catches a next round that drops a take's notes, or their times: the
-/// prompt ends with the pins' words, each with its time, and the frame at
-/// the first note's time, marked, is sent with the role "Notes on the
-/// last round", declared as an item of the tab's file and rendered as a
-/// PNG of the take's size with the pin on it.
+/// The draft `cell`'s parts, from the next `cells` that has it and that
+/// `pick` takes.
+fn draft_of(program: &Program, what: &str, mut pick: impl FnMut(&protocol::Cell) -> bool) -> protocol::Cell {
+    program.wait(what, |message| match message {
+        AppMessage::Cells { cells, .. } => cells.iter().find(|own| pick(own)).cloned(),
+        _ => None,
+    })
+}
+
+/// A draft's path with `role`, when it has one.
+fn path_with_role(cell: &protocol::Cell, role: &str) -> Option<(String, String)> {
+    cell.input.iter().find_map(|part| match part {
+        protocol::CellPart::Path { path, media_type, role: Some(own), .. } if own == role => Some((path.clone(), media_type.clone())),
+        _ => None,
+    })
+}
+
+/// Catches a next round that drops a take's notes or their times, or
+/// sends a model a file that lives only in `work/`: the prompt ends with
+/// the pins' words, each with its time; the frame at the first note's
+/// time, marked, is written beside the tab's file in `work/` as a PNG of
+/// the take's size with the pin on it, and filed from the tab's file and
+/// the take; once `filed` names it, the draft has the filed file with the
+/// role "Notes on the last round", and keeps it through a restart.
 #[test]
 fn next_round_carries_the_notes_and_the_marked_frame() {
     let (dir, mut program, cell) = requests("notes-next");
@@ -1086,34 +1112,12 @@ fn next_round_carries_the_notes_and_the_marked_frame() {
     pin(&mut program, "less rain");
 
     program.command("take_next_round", json!({ "take": "takes/Dawn.mp4" }));
-    let draft = program.wait("the draft", |message| match message {
-        AppMessage::Cells { cells, selected: Some(selected), .. } => cells.iter().find(|own| own.id == *selected && own.id != cell).cloned(),
+    let (filing, path, from) = program.wait("the marked frame filed", |message| match message {
+        AppMessage::FileResource { path, from, id: Some(id), .. } => Some((id.clone(), path.clone(), from.clone())),
         _ => None,
     });
-    assert_eq!(draft.prompt(), "The door opens slowly. Notes on the last round: 1. less rain (1.0 s)");
-    let marked = draft
-        .input
-        .iter()
-        .find_map(|part| match part {
-            protocol::CellPart::Item { item, media_type, role, .. } => Some((item.clone(), media_type.clone(), role.clone())),
-            _ => None,
-        })
-        .expect("no marked frame");
-    assert_eq!((marked.1.as_str(), marked.2.as_deref()), ("image/png", Some("Notes on the last round")));
-    let item = marked.0;
-    assert!(item.item.as_deref().is_some_and(|id| id.starts_with("marked ")));
-    let declared = program.wait("the marked frame's item", |message| match message {
-        AppMessage::Items { path, items } if *path == item.path => items.iter().find(|own| Some(&own.id) == item.item.as_ref()).cloned(),
-        _ => None,
-    });
-    assert_eq!(declared.name, "Notes on the last round");
-
-    program.send(HostMessage::Render { id: "r1".into(), item: item.clone(), media_type: "image/png".into(), part: None });
-    let path = program.wait("the marked frame rendered", |message| match message {
-        AppMessage::Rendered { id, path, error, .. } if id == "r1" => Some(path.clone().unwrap_or_else(|| panic!("not rendered: {error:?}"))),
-        _ => None,
-    });
-    assert!(path.starts_with(protocol::PROJECT_DIR), "the marked frame is not under the project's renders: {path}");
+    assert_eq!(path, "work/Untitled Video notes.png");
+    assert_eq!(from, ["work/Untitled Video.vgx", "takes/Dawn.mp4"]);
     let png = image::load_from_memory(&std::fs::read(dir.join(&path)).unwrap()).unwrap().to_rgba8();
     assert_eq!(png.dimensions(), SIZE, "the marked frame is not the take's size");
     let pixel = |x: u32, y: u32| {
@@ -1122,6 +1126,27 @@ fn next_round_carries_the_notes_and_the_marked_frame() {
     };
     assert!(distance(pixel(SIZE.0 / 2, SIZE.1 / 2 + 6), RED) <= 6, "the pin is not on the marked frame");
     assert!(is(pixel(10, 10), dawn, DAWN_FRAMES, 24), "the marked frame is not the frame at the note's time");
+    let draft = draft_of(&program, "the draft", |own| own.id != cell && own.step.is_none() && own.prompt().contains("Notes on the last round"));
+    assert_eq!(draft.prompt(), "The door opens slowly. Notes on the last round: 1. less rain (1.0 s)");
+    assert_eq!(path_with_role(&draft, "Notes on the last round"), None, "a file only in work/ is in the draft");
+
+    program.send(HostMessage::Filed { id: filing, file: "library/notes-1.png".into(), error: None });
+    let filed = draft_of(&program, "the filed marked frame in the draft", |own| own.id == draft.id && path_with_role(own, "Notes on the last round").is_some());
+    assert_eq!(path_with_role(&filed, "Notes on the last round"), Some(("library/notes-1.png".to_string(), "image/png".to_string())));
+
+    program.send(HostMessage::Keep { tab: "1".into() });
+    let kept = program.wait("kept", |message| match message {
+        AppMessage::Kept { tab, path, .. } if tab == "1" => path.clone(),
+        _ => None,
+    });
+    program.send(HostMessage::Shutdown);
+    drop(program);
+    let mut program = Program::start(true);
+    program.send(HostMessage::Viewport { viewport: VIEWPORT });
+    program.send(in_project(&dir));
+    program.send(HostMessage::Open { path: Some(kept) });
+    let again = draft_of(&program, "the draft after a restart", |own| own.id == draft.id);
+    assert_eq!(path_with_role(&again, "Notes on the last round").map(|(path, _)| path).as_deref(), Some("library/notes-1.png"));
     drop(program);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1172,10 +1197,12 @@ fn previs_button(toolbar: &protocol::Toolbar) -> Option<(bool, bool)> {
 }
 
 /// Catches a Start frame taken from somewhere other than the animatic at
-/// the playhead: with no Motion reference, the row is off and says why;
-/// with one, the row puts an item in the draft's Start frame whose render
-/// is the animatic's frame at the time shown, its bar where frame 6 has it;
-/// and Open in the Image Generator opens that frame, and no video.
+/// the playhead, or sent unfiled: with no Motion reference, the row is off
+/// and says why; with one, the row writes the animatic's frame at the time
+/// shown beside the tab's file in `work/`, its bar where frame 6 has it,
+/// and files it from the tab's file and the animatic; once `filed` names
+/// it, the filed file is the draft's Start frame; and Open in the Image
+/// Generator opens that file, and no video.
 #[test]
 fn the_start_frame_is_the_animatics_frame_at_the_playhead() {
     let (dir, mut program, cell) = requests("animatic-frame");
@@ -1206,36 +1233,24 @@ fn the_start_frame_is_the_animatics_frame_at_the_playhead() {
     program.command("frame", json!({ "step": 6 }));
     program.view("frame 6", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 6));
     program.command("frame_from_animatic", json!({ "value": 0 }));
-    let start = program.wait("the Start frame", |message| match message {
-        AppMessage::Cells { cells, .. } => cells.iter().find(|own| own.id == cell).and_then(|own| {
-            own.input.iter().find_map(|part| match part {
-                protocol::CellPart::Item { item, media_type, role, .. } if role.as_deref() == Some("Start frame") => Some((item.clone(), media_type.clone())),
-                _ => None,
-            })
-        }),
+    let (filing, path, from) = program.wait("the Start frame filed", |message| match message {
+        AppMessage::FileResource { path, from, id: Some(id), .. } => Some((id.clone(), path.clone(), from.clone())),
         _ => None,
     });
-    assert_eq!(start.1, "image/png");
-    let item = start.0;
-    assert!(item.item.as_deref().is_some_and(|id| id.starts_with("animatic ")));
-    program.wait("the Start frame's item", |message| match message {
-        AppMessage::Items { path, items } if *path == item.path => items.iter().find(|own| Some(&own.id) == item.item.as_ref()).cloned(),
-        _ => None,
-    });
-
-    program.send(HostMessage::Render { id: "r1".into(), item: item.clone(), media_type: "image/png".into(), part: None });
-    let path = program.wait("the Start frame rendered", |message| match message {
-        AppMessage::Rendered { id, path, error, .. } if id == "r1" => Some(path.clone().unwrap_or_else(|| panic!("not rendered: {error:?}"))),
-        _ => None,
-    });
+    assert_eq!(path, "work/Untitled Video start frame.png");
+    assert_eq!(from, ["work/Untitled Video.vgx", "takes/Animatic.mp4"]);
     let png = image::load_from_memory(&std::fs::read(dir.join(&path)).unwrap()).unwrap().to_rgba8();
     assert_eq!(png.dimensions(), SIZE);
     let grey = |x: u32| png.get_pixel(x, SIZE.1 / 2).0[1];
     assert!(grey(bar(6) + 3) < 80, "the frame at the playhead has no bar where frame 6 has it");
     assert!(grey(bar(0) + 3) > 200, "the frame is the animatic's first, not the one at the playhead");
+    program.send(HostMessage::Filed { id: filing, file: "library/start-1.png".into(), error: None });
+    let draft = draft_of(&program, "the filed Start frame in the draft", |own| own.id == cell && path_with_role(own, "Start frame").is_some());
+    let path = path_with_role(&draft, "Start frame").map(|(path, _)| path).unwrap();
+    assert_eq!(path, "library/start-1.png", "the Start frame is not the filed file");
 
     // Open in the Image Generator: the Start frame, the first reference,
-    // as its PNG; the Motion reference, a video, opens nothing.
+    // as its filed file; the Motion reference, a video, opens nothing.
     program.command("frame_open_image", json!({ "value": 0 }));
     let opened = program.wait("the Start frame opened", |message| match message {
         AppMessage::OpenIn { path, media_type } => Some((path.clone(), media_type.clone())),
@@ -1426,48 +1441,6 @@ fn a_rounds_takes_are_shown_side_by_side() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Catches items a draft names that are lost when the program starts
-/// again: after a restart, the marked image a next round put in the draft
-/// is declared again with `items`, its render still in the project.
-#[test]
-fn a_drafts_own_items_are_declared_after_a_restart() {
-    let (dir, mut program, cell) = requests("items-restart");
-    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take_file("takes/Dawn.mp4", false)])]);
-    film_of(&program, "the round", |film| !film.groups.is_empty());
-    program.command("film_select", json!({ "value": 0 }));
-    program.view("the round's take", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0));
-    program.command("frame", json!({ "step": 24 }));
-    program.view("one second", |_, image| is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 24));
-    pin(&mut program, "less rain");
-    program.command("take_next_round", json!({ "take": "takes/Dawn.mp4" }));
-    let item = program.wait("the draft's marked image", |message| match message {
-        AppMessage::Cells { cells, .. } => cells.iter().flat_map(|own| own.input.iter()).find_map(|part| match part {
-            protocol::CellPart::Item { item, .. } if item.item.as_deref().is_some_and(|id| id.starts_with("marked ")) => Some(item.clone()),
-            _ => None,
-        }),
-        _ => None,
-    });
-    program.send(HostMessage::Keep { tab: "1".into() });
-    let kept = program.wait("kept", |message| match message {
-        AppMessage::Kept { tab, path, .. } if tab == "1" => path.clone(),
-        _ => None,
-    });
-    program.send(HostMessage::Shutdown);
-    drop(program);
-
-    let mut program = Program::start(true);
-    program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: true });
-    program.send(HostMessage::Open { path: Some(kept) });
-    let declared = program.wait("the marked image declared again", |message| match message {
-        AppMessage::Items { path, items } if *path == item.path => items.iter().find(|own| Some(&own.id) == item.item.as_ref()).cloned(),
-        _ => None,
-    });
-    assert_eq!(declared.name, "Notes on the last round");
-    drop(program);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 // Previews of sound.
 
 /// A WAV of one second at 8 000 samples a second, 16-bit mono, loud in
@@ -1543,7 +1516,7 @@ fn a_sound_is_previewed_with_its_waveform_and_cues() {
     for kind in ["video/mp4", "audio/wav", "audio/mpeg", "audio/flac"] {
         assert!(previews.iter().any(|own| own == kind), "{kind} is not previewed: {previews:?}");
     }
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.send(HostMessage::Preview { id: "s1".into(), path: "takes/Rain.wav".into(), media_type: "audio/wav".into() });
     let (thumbnail, badge, cues, error) = program.wait("the sound's preview", |message| match message {
         AppMessage::Previewed { id, thumbnail, badge, cues, error } if id == "s1" => Some((thumbnail.clone(), badge.clone(), cues.clone(), error.clone())),
@@ -1740,7 +1713,7 @@ fn a_sound_layer_is_added_set_undone_and_kept() {
     write_steady_wav(&rain);
     let mut program = Program::start(false);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.open_take(&first);
     program.view("the take", |view, _| names(view) == ["Tone"]);
     program.command("panel_page", json!({ "page": 0 }));
@@ -1803,7 +1776,7 @@ fn a_sound_layer_is_added_set_undone_and_kept() {
 
     let mut program = Program::start(true);
     program.send(HostMessage::Viewport { viewport: VIEWPORT });
-    program.send(HostMessage::Project { folder: dir.display().to_string(), skills: false });
+    program.send(in_project(&dir));
     program.send(HostMessage::Open { path: Some(kept) });
     program.command("panel_page", json!({ "page": 0 }));
     let rows = layer_rows(&program, "the layers again", |rows| rows.len() == 2);
@@ -1824,7 +1797,7 @@ fn notice_of(program: &Program, what: &str) -> Option<(String, protocol::NoticeS
     })
 }
 
-/// A Skills project with a round whose step names its artifact, its take
+/// A project with a round whose step names its artifact, its take
 /// shown, and the program in it: a take with its own sound, `Tone.mp4`, or
 /// one with none, `Dawn.mp4`. Returns the take's path too.
 fn delivering(label: &str, sounding: bool) -> (PathBuf, Program, &'static str) {

@@ -13,7 +13,7 @@ use crate::text::{self, Style, Text};
 use layers::Rgba;
 use layers::label;
 use layers::layout::{self, Rect};
-use protocol::{FilmPending, Item, Round, RoundState, SentReference, TakeFile, Thumbnail};
+use protocol::{FilmPending, Round, RoundState, SentReference, TakeFile, Thumbnail};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -23,9 +23,6 @@ pub const IMAGE_TYPES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 /// The roles a reference can have, as the Prompt page's menu offers them,
 /// the guide's words for 0.15.
 pub const ROLES: [&str; 4] = ["Reference", "Sketch", "Start frame", "Control"];
-
-/// How an item of the tab's file names a take: this, then its path.
-const TAKE_ITEM: &str = "take ";
 
 /// The round views' space around everything, between takes, and the size
 /// of their words, in the view's pixels, which the host draws at 100%.
@@ -78,8 +75,6 @@ impl Tile {
 struct Read {
     stamp: Option<(u64, std::time::SystemTime)>,
     size: (u32, u32),
-    /// `protocol::fingerprint` of its bytes, as its item declares it.
-    fingerprint: String,
     /// Its filmstrip thumbnail's bytes and size, and where they were
     /// written for the host.
     film: Vec<u8>,
@@ -257,7 +252,7 @@ impl Rounds {
     }
 
     /// Reads each take's file the strip does not hold yet, or that changed
-    /// on disk: its size, its fingerprint, and its thumbnail, written for
+    /// on disk: its size and its thumbnail, written for
     /// the host as `<tab>-take-<number>.rgba` in `cache`. A path is read
     /// from `root`, the project, unless it is whole.
     pub fn read_files(&mut self, root: &Path, tab: &str, cache: &Path, revision: &mut u64) {
@@ -274,12 +269,12 @@ impl Rounds {
                 }
             };
             let read = match files::import_printed(&file) {
-                Ok((pixels, fingerprint)) => {
+                Ok((pixels, _)) => {
                     let film_size = crate::session::film_size(pixels.width, pixels.height);
                     let film = files::resample(pixels.width, pixels.height, &pixels.data, film_size.0, film_size.1);
-                    Read { stamp, size: (pixels.width, pixels.height), fingerprint, film, film_size, thumb: None, number, failed: false }
+                    Read { stamp, size: (pixels.width, pixels.height), film, film_size, thumb: None, number, failed: false }
                 }
-                Err(_) => Read { stamp, size: (0, 0), fingerprint: String::new(), film: Vec::new(), film_size: (0, 0), thumb: None, number, failed: true },
+                Err(_) => Read { stamp, size: (0, 0), film: Vec::new(), film_size: (0, 0), thumb: None, number, failed: true },
             };
             self.reads.insert(path.clone(), read);
             self.previews.remove(&path);
@@ -360,39 +355,6 @@ impl Rounds {
 
     fn aspect(&self) -> f32 {
         self.shape().map_or(16.0 / 9.0, |(width, height)| width as f32 / height.max(1) as f32)
-    }
-
-    /// Each take as an item of the tab's file, with its file's fingerprint.
-    pub fn items(&self) -> Vec<Item> {
-        let mut items: Vec<Item> = Vec::new();
-        for tile in &self.tiles {
-            let Some(file) = &tile.file else {
-                continue;
-            };
-            let Some(read) = self.reads.get(&file.path).filter(|read| !read.failed) else {
-                continue;
-            };
-            let id = take_item(&file.path);
-            if items.iter().any(|item| item.id == id) {
-                continue;
-            }
-            items.push(Item {
-                id,
-                name: crate::session::file_title(Path::new(&file.path)),
-                media_types: vec![file.media_type.clone()],
-                fingerprint: read.fingerprint.clone(),
-                made: None,
-            });
-        }
-        items
-    }
-
-    /// A take's file and fingerprint, by its item's id.
-    pub fn take_by_item(&self, id: &str) -> Option<(TakeFile, String)> {
-        let path = id.strip_prefix(TAKE_ITEM)?;
-        let tile = self.tiles.iter().find(|tile| tile.path() == Some(path))?;
-        let read = self.reads.get(path).filter(|read| !read.failed)?;
-        Some((tile.file.clone()?, read.fingerprint.clone()))
     }
 
     /// Shows tile `index`, whose frame has been made. A take shown before
@@ -600,11 +562,6 @@ impl Rounds {
         line(canvas, &format!("Take {number}"), [rect.x as f32, rect.y as f32 - 24.0], LABEL, MUTED, false);
         draw_image(canvas, image, rect);
     }
-}
-
-/// How an item of the tab's file names the take at `path`.
-pub fn take_item(path: &str) -> String {
-    format!("{TAKE_ITEM}{path}")
 }
 
 /// "1 take", "4 takes".

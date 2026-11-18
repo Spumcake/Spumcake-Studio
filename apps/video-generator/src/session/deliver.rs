@@ -1,6 +1,6 @@
-//! Deliver…, as vg-deliver and vg-delivering show it, in a Skills project
-//! for a round's take whose round names its artifact. Each sound layer
-//! inside `work/` is filed first with `file_resource`, and one outside the
+//! Deliver…, as vg-deliver and vg-delivering show it, in a project, for a
+//! round's take whose round names its artifact. Each sound layer inside
+//! `work/` is filed first with `file_resource`, and one outside the
 //! project stops the flow; the mix is made by the build-animatic skill's
 //! `mix.py` through `run_skill_script`, from the take, its own sound, and
 //! every sound layer, as `mix_args` passes them; its answer's film goes to
@@ -95,11 +95,10 @@ pub fn uses(caption: &str, heard: &[String]) -> String {
 }
 
 impl Session {
-    /// Whether a round's take at `path` can be delivered: in a Skills
-    /// project, its round naming its artifact, while no delivery is under
-    /// way.
+    /// Whether a round's take at `path` can be delivered: in a project,
+    /// its round naming its artifact, while no delivery is under way.
     pub fn can_deliver(&self, tab: &Tab, path: &str) -> bool {
-        self.skills
+        self.project.is_some()
             && self.delivery.is_none()
             && tab.rounds.tile_of(path).and_then(|tile| tab.rounds.round_of(&tab.rounds.tiles[tile])).is_some_and(|round| round.artifact.as_deref().is_some_and(|artifact| !artifact.is_empty()))
     }

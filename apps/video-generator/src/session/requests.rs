@@ -1,9 +1,9 @@
 //! A tab's requests, as the Image Generator's are: its cells on the Prompt
-//! page, the rounds the host says they made, the take shown, a take's menu,
-//! and the tab's items and their renders.
+//! page, the rounds the host says they made, the take shown, and a take's
+//! menu.
 
 use super::*;
-use protocol::{Cell, CellPart, Item, ItemRef, Round, StepRef};
+use protocol::{Cell, CellPart, ItemRef, Round, StepRef};
 
 impl Session {
     /// A new draft's size: the gallery's first take's, or its rounds'
@@ -52,7 +52,6 @@ impl Session {
         if index == self.active {
             out.extend(self.emit());
         }
-        out.extend(self.items_due());
     }
 
     /// A click on a take's tile shows it alone, as any take is shown.
@@ -105,15 +104,18 @@ impl Session {
             input.push(CellPart::Path { path: reference.path.clone(), media_type: media_type_of(&reference.path), role: reference.role.clone(), field: None });
         }
         input.push(CellPart::Path { path: take.path.clone(), media_type: take.media_type.clone(), role: Some(String::from("Reference")), field: None });
-        if !notes.is_empty()
-            && let Some(read) = read
-            && let Some(info) = read.info
-        {
-            match self.file_marked(index, &read.file, info, &notes) {
-                Ok(item) => input.push(CellPart::Item { item, media_type: String::from("image/png"), part: None, role: Some(NOTES_WORDS.into()), field: None }),
-                Err(reason) => out.push(notice("The image could not be marked", &reason)),
-            }
-        }
+        // The marked frame, drawn now and filed; it joins the draft when
+        // `filed` comes.
+        let marked = match (notes.is_empty(), read.as_ref().and_then(|read| read.info.map(|info| (read.file.clone(), info)))) {
+            (false, Some((file, info))) => match marked_png(&file, info, &notes) {
+                Ok(png) => Some(png),
+                Err(reason) => {
+                    out.push(notice("The image could not be marked", &reason));
+                    None
+                }
+            },
+            _ => None,
+        };
         let tab = &mut self.tabs[index];
         let current = tab.gallery.current_cell().cloned();
         let from = current.as_ref().filter(|cell| cell.step.is_none());
@@ -130,44 +132,19 @@ impl Session {
             Some(cell) => *cell = draft.clone(),
             None => cells.push(draft.clone()),
         }
+        let made = draft.input.clone();
+        let cell = draft.id.clone();
         if tab.gallery.set_cells(cells, Some(draft.id)) {
             tab.dirty = true;
         }
+        if let Some(png) = marked {
+            let stem = format!("{} notes", self.tabs[index].label);
+            let becomes = super::filing::Becomes::Notes { made };
+            if let Err(reason) = self.file_for_draft(index, &stem, &png, &take.path, &cell, becomes, out) {
+                out.push(notice("The image could not be marked", &reason));
+            }
+        }
         out.extend(self.emit());
-        out.extend(self.items_due());
-    }
-
-    /// The marked frame of a next round, as an item of the tab's file: the
-    /// take's frame at its first note's time, at the take's own size, with
-    /// the notes of that moment on it, as the view shows them but with no
-    /// card. Its PNG is rendered now under `protocol::render_path`, named
-    /// by its fingerprint, so `render` finds it, and the tab's file is
-    /// written first, so the item has a file to be of.
-    fn file_marked(&mut self, index: usize, file: &Path, info: media::Info, notes: &layers::notes::Notes) -> Result<ItemRef, String> {
-        let Some(project) = self.project.clone() else {
-            return Err("The video is not in a project.".into());
-        };
-        let time = notes.first_time().unwrap_or(0.0);
-        let frame = ((time.max(0.0) * info.fps()).round() as u32).min(info.frames.saturating_sub(1));
-        let mut video = media::Video::open(file).map_err(|error| error.0)?;
-        let decoded = video.frame(frame, crate::decode::even((info.width, info.height))).map_err(|error| error.0)?;
-        let mut marked = layers::Rgba { width: decoded.width, height: decoded.height, data: decoded.rgba };
-        crate::notes::marked(&mut marked, &notes.at_time(time), (info.width, info.height));
-        if self.tabs[index].path.is_none() {
-            self.tabs[index].dirty = true;
-        }
-        let path = self.write_into_project(index)?.ok_or_else(|| String::from("The video could not be written."))?;
-        let relative = self.relative(&path).ok_or_else(|| String::from("The video is not in the project."))?;
-        let png = files::encode_png(marked.width, marked.height, &marked.data)?;
-        let fingerprint = protocol::fingerprint(&png);
-        let id = format!("{MARKED_ITEM}{fingerprint}");
-        let item = ItemRef { path: relative, item: Some(id.clone()) };
-        files::write_atomic(&project.join(protocol::render_path(OWNER, &item, None, &fingerprint, "png")), &png)?;
-        let tab = &mut self.tabs[index];
-        if !tab.marked.iter().any(|(own, _)| *own == id) {
-            tab.marked.push((id, fingerprint));
-        }
-        Ok(item)
     }
 
     /// Retime… or Upscale… on a round's take: always a new draft cell of
@@ -177,8 +154,8 @@ impl Session {
     /// runner's plan card asks the person's yes with its cost. Nothing else
     /// is sent, and nothing is paid without that yes.
     pub(super) fn finish_take(&mut self, path: &str, finish: crate::finishing::Finish, out: &mut Vec<AppMessage>) {
-        // Only a Skills project's runner sends a finishing request.
-        if !self.skills {
+        // Only a project's runner sends a finishing request.
+        if self.project.is_none() {
             return;
         }
         let index = self.active;
@@ -259,111 +236,10 @@ impl Session {
         out.push(AppMessage::OpenReport { request: tile.request.clone() });
     }
 
-    /// The items of each tab's file the host has not been told: its takes.
-    /// Only a tab with a file in the project has any.
-    pub(super) fn items_due(&mut self) -> Vec<AppMessage> {
-        if self.project.is_none() {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        for index in 0..self.tabs.len() {
-            let Some(path) = self.tabs[index].path.clone().and_then(|path| self.relative(&path)) else {
-                continue;
-            };
-            let tab = &mut self.tabs[index];
-            let mut items = tab.rounds.items();
-            for (id, fingerprint) in &tab.marked {
-                items.push(Item { id: id.clone(), name: NOTES_WORDS.into(), media_types: vec![String::from("image/png")], fingerprint: fingerprint.clone(), made: None });
-            }
-            for (id, fingerprint) in &tab.frames_taken {
-                items.push(Item { id: id.clone(), name: String::from("Start frame"), media_types: vec![String::from("image/png")], fingerprint: fingerprint.clone(), made: None });
-            }
-            let now: (String, Vec<Item>) = (path, items);
-            if tab.items_sent.as_ref() != Some(&now) {
-                out.push(AppMessage::Items { path: now.0.clone(), items: now.1.clone() });
-                tab.items_sent = Some(now);
-            }
-        }
-        out
-    }
-
-    /// A tab's file read again: each marked image and each Start frame
-    /// taken from the animatic that one of its cells still names, whose
-    /// render is still in the project under `protocol::render_path`, is
-    /// declared again with `items`, so what a draft names is listed after
-    /// a restart.
-    pub(super) fn restore_items(&mut self, index: usize) {
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        let Some(relative) = self.tabs.get(index).and_then(|tab| tab.path.clone()).and_then(|path| self.relative(&path)) else {
-            return;
-        };
-        let tab = &mut self.tabs[index];
-        let named: Vec<ItemRef> = tab
-            .gallery
-            .cells
-            .iter()
-            .flat_map(|cell| cell.input.iter())
-            .filter_map(|part| match part {
-                CellPart::Item { item, .. } if item.path == relative => Some(item.clone()),
-                _ => None,
-            })
-            .collect();
-        for item in named {
-            let Some(id) = item.item.as_deref() else {
-                continue;
-            };
-            let found = id.strip_prefix(MARKED_ITEM).map(|fingerprint| (true, fingerprint)).or_else(|| id.strip_prefix(ANIMATIC_ITEM).map(|fingerprint| (false, fingerprint)));
-            let Some((marked, fingerprint)) = found else {
-                continue;
-            };
-            if !project.join(protocol::render_path(OWNER, &item, None, fingerprint, "png")).is_file() {
-                continue;
-            }
-            let list = if marked { &mut tab.marked } else { &mut tab.frames_taken };
-            if !list.iter().any(|(own, _)| own == id) {
-                list.push((id.to_string(), fingerprint.to_string()));
-            }
-        }
-    }
-
-    /// `render`: a take is its own file, as it was made; a marked frame
-    /// was rendered when its next round was made, and a Start frame taken
-    /// from the animatic when it was taken.
-    pub(super) fn render(&mut self, id: String, item: &ItemRef, media_type: &str) -> AppMessage {
-        let failed = |id: String, error: &str| AppMessage::Rendered { id, path: None, fingerprint: None, error: Some(error.to_string()) };
-        let found = (0..self.tabs.len())
-            .find(|index| self.tabs[*index].path.as_deref().and_then(|path| self.relative(path)).as_deref() == Some(item.path.as_str()));
-        let Some(index) = found else {
-            return failed(id, "That video is not open.");
-        };
-        let own = item.item.as_deref().unwrap_or("");
-        if let Some(fingerprint) = own.strip_prefix(MARKED_ITEM) {
-            let relative = protocol::render_path(OWNER, item, None, fingerprint, "png");
-            let kept = self.project.as_ref().is_some_and(|project| project.join(&relative).is_file());
-            return match (media_type, kept) {
-                ("image/png", true) => AppMessage::Rendered { id, path: Some(relative), fingerprint: Some(fingerprint.to_string()), error: None },
-                ("image/png", false) => failed(id, "The marked image is gone. Make the next round from the take again."),
-                _ => failed(id, "A marked image is rendered only as PNG."),
-            };
-        }
-        if let Some(fingerprint) = own.strip_prefix(ANIMATIC_ITEM) {
-            let relative = protocol::render_path(OWNER, item, None, fingerprint, "png");
-            let kept = self.project.as_ref().is_some_and(|project| project.join(&relative).is_file());
-            return match (media_type, kept) {
-                ("image/png", true) => AppMessage::Rendered { id, path: Some(relative), fingerprint: Some(fingerprint.to_string()), error: None },
-                ("image/png", false) => failed(id, "The Start frame is gone. Take it from the animatic again."),
-                _ => failed(id, "A Start frame is rendered only as PNG."),
-            };
-        }
-        match self.tabs[index].rounds.take_by_item(own) {
-            Some((take, fingerprint)) if take.media_type == media_type || media_type.starts_with("video/") => {
-                AppMessage::Rendered { id, path: Some(take.path), fingerprint: Some(fingerprint), error: None }
-            }
-            Some(_) => failed(id, "A take is rendered only as its own file."),
-            None => failed(id, "That is not an item of this video."),
-        }
+    /// `render`: inside a project a tab's files are filed, and nothing is
+    /// declared as an item, so any item asked for is none of this video's.
+    pub(super) fn render(&mut self, id: String) -> AppMessage {
+        AppMessage::Rendered { id, path: None, fingerprint: None, error: Some(String::from("That is not an item of this video.")) }
     }
 
     /// The person's edit of a draft's prompt on the Prompt page, with its
@@ -459,11 +335,12 @@ impl Session {
         }
     }
 
-    /// A run of a tab's cell outside a Skills project, where the host runs
-    /// cells itself: each video it made joins the gallery, linking its
-    /// file. In a Skills project, rounds come with `takes` instead.
+    /// A run of a tab's cell the host ran itself, as it still does with
+    /// no project open: each video it made joins the gallery, linking its
+    /// file. In a project the runner runs cells, and rounds come with
+    /// `takes` instead.
     pub(super) fn cell_result(&mut self, cell: &str, output: &[CellPart], out: &mut Vec<AppMessage>) {
-        if self.skills {
+        if self.project.is_some() {
             return;
         }
         let Some(index) = self.tabs.iter().position(|tab| tab.gallery.cells.iter().any(|own| own.id == cell)) else {
@@ -500,6 +377,19 @@ impl Session {
         let inside = whole.strip_prefix(project).ok()?;
         Some(inside.to_string_lossy().replace('\\', "/"))
     }
+}
+
+/// A next round's marked frame as a PNG: the take's frame at its first
+/// note's time, at the take's own size, with the notes of that moment on
+/// it, as the view shows them but with no card.
+fn marked_png(file: &Path, info: media::Info, notes: &layers::notes::Notes) -> Result<Vec<u8>, String> {
+    let time = notes.first_time().unwrap_or(0.0);
+    let frame = ((time.max(0.0) * info.fps()).round() as u32).min(info.frames.saturating_sub(1));
+    let mut video = media::Video::open(file).map_err(|error| error.0)?;
+    let decoded = video.frame(frame, crate::decode::even((info.width, info.height))).map_err(|error| error.0)?;
+    let mut marked = layers::Rgba { width: decoded.width, height: decoded.height, data: decoded.rgba };
+    crate::notes::marked(&mut marked, &notes.at_time(time), (info.width, info.height));
+    files::encode_png(marked.width, marked.height, &marked.data)
 }
 
 /// A reference's media type, by its file's extension.
