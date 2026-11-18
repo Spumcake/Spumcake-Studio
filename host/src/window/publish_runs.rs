@@ -186,22 +186,19 @@ fn ride_along(folder: &Path, pipeline: &str) -> Vec<String> {
 /// The card for a publish or a revert, or why it is refused before it.
 fn prepare(place: &Place, asked: &Asked) -> Result<PublishCardView, String> {
     let (artifact, file, revert) = match asked {
-        Asked::Publish { artifact, source, .. } => (artifact, source, false),
+        Asked::Publish { artifact, source, from, .. } => {
+            // Every input it was made from must be canon; a workspace's own
+            // file in work/ is where it came from, never an input.
+            let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+            if from.iter().filter(|input| !input.starts_with("work/")).any(|input| !canon.published.contains(input)) {
+                return Err(String::from(NOT_CANON));
+            }
+            (artifact, source, false)
+        }
         Asked::Revert { artifact, file, .. } => (artifact, file, true),
         Asked::History { .. } => return Err(String::from("Nothing to publish.")),
     };
     let listed = versions(place, artifact)?;
-    if let Asked::Publish { from, .. } = asked {
-        // Every input it was made from must be canon, or an earlier version
-        // of the artifact it now becomes, as a second edit of a published
-        // image is made from the first; a workspace's own file in work/ is
-        // where it came from, never an input.
-        let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
-        let earlier = |input: &String| listed.iter().any(|version| &version.file == input);
-        if from.iter().filter(|input| !input.starts_with("work/")).any(|input| !canon.published.contains(input) && !earlier(input)) {
-            return Err(String::from(NOT_CANON));
-        }
-    }
     // Skills' history lists each file once, at its latest publish: a file
     // already listed, as a revert's is, becomes the newest of the same
     // count, and a new file the next.
@@ -298,10 +295,8 @@ fn request_of(place: &Place, file: &str) -> Option<String> {
 /// `rerun` reach it from them in any harness.
 fn sources_of(place: &Place, artifact: &str, request: Option<&str>, file: &str, named: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
     let mut sources: Vec<(String, String)> = Vec::new();
-    // An artifact is never its own source, even when a take of it was made
-    // from its earlier version.
     let mut add = |name: &str, role: &str| {
-        if !name.is_empty() && name != artifact && !sources.iter().any(|(known, _)| known == name) {
+        if !name.is_empty() && !sources.iter().any(|(known, _)| known == name) {
             sources.push((name.to_string(), if role.trim().is_empty() { String::from("input") } else { role.to_string() }));
         }
     };
@@ -476,9 +471,6 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
                     made_from.insert(0, (name.clone(), role.clone()));
                 }
                 made_from.dedup();
-                // An artifact is never its own source, even when the file was
-                // made from its earlier version.
-                made_from.retain(|(known, _)| known != artifact);
                 (artifact.clone(), filed, None, made_from, with.clone())
             } else {
                 // A take: its request, and what its step and its report say
@@ -933,20 +925,6 @@ mod tests {
         carry(&place, &Card { asked: asked(vec![String::from("work/Layout.ipx")]), view }, false).unwrap();
         let refused = by_assistant("the diner: floor plan", &plan);
         assert!(refused.as_ref().is_err_and(|error| error.contains("refused")), "a take made from an old input was published: {refused:?}");
-
-        // A second edit is made from the first version, which is no longer
-        // canon once another is published: it is still accepted, and the
-        // artifact is never recorded as its own source.
-        for n in [2, 3] {
-            let edit = format!("work/keyframe-{n}.png");
-            std::fs::write(folder.join(&edit), [b"\x89PNG\r\n\x1a\n".as_slice(), &[n as u8]].concat()).unwrap();
-            let asked = Asked::Publish { asker: Asker::Assistant { call: String::from("c1") }, artifact: String::from("the diner: keyframe"), source: edit, from: vec![take.clone()], with: Vec::new(), sources: vec![(String::from("the diner: keyframe"), String::from("image 1"))] };
-            let view = prepare(&place, &asked).unwrap_or_else(|error| panic!("edit {n} was refused: {error}"));
-            assert_eq!(view.version, n);
-            carry(&place, &Card { asked, view }, false).unwrap_or_else(|error| panic!("edit {n} was not published: {error}"));
-        }
-        let itself = skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM made_from WHERE artifact='the diner: keyframe' AND source='the diner: keyframe'", "--read-only"]);
-        assert_eq!(itself.trim(), "0", "the artifact was recorded as its own source");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
