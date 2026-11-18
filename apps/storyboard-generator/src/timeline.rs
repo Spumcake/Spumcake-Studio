@@ -347,7 +347,12 @@ fn sound_row(session: &Session, track: &SoundTrack, picked: &[u64]) -> protocol:
                 progress: None,
                 end_mark: None,
                 tip,
-                menu: vec![entry("Delete", action_with("delete_sound", json!(clip.id)), !track.locked)],
+                menu: vec![
+                    // Offered as canon, so the animatic can name it: a sound in
+                    // the project, never one placed with no project.
+                    entry("Publish sound", action_with("publish_sound", json!(clip.id)), session.project().is_some() && !std::path::Path::new(&clip.file).is_absolute()),
+                    entry("Delete", action_with("delete_sound", json!(clip.id)), !track.locked),
+                ],
                 open: None,
                 movable: !track.locked,
                 kind: Some(SOUND_KIND.to_string()),
@@ -1028,6 +1033,13 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
         "delete_sound" => {
             if let Some(sound) = id_of(arg) {
                 session.delete_sound(sound);
+            }
+        }
+        "publish_sound" => {
+            if let Some(sound) = id_of(arg)
+                && let Err(reason) = session.publish_sound(sound)
+            {
+                session.failed_by_hand(None, &reason);
             }
         }
         "track_flag" => {
