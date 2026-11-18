@@ -54,8 +54,9 @@ impl Session {
     /// Publish: refused, with a notice naming them and Ask the assistant,
     /// while any take beneath the image is not canon, or any linked file is
     /// outside the project, however little was painted. Otherwise the image
-    /// as it is now is written out as a PNG under `protocol::render_path`,
-    /// and `publish` asks the host's runner to file it as the artifact,
+    /// as it is now is written as a PNG beside the tab's file in `work/`,
+    /// named as the image, the same file each time, overwritten as `work/`
+    /// files are on save, and `publish` asks the host's runner to file it as the artifact,
     /// from the tab's file and every linked file beneath, as
     /// `file_resource` names them, and publish it on the person's yes. A
     /// linked file in the project that is no take of the tab's rounds is
@@ -106,7 +107,7 @@ impl Session {
                 return;
             }
         };
-        let (Some(project), Some(own)) = (self.project.clone(), self.relative(&file)) else {
+        let Some(own) = self.relative(&file) else {
             return;
         };
         let frame = self.images[index].gallery.frame_mut();
@@ -119,18 +120,25 @@ impl Session {
                 return;
             }
         };
-        // Named by the image and its pixels, so publishing the same edit
-        // again writes nothing new, and `work/` keeps only editable work.
-        let fingerprint = protocol::fingerprint(&png);
-        let item = ItemRef { path: own.clone(), item: Some(format!("publish {name}")) };
-        let source = protocol::render_path(OWNER, &item, None, &fingerprint, "png");
-        let written = project.join(&source);
-        if !written.exists()
-            && let Err(reason) = files::write_atomic(&written, &png)
-        {
+        let Some(folder) = self.work_folder() else {
+            return;
+        };
+        // Named by the tab's file and the image, which is unique in its
+        // gallery, so two tabs never write the same file.
+        let stem = match safe_name(&format!("{} {name}", file_title(&file))) {
+            stem if stem.is_empty() => String::from("image"),
+            stem => stem,
+        };
+        // The same file each time the image is published, overwritten as
+        // `work/` files are overwritten on save.
+        let written = folder.join(format!("{stem}.png"));
+        if let Err(reason) = files::write_atomic(&written, &png) {
             out.push(notices(&tab, Some(failed(&reason))));
             return;
         }
+        let Some(source) = self.relative(&written) else {
+            return;
+        };
         let mut from = vec![own];
         // Every link is in the project by now: one outside it was refused.
         for link in links {

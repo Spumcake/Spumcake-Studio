@@ -8,7 +8,7 @@
 use super::*;
 use crate::decode::Key;
 use crate::view::{Animatic, Caption};
-use protocol::{Cell, CellPart, ItemRef, Round};
+use protocol::{Cell, CellPart, Round};
 
 /// The words under a take shown over its animatic, before the tab's
 /// name, as vg-take-over-animatic shows them, pending the owner's word.
@@ -94,9 +94,11 @@ impl Session {
     }
 
     /// The animatic's frame at the playhead: the Prompt page's draft's
-    /// Motion reference's frame at the time shown, written as a PNG item of
-    /// the tab's file, put in the draft's Start frame in place of any
-    /// other. One step of the gallery's history.
+    /// Motion reference's frame at the time shown, at its own size, written
+    /// as a PNG beside the tab's file in `work/`, "<tab> start frame", and
+    /// filed from the tab's file and the animatic. When `filed` names it,
+    /// the filed file is the draft's Start frame, in place of any other:
+    /// one step of the gallery's history.
     pub(super) fn frame_from_animatic(&mut self, out: &mut Vec<AppMessage>) {
         let index = self.active;
         let Some(cell) = self.tabs.get(index).and_then(|tab| tab.gallery.current_cell()).filter(|cell| cell.step.is_none()).cloned() else {
@@ -106,17 +108,29 @@ impl Session {
             return;
         };
         let time = self.time_shown();
-        let file = self.project_file(&path);
-        let item = match self.file_animatic_frame(index, &file, time) {
-            Ok(item) => item,
+        let png = match animatic_png(&self.project_file(&path), time) {
+            Ok(png) => png,
             Err(reason) => {
                 out.push(notice("This video could not be opened", &reason));
                 return;
             }
         };
-        let frame = CellPart::Item { item, media_type: String::from("image/png"), part: None, role: Some(START.into()), field: None };
-        let mut draft = cell.clone();
-        // The Start frame's place, or after the prompt's words.
+        let stem = format!("{} start frame", self.tabs[index].label);
+        let made_from = if Path::new(&path).is_absolute() { self.relative(Path::new(&path)).unwrap_or_default() } else { path.clone() };
+        if let Err(reason) = self.file_for_draft(index, &stem, &png, &made_from, &cell.id, super::filing::Becomes::StartFrame, out) {
+            out.push(notice("This video could not be opened", &reason));
+        }
+    }
+
+    /// A Start frame filed: the draft `cell`'s Start frame becomes `file`,
+    /// a path with the role Start frame, in its place, or after the
+    /// prompt's words. One step of the gallery's history.
+    pub(super) fn put_start_frame(&mut self, index: usize, cell: &str, file: &str) {
+        let tab = &mut self.tabs[index];
+        let Some(mut draft) = tab.gallery.cells.iter().find(|own| own.id == cell && own.step.is_none()).cloned() else {
+            return;
+        };
+        let frame = CellPart::Path { path: file.to_string(), media_type: String::from("image/png"), role: Some(START.into()), field: None };
         let at = draft
             .input
             .iter()
@@ -130,7 +144,6 @@ impl Session {
             _ => true,
         });
         draft.input.insert(at.min(draft.input.len()), frame);
-        let tab = &mut self.tabs[index];
         let mut cells = tab.gallery.cells.clone();
         if let Some(own) = cells.iter_mut().find(|own| own.id == draft.id) {
             *own = draft.clone();
@@ -138,43 +151,12 @@ impl Session {
         if tab.gallery.set_cells(cells, Some(draft.id)) {
             tab.dirty = true;
         }
-        out.extend(self.emit());
-        out.extend(self.items_due());
-    }
-
-    /// The animatic's frame at `time`, at its own size, as an item of the
-    /// tab's file: its PNG rendered now under `protocol::render_path`,
-    /// named by its fingerprint, so `render` finds it, and the tab's file
-    /// written first, so the item has a file to be of.
-    fn file_animatic_frame(&mut self, index: usize, file: &Path, time: f64) -> Result<ItemRef, String> {
-        let Some(project) = self.project.clone() else {
-            return Err("The video is not in a project.".into());
-        };
-        let mut video = media::Video::open(file).map_err(|error| error.0)?;
-        let info = video.info();
-        let frame = ((time.max(0.0) * info.fps()).round() as u32).min(info.frames.saturating_sub(1));
-        let decoded = video.frame(frame, crate::decode::even((info.width, info.height))).map_err(|error| error.0)?;
-        if self.tabs[index].path.is_none() {
-            self.tabs[index].dirty = true;
-        }
-        let path = self.write_into_project(index)?.ok_or_else(|| String::from("The video could not be written."))?;
-        let relative = self.relative(&path).ok_or_else(|| String::from("The video is not in the project."))?;
-        let png = files::encode_png(decoded.width, decoded.height, &decoded.rgba)?;
-        let fingerprint = protocol::fingerprint(&png);
-        let id = format!("{ANIMATIC_ITEM}{fingerprint}");
-        let item = ItemRef { path: relative, item: Some(id.clone()) };
-        files::write_atomic(&project.join(protocol::render_path(OWNER, &item, None, &fingerprint, "png")), &png)?;
-        let tab = &mut self.tabs[index];
-        if !tab.frames_taken.iter().any(|(own, _)| *own == id) {
-            tab.frames_taken.push((id, fingerprint));
-        }
-        Ok(item)
     }
 
     /// Open in the Image Generator: the reference at `reference`, counted
     /// among the cell's files and items as the host counts them, opened in
-    /// the workspace that edits it, when it is an image. A Start frame
-    /// taken from the animatic opens as its PNG.
+    /// the workspace that edits it, when it is an image, a Start frame
+    /// taken from the animatic among them.
     pub(super) fn frame_open_image(&mut self, reference: usize, out: &mut Vec<AppMessage>) {
         let Some(tab) = self.active_tab() else {
             return;
@@ -185,9 +167,6 @@ impl Session {
         let part = cell.input.iter().filter(|part| matches!(part, CellPart::Path { .. } | CellPart::Item { .. })).nth(reference);
         let opened = match part {
             Some(CellPart::Path { path, media_type, .. }) if media_type.starts_with("image/") => Some((path.clone(), media_type.clone())),
-            Some(CellPart::Item { item, .. }) => item.item.as_deref().and_then(|own| own.strip_prefix(ANIMATIC_ITEM)).map(|fingerprint| {
-                (protocol::render_path(OWNER, item, None, fingerprint, "png"), String::from("image/png"))
-            }),
             _ => None,
         };
         if let Some((path, media_type)) = opened {
@@ -255,6 +234,16 @@ impl Session {
         let at = [(left + right) as f32 / 2.0, (bottom as f32 + 6.0).min(scene.height as f32 - 16.0)];
         Some(Caption { words: format!("{OVER_ANIMATIC} · {}", tab.label), at, centre: true, title: false })
     }
+}
+
+/// The animatic's frame at `time` as a PNG, at its own size, its last when
+/// the time is past it.
+fn animatic_png(file: &Path, time: f64) -> Result<Vec<u8>, String> {
+    let mut video = media::Video::open(file).map_err(|error| error.0)?;
+    let info = video.info();
+    let frame = ((time.max(0.0) * info.fps()).round() as u32).min(info.frames.saturating_sub(1));
+    let decoded = video.frame(frame, crate::decode::even((info.width, info.height))).map_err(|error| error.0)?;
+    files::encode_png(decoded.width, decoded.height, &decoded.rgba)
 }
 
 #[cfg(test)]
