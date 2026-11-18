@@ -230,7 +230,7 @@ impl HostWindow {
                 }
             } else if answer.call.starts_with("steprun:") {
                 self.answer_step_run(answer);
-            } else if answer.call.starts_with("step:") {
+            } else if answer.call.starts_with("step:") || answer.call.starts_with("canon:") {
                 self.answer_step_edit(answer);
             } else {
                 theirs.push(answer);

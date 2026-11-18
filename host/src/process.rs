@@ -143,6 +143,9 @@ pub struct Declared {
     pub canon_reads: VecDeque<(String, String)>,
     /// Step edits it asked for: the id, the tab, the step, and what to set.
     pub step_edits: VecDeque<(String, String, protocol::StepRef, crate::window::StepFields)>,
+    /// Canon it asked to record: the id, and `pipeline.py`'s command after
+    /// the pipeline's number, such as `element <name> --kind film`.
+    pub canon_edits: VecDeque<(String, Vec<String>)>,
     /// Steps it asked to run again: the id, the tab, and the step. Chat
     /// Assistant Work's runner takes them.
     pub step_runs: VecDeque<(String, String, protocol::StepRef)>,
@@ -668,9 +671,11 @@ impl Running {
             AppMessage::CanonHistory { tab, artifact } => declared.canon_histories.push_back((tab, artifact)),
             AppMessage::Revert { tab, artifact, file } => declared.reverts.push_back((tab, artifact, file)),
             AppMessage::ReadCanon { id, query } => declared.canon_reads.push_back((id, query)),
-            AppMessage::EditStep { id, tab, step, script, refs, order, skill, artifact } => {
-                declared.step_edits.push_back((id, tab, step, crate::window::StepFields { script, refs, order, skill, artifact }))
+            AppMessage::EditStep { id, tab, step, script, refs, order, skill, artifact, endpoint } => {
+                declared.step_edits.push_back((id, tab, step, crate::window::StepFields { script, refs, order, skill, artifact, endpoint }))
             }
+            AppMessage::EditElement { id, name, kind, .. } => declared.canon_edits.push_back((id, vec![String::from("element"), name, String::from("--kind"), kind])),
+            AppMessage::EditChain { id, chain, order, .. } => declared.canon_edits.push_back((id, vec![String::from("chain"), chain, String::from("--order"), order.to_string()])),
             AppMessage::RunStep { id, tab, step } => declared.step_runs.push_back((id, tab, step)),
             AppMessage::OpenIn { path, media_type } => declared.open_ins.push_back((path, media_type)),
             AppMessage::Deliver { tab, artifact, file, uses, size, frame_rate, format } => {
