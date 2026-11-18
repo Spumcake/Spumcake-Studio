@@ -138,6 +138,7 @@ fn action(id: &str) -> Option<Place> {
         "rename_sound_track" => Tool("clips__rename_sound_track", None),
         "delete_sound_track" => Tool("clips__delete_sound_track", None),
         "delete_sound" => Tool("clips__delete_sound", None),
+        "publish_sound" => Tool("clips__publish_sound", None),
         "track_flag" => Tool("clips__set_track", None),
         "export_animatic" => Tool("clips__export_animatic", None),
         "close_notice" => Left(NOTICE),
