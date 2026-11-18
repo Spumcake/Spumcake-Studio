@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Where a Skills project keeps its scene files, and every other resource.
+/// Where a project keeps its scene files, and every other resource.
 pub const RESOURCES: &str = "prompts/resources";
 
 /// One place, such as the diner: every scene file made for it, oldest

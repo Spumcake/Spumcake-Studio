@@ -50,7 +50,7 @@ pub struct Cell {
     /// differ, as an edit not yet run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<usize>,
-    /// In a Skills project, the chain step this cell is. The step lives in
+    /// The chain step this cell is, if it is one. The step lives in
     /// `canon.sql` alone, so a cell with a step has empty `input`,
     /// `versions`, and `output`, and no `settings`, `endpoint`, or `model`:
     /// the host reads the step and never sends it to the workspace. Without
@@ -59,7 +59,7 @@ pub struct Cell {
     pub step: Option<StepRef>,
 }
 
-/// One chain step in a Skills project's `canon.sql`, by its chain and step.
+/// One chain step in a project's `canon.sql`, by its chain and step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepRef {
     pub chain: String,
@@ -269,7 +269,7 @@ pub fn cell_id() -> String {
     )
 }
 
-/// One request a cell made, in a Skills project, read from `requests/` and
+/// One request a cell made, read from `requests/` and
 /// its pending records. The host sends a cell's rounds with `takes`; the
 /// workspace shows them on its filmstrip and never stores them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

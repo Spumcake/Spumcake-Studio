@@ -280,7 +280,7 @@ pub enum AppMessage {
         file: String,
     },
     /// Asks the host to read the project's canon with `pipeline.py sql
-    /// <living pipeline> <query> --read-only`, in a Skills project. The
+    /// <living pipeline> <query> --read-only`. The
     /// answer is `canon_rows`, under the same `id`.
     ReadCanon {
         id: String,
@@ -587,7 +587,7 @@ pub enum HostMessage {
         media_type: Option<String>,
     },
     /// Every round that cell has made, oldest first, replacing those sent
-    /// before. In a Skills project it takes the place of `cell_result`.
+    /// before. In a project it takes the place of `cell_result`.
     Takes { cell: ItemRef, rounds: Vec<Round> },
     /// Asks a workspace whose `edits` covers `media_type` for a small image
     /// of that file, such as a video or sound reference's. The answer is
