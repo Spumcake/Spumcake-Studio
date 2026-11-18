@@ -28,6 +28,7 @@ impl Window {
             kind: EndpointKind::Openai,
             name: String::from("Local"),
             address: url.to_string(),
+            description: String::new(),
             key: None,
         });
         self.app.settings.endpoints.iter().find(|endpoint| endpoint.name == "Local").expect("added").id.clone()
@@ -70,8 +71,7 @@ fn settings_reach_the_assistants_requests() {
     assert_eq!(sent[1]["reasoning"]["effort"], "high");
 
     let local_id = window.add_local(&local.url);
-    discussion.endpoint = Some(local_id.clone());
-    window.setting(SettingsChoice::SaveSkill(discussion));
+    window.setting(SettingsChoice::ChooseAssistantEndpoint(local_id.clone()));
     window.ask("Third.");
     assert_eq!(stand_in.requests().len(), 2, "a request still went to the old endpoint");
     let sent = local.requests();
@@ -87,7 +87,7 @@ fn settings_reach_the_assistants_requests() {
 /// prompt, its result returns, and Run again stays on that endpoint. The
 /// endpoint's own model list names its models.
 #[test]
-fn a_skill_runs_as_a_cell_on_its_own_endpoint() {
+fn a_skill_runs_as_a_cell_on_the_endpoint_chosen_for_it() {
     let dir = scratch("settings-skill");
     let tool = protocol::tool_key(crate::route::HOST_ID, "skills", "story_notes");
     let stand_in = StandIn::start(vec![call_reply(&tool, json!({"input": "a beat sheet"})), text_reply("Done.")]);
@@ -99,11 +99,13 @@ fn a_skill_runs_as_a_cell_on_its_own_endpoint() {
         id: String::from("story"),
         name: String::from("Story notes"),
         description: String::from("Drafts beat sheets"),
-        endpoint: Some(local_id.clone()),
-        model: Some(String::from("llama3.2")),
+        former_endpoint: None,
+        former_model: None,
         prompt: String::from("You write beat sheets."),
         makes: crate::workspace::Makes::Text,
     }));
+    // The endpoint and model are chosen apart from the skill.
+    window.app.settings.remember_route("story", &local_id, "llama3.2");
     window.ask("Make a beat sheet.");
     window.until(|app| {
         app.chat.conversation.iter().any(|entry| entry.cell.as_ref().is_some_and(|cell| cell.state == CellState::Done))
@@ -176,6 +178,7 @@ fn no_key_is_written_where_studio_keeps_its_files() {
         kind: first.kind,
         name: first.name.clone(),
         address: first.address.clone(),
+        description: first.description.clone(),
         key: Some(String::from("sk-never-in-a-file")),
     });
     window.ask("Anything.");

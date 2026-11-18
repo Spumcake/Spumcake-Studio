@@ -1211,7 +1211,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
         std::fs::create_dir_all(&data).unwrap();
         let mut settings = Settings::default();
-        settings.endpoints.push(crate::workspace::EndpointSetting { id: "fal".into(), name: "fal.ai".into(), kind: EndpointKind::Fal, address: "https://fal.ai".into() });
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: "fal".into(), name: "fal.ai".into(), kind: EndpointKind::Fal, address: "https://fal.ai".into(), description: String::new() });
         let env = script_env(&settings, &mut |_| Some(String::from("secret-key")), Some(&data), None);
         assert!(env.vars.contains(&(String::from("FAL_KEY"), String::from("secret-key"))));
         let setup = std::fs::read_to_string(data.join("skills-setup.json")).unwrap();

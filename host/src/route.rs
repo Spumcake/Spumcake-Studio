@@ -112,14 +112,15 @@ pub(crate) fn current_host_tool_key(key: &str) -> String {
 const RUN_PROMPT: &str = "run_text_prompt";
 
 /// The skills the person made that the assistant may call: every skill
-/// but Discussion whose endpoint answers prompts. Each with its tool's name:
-/// a slug of the skill's name, made unique.
+/// but Discussion whose chosen endpoint answers prompts. Each with its
+/// tool's name: a slug of the skill's name, made unique.
 pub(crate) fn offered_skills(settings: &Settings) -> Vec<(String, SkillSetting)> {
     let mut offered: Vec<(String, SkillSetting)> = Vec::new();
     for skill in &settings.skills {
         let chats = settings.skill_runs(skill);
-        // A skill with no model yet, as New Skill makes it, is not offered.
-        let model = skill.model.as_deref().is_some_and(|model| !model.trim().is_empty());
+        // A skill with no model chosen yet, and none to fall back on, is not
+        // offered.
+        let model = settings.skill_route(skill).is_some_and(|(_, model)| !model.trim().is_empty());
         if skill.id == DISCUSSION || !chats || !model {
             continue;
         }
@@ -160,7 +161,8 @@ const SKILLS: &str = "skills";
 
 /// "Your skills": one tool for each skill the person made, as they named
 /// and described it. Calling one runs its prompt, with the input after it,
-/// as a cell on its own endpoint and model.
+/// as a cell on the endpoint and model chosen for it, or on the endpoint
+/// and model the assistant names from those it is told of.
 fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
     let offered = offered_skills(settings);
     if offered.is_empty() {
@@ -170,6 +172,12 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
         .into_iter()
         .map(|(name, skill)| {
             let described = if skill.description.trim().is_empty() { skill.name.clone() } else { format!("{}: {}", skill.name, skill.description) };
+            // Where it runs now, so the assistant can keep it there or name
+            // another endpoint and model.
+            let described = match settings.skill_route(&skill) {
+                Some((endpoint, model)) => format!("{described}. Runs on {} with {model} unless you name another endpoint and model", endpoint.name),
+                None => described,
+            };
             // An image skill makes one image from a prompt, shown as an
             // Image cell; the assistant writes the whole description.
             let (description, input) = match skill.makes {
@@ -178,7 +186,9 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "prompt": {"type": "string", "description": "The image, described in full."}
+                            "prompt": {"type": "string", "description": "The image, described in full."},
+                            "endpoint": {"type": "string", "description": ON_ENDPOINT},
+                            "model": {"type": "string", "description": ON_MODEL}
                         },
                         "required": ["prompt"],
                         "additionalProperties": false
@@ -189,7 +199,9 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "input": {"type": "string", "description": "What to ask the skill for."}
+                            "input": {"type": "string", "description": "What to ask the skill for."},
+                            "endpoint": {"type": "string", "description": ON_ENDPOINT},
+                            "model": {"type": "string", "description": ON_MODEL}
                         },
                         "required": ["input"],
                         "additionalProperties": false
@@ -202,17 +214,51 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
     Some(protocol::ToolGroup {
         id: SKILLS.into(),
         name: "Your skills".into(),
-        description: "Skills the person made, each running its own prompt on its own endpoint.".into(),
+        description: "Skills the person made, each running its own prompt on the endpoint chosen for it.".into(),
         instructions: "When the person asks for something one of these skills is described for, call it with what to ask. When they ask for an image, call a skill that makes images with the image described in full. Its result shows as a cell in the conversation. After the tool returns, reply briefly.".into(),
         tools,
     })
 }
 
-/// The host's tools. In a project, every generation runs through
-/// `request.py`, so the host offers none of the tools that generate
-/// directly, its prompt tools and the person's skills, and offers the
-/// project tools and Spumcake-Skills' skills instead.
-fn host_target(settings: &Settings, project: Option<&Path>) -> Target {
+/// What a skill tool's `endpoint` input says.
+const ON_ENDPOINT: &str = "An endpoint's name, from those listed, to run on instead of the one chosen for the skill. Leave it out to use that one.";
+/// What a skill tool's `model` input says.
+const ON_MODEL: &str = "With endpoint, the model to run on: one its list gives.";
+
+/// Every endpoint as the assistant is told of it, so it can pair a skill
+/// with one: its name, its kind, the user's description, and the models its
+/// list gives when they are known. Never a key, and never an address.
+fn endpoints_seen(settings: &Settings, listed: &crate::endpoints::Listed) -> String {
+    if settings.endpoints.is_empty() {
+        return String::new();
+    }
+    let mut seen = String::from("\n\nThe endpoints the user has set up:");
+    for endpoint in &settings.endpoints {
+        seen.push_str(&format!("\n- {} ({})", endpoint.name, endpoint.kind.label()));
+        if !endpoint.description.trim().is_empty() {
+            seen.push_str(&format!(": {}", endpoint.description.trim()));
+        }
+        if let Some((chat, images)) = listed.get(&endpoint.id) {
+            const MOST: usize = 40;
+            for (what, models) in [("Chat models", chat), ("Image models", images)] {
+                if models.is_empty() {
+                    continue;
+                }
+                let shown: Vec<&str> = models.iter().take(MOST).map(String::as_str).collect();
+                let more = if models.len() > MOST { format!(", and {} more", models.len() - MOST) } else { String::new() };
+                seen.push_str(&format!(". {what}: {}{more}", shown.join(", ")));
+            }
+        }
+    }
+    seen
+}
+
+/// The host's tools: in a project, the project tools and Spumcake-Skills'
+/// skills, through which the project's work runs on `request.py`; and in
+/// every project, the conversation's own prompt tools and the user's
+/// skills, which make cells in the conversation, with the endpoints the
+/// user has set up.
+fn host_target(settings: &Settings, project: Option<&Path>, listed: &crate::endpoints::Listed) -> Target {
     // The conversation's own prompt tools and the user's skills are offered
     // in every project, as the owner set on 2026-11-17, beside the project's
     // tools.
@@ -220,7 +266,9 @@ fn host_target(settings: &Settings, project: Option<&Path>) -> Target {
     if let Some(folder) = project {
         tool_groups.push(skills_setup::tool_group(folder, &skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders))));
     }
-    tool_groups.push(host_tools());
+    let mut prompts = host_tools();
+    prompts.instructions.push_str(&endpoints_seen(settings, listed));
+    tool_groups.push(prompts);
     tool_groups.extend(your_skills(settings));
     Target {
         app: HOST_ID.into(),
@@ -233,7 +281,7 @@ fn host_target(settings: &Settings, project: Option<&Path>) -> Target {
 
 /// Every running sub-application, and the host's own tools, as a request
 /// offers them, for the project open in `project`.
-pub(crate) fn targets(apps: &[Started], settings: &Settings, project: Option<&Path>) -> Vec<Target> {
+pub(crate) fn targets(apps: &[Started], settings: &Settings, project: Option<&Path>, listed: &crate::endpoints::Listed) -> Vec<Target> {
     let mut offered: Vec<Target> = apps
         .iter()
         .filter(|started| !started.running.exited() && !started.running.pending())
@@ -254,7 +302,7 @@ pub(crate) fn targets(apps: &[Started], settings: &Settings, project: Option<&Pa
             tabless: false,
         })
         .collect();
-    offered.push(host_target(settings, project));
+    offered.push(host_target(settings, project, listed));
     offered
 }
 
@@ -380,8 +428,8 @@ impl Routing {
 
     /// The running sub-applications, when they changed since the assistant
     /// was last told.
-    pub(crate) fn changed_targets(&mut self, apps: &[Started], settings: &Settings, project: Option<&Path>) -> Option<Vec<Target>> {
-        let now = targets(apps, settings, project);
+    pub(crate) fn changed_targets(&mut self, apps: &[Started], settings: &Settings, project: Option<&Path>, listed: &crate::endpoints::Listed) -> Option<Vec<Target>> {
+        let now = targets(apps, settings, project, listed);
         if self.offered.as_ref() == Some(&now) {
             return None;
         }
@@ -414,21 +462,39 @@ mod tests {
     fn only_skills_that_can_run_are_offered() {
         let mut settings = Settings::default();
         let endpoint = settings.first_start("https://stand-in/v1").unwrap();
-        let skill = |name: &str, model: Option<&str>| SkillSetting {
+        let skill = |name: &str| SkillSetting {
             id: name.to_string(),
             name: name.to_string(),
             description: String::new(),
-            endpoint: Some(endpoint.clone()),
-            model: model.map(String::from),
+            former_endpoint: None,
+            former_model: None,
             prompt: String::new(),
             makes: crate::workspace::Makes::Text,
         };
-        settings.skills.push(skill("New Skill", None));
-        settings.skills.push(skill("Story notes", Some("m")));
-        settings.skills.push(skill("Story  Notes!", Some("m")));
+        settings.skills.push(skill("Story notes"));
+        settings.skills.push(skill("Story  Notes!"));
+        settings.skill_routes.insert(String::from("Story notes"), crate::workspace::SkillRoute { endpoint: endpoint.clone(), model: String::from("m") });
+        // A text skill with no choice of its own runs on the default level.
         let names: Vec<String> = offered_skills(&settings).into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, ["story_notes", "story_notes_2"]);
         assert!(skill_for_tool(&settings, "inpainter__skills__story_notes").is_some());
-        assert!(skill_for_tool(&settings, "inpainter__skills__new_skill").is_none());
+        // One whose chosen endpoint is gone, and with no endpoint to fall
+        // back on, is not offered.
+        let mut lone = Settings::default();
+        lone.skills.push(skill("Story notes"));
+        assert!(offered_skills(&lone).is_empty(), "a skill with nowhere to run was offered");
+    }
+
+    /// Catches the assistant told an endpoint's key or address, or not told
+    /// what the user wrote it is for.
+    #[test]
+    fn the_assistant_sees_each_endpoint_but_never_its_secrets() {
+        let mut settings = Settings::default();
+        let id = settings.first_start("https://stand-in/v1?key=secret").unwrap();
+        settings.endpoints[0].description = String::from("Fast image drafts");
+        let listed: crate::endpoints::Listed = [(id, (vec![String::from("anthropic/claude-haiku-5.5")], vec![String::from("openai/gpt-image-2.5-sunburst")]))].into_iter().collect();
+        let seen = endpoints_seen(&settings, &listed);
+        assert!(seen.contains("OpenRouter (OpenRouter): Fast image drafts. Chat models: anthropic/claude-haiku-5.5. Image models: openai/gpt-image-2.5-sunburst"), "{seen}");
+        assert!(!seen.contains("stand-in") && !seen.contains("secret"), "an address reached the assistant: {seen}");
     }
 }

@@ -783,9 +783,19 @@ pub(crate) struct Settings {
     /// Where Studio sends prompts. Their keys are never here: see `keys.rs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointSetting>,
-    /// The skills, the built-in Discussion first.
+    /// The skills, the built-in Discussion first. A skill names no
+    /// endpoint: its endpoint and model are chosen apart from it, as the
+    /// owner set on 2026-11-17.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillSetting>,
+    /// The assistant's endpoint, beside the Discussion skill. Its levels
+    /// carry the models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_endpoint: Option<String>,
+    /// Each skill's endpoint and model as its cell's menu last chose them,
+    /// by the skill's id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub skill_routes: std::collections::BTreeMap<String, SkillRoute>,
     /// The assistant's levels, in the picker's order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub levels: Vec<Level>,
@@ -852,6 +862,16 @@ impl EndpointKind {
         }
     }
 
+    /// What a new endpoint of this kind's description starts as: the note
+    /// its kind already carries, or nothing.
+    pub(crate) fn note(self) -> &'static str {
+        match self {
+            EndpointKind::Fal => "Used by Skills' request.py",
+            EndpointKind::Brave => "Used by the assistant's research",
+            _ => "",
+        }
+    }
+
     /// A chat endpoint answers prompts; ComfyUI runs graphs, fal.ai only
     /// holds a key for Skills' `request.py`, and Brave Search only searches.
     pub(crate) fn chats(self) -> bool {
@@ -865,6 +885,17 @@ pub(crate) struct EndpointSetting {
     pub name: String,
     pub kind: EndpointKind,
     pub address: String,
+    /// What the endpoint is for, in the user's words, such as "Fast image
+    /// drafts": the assistant reads it to choose an endpoint for a skill.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// A skill's endpoint and model, chosen apart from the skill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SkillRoute {
+    pub endpoint: String,
+    pub model: String,
 }
 
 /// The built-in skill's id.
@@ -882,12 +913,14 @@ pub(crate) struct SkillSetting {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// An endpoint's id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    /// The model it runs on, for a skill other than Discussion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    /// The endpoint a skill named before 2026-11-17, read from an older
+    /// file and moved to `assistant_endpoint` or `skill_routes` on load;
+    /// never written.
+    #[serde(default, rename = "endpoint", skip_serializing)]
+    pub former_endpoint: Option<String>,
+    /// The model it named then, moved the same way.
+    #[serde(default, rename = "model", skip_serializing)]
+    pub former_model: Option<String>,
     #[serde(default)]
     pub prompt: String,
     /// What the skill makes: text, or images.
@@ -989,6 +1022,22 @@ impl Settings {
                 skill.description = IMAGE_SKILL_DESCRIPTION.to_string();
             }
         }
+        // A skill's endpoint and model from before they were apart become
+        // the assistant's endpoint, for Discussion, or the skill's
+        // remembered choice, so nothing a user had changes.
+        let moved: Vec<(String, Option<String>, Option<String>)> =
+            settings.skills.iter_mut().map(|skill| (skill.id.clone(), skill.former_endpoint.take(), skill.former_model.take())).collect();
+        for (id, endpoint, model) in moved {
+            match (id == DISCUSSION, endpoint, model) {
+                (true, Some(endpoint), _) => {
+                    settings.assistant_endpoint.get_or_insert(endpoint);
+                }
+                (false, Some(endpoint), Some(model)) if !model.trim().is_empty() => {
+                    settings.skill_routes.entry(id).or_insert(SkillRoute { endpoint, model });
+                }
+                _ => {}
+            }
+        }
         settings
     }
 
@@ -1022,9 +1071,47 @@ impl Settings {
         self.skills.iter().find(|skill| skill.id == DISCUSSION)
     }
 
-    /// The Discussion skill's endpoint.
+    /// The assistant's endpoint, beside the Discussion skill.
     pub(crate) fn discussion_endpoint(&self) -> Option<&EndpointSetting> {
-        self.endpoint(self.discussion()?.endpoint.as_deref()?)
+        self.endpoint(self.assistant_endpoint.as_deref()?)
+    }
+
+    /// Where a skill's cell runs: its remembered choice, or else, for one
+    /// that makes images, the first OpenRouter endpoint with the first
+    /// start's image model, and for one that makes text, the default
+    /// level's endpoint and model.
+    pub(crate) fn skill_route(&self, skill: &SkillSetting) -> Option<(EndpointSetting, String)> {
+        if let Some(chosen) = self.skill_routes.get(&skill.id)
+            && let Some(endpoint) = self.endpoint(&chosen.endpoint)
+        {
+            return Some((endpoint.clone(), chosen.model.clone()));
+        }
+        match skill.makes {
+            Makes::Images => self.endpoints.iter().find(|endpoint| endpoint.kind == EndpointKind::Openrouter).map(|endpoint| (endpoint.clone(), IMAGE_MODEL.to_string())),
+            Makes::Text => {
+                let level = self.level_or_default(None)?;
+                let endpoint = self.discussion_endpoint().or_else(|| self.endpoint(&level.endpoint))?;
+                Some((endpoint.clone(), level.model.clone()))
+            }
+        }
+    }
+
+    /// Remembers a skill's endpoint and model, as its cell's menu chose.
+    pub(crate) fn remember_route(&mut self, skill: &str, endpoint: &str, model: &str) {
+        let route = SkillRoute { endpoint: endpoint.to_string(), model: model.to_string() };
+        if self.skill_routes.get(skill) == Some(&route) {
+            return;
+        }
+        let skill = skill.to_string();
+        self.update(move |settings| {
+            settings.skill_routes.insert(skill, route);
+        });
+    }
+
+    /// Forgets every skill's remembered choice on an endpoint being deleted.
+    pub(crate) fn forget_routes_on(&mut self, endpoint: &str) {
+        let endpoint = endpoint.to_string();
+        self.update(move |settings| settings.skill_routes.retain(|_, route| route.endpoint != endpoint));
     }
 
     /// The level `chosen` names, or else the default, or else the first.
@@ -1037,13 +1124,14 @@ impl Settings {
         self.skills.iter().find(|skill| skill.id == id)
     }
 
-    /// The skills using an endpoint, by name, so its deletion can be refused.
+    /// What must keep an endpoint, by name, so its deletion can be refused:
+    /// Discussion, when it is the assistant's. A skill's remembered choice on
+    /// it is forgotten instead.
     pub(crate) fn users_of(&self, endpoint: &str) -> Vec<String> {
-        self.skills
-            .iter()
-            .filter(|skill| skill.endpoint.as_deref() == Some(endpoint))
-            .map(|skill| skill.name.clone())
-            .collect()
+        if self.assistant_endpoint.as_deref() != Some(endpoint) {
+            return Vec::new();
+        }
+        vec![self.discussion().map_or_else(|| String::from("Discussion"), |skill| skill.name.clone())]
     }
 
     /// Settings from before 0.8 gain an OpenRouter endpoint, the Discussion
@@ -1077,13 +1165,15 @@ impl Settings {
             name: "OpenRouter".to_string(),
             kind: EndpointKind::Openrouter,
             address: openrouter.to_string(),
+            description: String::new(),
         };
+        let endpoint_id = id.clone();
         let discussion = SkillSetting {
             id: DISCUSSION.to_string(),
             name: "Discussion".to_string(),
             description: "How the assistant talks with you".to_string(),
-            endpoint: Some(id.clone()),
-            model: None,
+            former_endpoint: None,
+            former_model: None,
             prompt: DEFAULT_VOICE.to_string(),
             makes: Makes::Text,
         };
@@ -1092,6 +1182,7 @@ impl Settings {
                 return;
             }
             settings.endpoints.push(endpoint);
+            settings.assistant_endpoint = Some(endpoint_id);
             settings.skills.retain(|skill| skill.id != DISCUSSION);
             settings.skills.insert(0, discussion);
             settings.levels = levels;
@@ -1118,15 +1209,17 @@ impl Settings {
             id: protocol::cell_id(),
             name: "Image generation".to_string(),
             description: IMAGE_SKILL_DESCRIPTION.to_string(),
-            endpoint: Some(endpoint),
-            model: Some(IMAGE_MODEL.to_string()),
+            former_endpoint: None,
+            former_model: None,
             prompt: String::new(),
             makes: Makes::Images,
         };
+        let route = SkillRoute { endpoint, model: IMAGE_MODEL.to_string() };
         self.update(move |settings| {
             if settings.image_skill_added {
                 return;
             }
+            settings.skill_routes.insert(skill.id.clone(), route);
             settings.skills.push(skill);
             settings.image_skill_added = true;
         });
@@ -1137,7 +1230,8 @@ impl Settings {
     /// OpenRouter in 0.9, whose image API Studio speaks; one that makes
     /// text runs on any chat endpoint.
     pub(crate) fn skill_runs(&self, skill: &SkillSetting) -> bool {
-        let endpoint = skill.endpoint.as_deref().and_then(|id| self.endpoint(id));
+        let route = self.skill_route(skill);
+        let endpoint = route.as_ref().map(|(endpoint, _)| endpoint);
         match skill.makes {
             Makes::Images => endpoint.is_some_and(|endpoint| endpoint.kind == EndpointKind::Openrouter),
             Makes::Text => endpoint.is_some_and(|endpoint| endpoint.kind.chats()),
@@ -1865,14 +1959,43 @@ mod tests {
         settings.first_start("https://stand-in/v1");
         assert!(settings.add_image_skill());
         let skill = settings.image_skill().cloned().expect("an image skill");
-        assert_eq!((skill.model.as_deref(), skill.makes), (Some(IMAGE_MODEL), Makes::Images));
+        assert_eq!(skill.makes, Makes::Images);
+        assert_eq!(settings.skill_route(&skill).map(|(_, model)| model).as_deref(), Some(IMAGE_MODEL));
+        settings.update(|settings| settings.endpoints.push(EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into(), description: String::new() }));
+        settings.remember_route(&skill.id, "local", "llama3.2");
+        assert!(!settings.skill_runs(&skill), "an image skill runs where Studio cannot make images");
         settings.update(|settings| settings.skills.retain(|known| known.makes != Makes::Images));
         assert!(!settings.add_image_skill(), "a deleted image skill came back");
         assert!(Settings::load(Some(folder.join("settings.json"))).image_skill().is_none());
-        let mut local = skill.clone();
-        settings.endpoints.push(EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into() });
-        local.endpoint = Some("local".into());
-        assert!(!settings.skill_runs(&local), "an image skill runs where Studio cannot make images");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// Catches a user's skill or Discussion losing its endpoint when the
+    /// endpoint came apart from the skill: an older file's skill endpoint
+    /// and model become the remembered choice, and are never written back
+    /// into the skill.
+    #[test]
+    fn an_older_skills_endpoint_becomes_its_remembered_choice() {
+        let folder = scratch("former-routes");
+        std::fs::create_dir_all(&folder).unwrap();
+        let older = serde_json::json!({
+            "endpoints": [{ "id": "or", "name": "OpenRouter", "kind": "openrouter", "address": "https://stand-in/v1" }],
+            "skills": [
+                { "id": DISCUSSION, "name": "Discussion", "endpoint": "or", "prompt": "Speak plainly." },
+                { "id": "notes", "name": "Story notes", "endpoint": "or", "model": "m/notes", "prompt": "Summarise." }
+            ]
+        });
+        std::fs::write(folder.join("settings.json"), older.to_string()).unwrap();
+        let mut settings = Settings::load(Some(folder.join("settings.json")));
+        assert_eq!(settings.discussion_endpoint().map(|endpoint| endpoint.id.as_str()), Some("or"));
+        let notes = settings.skill("notes").cloned().unwrap();
+        assert_eq!(settings.skill_route(&notes).map(|(endpoint, model)| (endpoint.id, model)), Some((String::from("or"), String::from("m/notes"))));
+        settings.update(|_| {});
+        let written = std::fs::read_to_string(folder.join("settings.json")).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert!(written["skills"].as_array().unwrap().iter().all(|skill| skill.get("endpoint").is_none() && skill.get("model").is_none()), "a skill still carries an endpoint: {written}");
+        assert_eq!(written["skill_routes"]["notes"]["model"], "m/notes");
+        assert_eq!(settings.users_of("or"), ["Discussion"]);
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

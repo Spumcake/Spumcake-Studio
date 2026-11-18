@@ -183,6 +183,9 @@ struct HostWindow {
     settings_panel: crate::settings_panel::SettingsPanel,
     /// A cell's level picker, open under its chevron: the cell's id and where.
     model_menu: Option<(String, Rect)>,
+    /// The skill each of the conversation's cells was made by, by cell id,
+    /// so the endpoint and model its menu chooses are remembered for it.
+    cell_skills: std::collections::HashMap<String, String>,
     /// A conversation cell the person is dragging.
     dragging: Option<protocol::Cell>,
     /// A recipe cell's "…" menu, open under that rect.
@@ -315,6 +318,7 @@ impl HostWindow {
             level: None,
             settings_panel: crate::settings_panel::SettingsPanel::default(),
             model_menu: None,
+            cell_skills: std::collections::HashMap::new(),
             dragging: None,
             cell_menu: None,
             recipe_focus: false,
@@ -1079,13 +1083,14 @@ impl HostWindow {
             Some((started.id.clone(), started.running.tabs().1?))
         });
         let level = self.current_level();
+        let listed = self.probes.listed_by_endpoint();
         let request = assistant::Request {
             text,
             attachments,
             model: level.as_ref().map(|level| level.model.clone()).unwrap_or_default(),
             effort: level.and_then(|level| level.effort).map(|effort| effort.word().to_string()),
             selected,
-            targets: route::targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path())),
+            targets: route::targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path()), &listed),
         };
         self.assistant.send(Command::Send(request));
         for path in unread {
@@ -1151,6 +1156,7 @@ impl HostWindow {
             return;
         }
         let text = |key: &str| input.get(key).and_then(|value| value.as_str()).unwrap_or("").to_string();
+        let mut skill_of = None;
         let (prompt, run_on, image) = match route::skill_for_tool(&self.settings, tool) {
             Some(skill) => {
                 // An image skill's tool is asked with the image's prompt.
@@ -1161,8 +1167,15 @@ impl HostWindow {
                 } else {
                     format!("{}\n\n{asked}", skill.prompt.trim_end())
                 };
-                let keys = &mut self.keys;
-                (prompt, crate::endpoints::skill_route(&self.settings, &skill, |id| keys.get(id)), image)
+                let run_on = match self.skill_route_named(&skill, &text("endpoint"), &text("model")) {
+                    Some(named) => named,
+                    None => {
+                        let keys = &mut self.keys;
+                        crate::endpoints::skill_route(&self.settings, &skill, |id| keys.get(id))
+                    }
+                };
+                skill_of = Some(skill.id.clone());
+                (prompt, run_on, image)
             }
             None => (text("prompt"), self.level_route(), false),
         };
@@ -1181,7 +1194,43 @@ impl HostWindow {
             entry.cell = Some(cell.clone());
         }
         self.board.drafts.insert(cell.id.clone(), prompt.clone());
+        if let Some(skill) = skill_of {
+            self.cell_skills.insert(cell.id.clone(), skill);
+        }
         self.launch_run(crate::cells::Place::Conversation, cell.id, Some(call), run_on, prompt, image);
+    }
+
+    /// The endpoint and model the assistant named for a skill's cell, when
+    /// it named one: refused with a sentence when the endpoint is not one
+    /// the user set up, cannot run the skill, or comes with no model. None
+    /// when it named none, so the skill's own choice is used.
+    fn skill_route_named(&mut self, skill: &workspace::SkillSetting, endpoint: &str, model: &str) -> Option<Result<crate::endpoints::Route, String>> {
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty() {
+            return None;
+        }
+        let Some(found) = self.settings.endpoints.iter().find(|known| known.name.eq_ignore_ascii_case(endpoint)).cloned() else {
+            return Some(Err(format!("No endpoint is named “{endpoint}”. Use one of those listed.")));
+        };
+        let fits = match skill.makes {
+            workspace::Makes::Images => found.kind == workspace::EndpointKind::Openrouter,
+            workspace::Makes::Text => found.kind.chats(),
+        };
+        if !fits {
+            return Some(Err(format!("“{}” cannot run {}.", found.name, skill.name)));
+        }
+        let model = model.trim();
+        if model.is_empty() {
+            return Some(Err(format!("Name the model to run on “{}” too.", found.name)));
+        }
+        // A model the endpoint's list does not give, when the list is known.
+        let listed = self.probes.listed_by_endpoint();
+        let known = listed.get(&found.id).map(|(chat, images)| if skill.makes == workspace::Makes::Images { images.clone() } else { chat.clone() }).unwrap_or_default();
+        if !known.is_empty() && !known.iter().any(|id| id == model) {
+            return Some(Err(format!("“{}” does not list {model}. Use one of its models.", found.name)));
+        }
+        let key = self.keys.get(&found.id);
+        Some(Ok(crate::endpoints::Route::new(&found, key, model, None)))
     }
 
     fn note_cell_actions(&mut self, actions: Vec<crate::cells::CardAction>) {
@@ -2725,7 +2774,8 @@ impl HostWindow {
                 row.text = text;
             }
         }
-        if let Some(targets) = self.routing.changed_targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path())) {
+        let listed = self.probes.listed_by_endpoint();
+        if let Some(targets) = self.routing.changed_targets(&self.apps, &self.settings, self.project.as_ref().map(|project| project.folder.as_path()), &listed) {
             self.assistant.send(Command::Targets(targets));
         }
     }
@@ -3639,7 +3689,7 @@ mod tests {
         assert_eq!(out, vec![Command::Result(answer("c2"))]);
         assert!(routing.poll(&mut apps).is_empty());
 
-        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default(), None);
+        let targets = crate::route::targets(&apps, &crate::workspace::Settings::default(), None, &Default::default());
         assert!(targets.iter().all(|target| target.app != "gone"), "an exited process is offered");
         let here = targets.iter().find(|target| target.app == "here").expect("the living process was dropped");
         assert_eq!(here.tabs[0].label, "Template");
