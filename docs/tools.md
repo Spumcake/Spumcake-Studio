@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-117 tools.
+118 tools.
 
 ## The host
 
@@ -121,6 +121,7 @@ Make and time the film's clips and its sound, and inside a clip its layers, keyf
 - **`storyboard-generator__clips__trim_sound`**: Set where a sound starts on the film, where it starts inside its own sound, and its length, as dragging its edges and its page do. Takes `sound` (integer, required), `at` (integer), `from` (integer), `length` (integer).
 - **`storyboard-generator__clips__set_sound_volume`**: Set a sound's volume, as its page does. Takes `sound` (integer, required), `volume` (number, required).
 - **`storyboard-generator__clips__delete_sound`**: Take a sound off its track. Its file stays where it is in the project. Takes `sound` (integer, required).
+- **`storyboard-generator__clips__publish_sound`**: Offer a placed sound on the publish card as canon, under the film and named after its file, as Publish sound does, so the animatic can use it. The user approves it on the publish card. Takes `sound` (integer, required).
 - **`storyboard-generator__clips__set_listening_volume`**: Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step. Takes `volume` (number, required).
 - **`storyboard-generator__clips__read_sound`**: How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound. Takes `end` (integer, required), `start` (integer, required).
 - **`storyboard-generator__clips__export_animatic`**: Export the animatic: the project's animatic step makes it again, as build-animatic does, after the timing is saved when it differs, and its take is offered for publishing. Returns the step at once; list_items says when it is done. Takes nothing.

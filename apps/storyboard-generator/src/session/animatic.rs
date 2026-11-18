@@ -502,12 +502,21 @@ mod tests {
         let stem = outside.file_stem().unwrap().to_string_lossy().into_owned();
         assert_eq!(artifact, crate::session::sound::sound_artifact(&session.film_name(), &stem));
         assert_eq!(source, "prompts/resources/2026-11-17_10-00-outside.wav");
-        assert!(!dir.join(&path).exists(), "the copy in work/ was kept");
+        // Placed under the name it had outside, so Publish sound offers it
+        // again under the same artifact, after a Cancel on the card.
         let started = std::time::Instant::now();
         while !session.poll_imports() && started.elapsed() < std::time::Duration::from_secs(5) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(session.film().sounds().any(|(_, clip)| clip.file == "prompts/resources/2026-11-17_10-00-outside.wav"));
+        let placed = session.film().sounds().find(|(_, clip)| clip.file == "prompts/resources/2026-11-17_10-00-outside.wav").map(|(_, clip)| clip.id).unwrap();
+        assert_eq!(session.publish_sound(placed).unwrap(), artifact);
+        let Some(protocol::AppMessage::Publish { artifact: again, source, .. }) = session.take_outgoing().pop() else {
+            panic!("Publish sound offered nothing");
+        };
+        assert_eq!((again, source.as_str()), (artifact.clone(), "prompts/resources/2026-11-17_10-00-outside.wav"));
+        // A take already in the project, after its own file.
+        assert_eq!(session.publish_sound(take).unwrap(), "Last order: 2026-11-12_20-03-otis-line-1, sound");
+        assert!(!dir.join(&path).exists(), "the copy in work/ was kept");
         // Drawing over a keyframe, then Publish hold: a PNG, asked to be published.
         let second = session.film().clips[1].id;
         session.enter_clip(second);
