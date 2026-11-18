@@ -83,7 +83,7 @@ pub(crate) fn tools() -> Vec<Tool> {
         },
         Tool {
             name: RERUN_STEP.into(),
-            description: "Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first.".into(),
+            description: "Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step.".into(),
             input: json!({
                 "type": "object",
                 "properties": {
