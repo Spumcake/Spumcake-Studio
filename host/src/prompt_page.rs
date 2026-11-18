@@ -50,6 +50,9 @@ pub(crate) struct Canon {
     pub step_artifacts: HashMap<(String, String), String>,
     /// The skill each step follows, by its chain and its name.
     pub step_skills: HashMap<(String, String), String>,
+    /// Each step's place in its chain, by its chain and its name: the
+    /// steps at one place are one cell's assets in use.
+    pub step_orders: HashMap<(String, String), i64>,
 }
 
 /// The living pipeline: the highest-numbered folder in `pipeline/`, as the
@@ -102,12 +105,18 @@ pub(crate) fn read_canon(scripts: &Path, folder: &Path, setup: &[(String, String
             canon.step_artifacts.insert((chain.clone(), step.clone()), artifact.clone());
         }
     }
-    let skills = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(chain, name, skill) FROM step WHERE skill IS NOT NULL AND skill != ''", "--read-only"]).unwrap_or_default();
-    for row in skills.lines() {
+    let places = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(chain, name, ord, skill) FROM step", "--read-only"]).unwrap_or_default();
+    for row in places.lines() {
         if let Ok(Value::Array(cells)) = serde_json::from_str::<Value>(row)
-            && let [Value::String(chain), Value::String(step), Value::String(skill)] = cells.as_slice()
+            && let [Value::String(chain), Value::String(step), order, skill] = cells.as_slice()
         {
-            canon.step_skills.insert((chain.clone(), step.clone()), skill.clone());
+            let key = (chain.clone(), step.clone());
+            if let Some(order) = order.as_i64() {
+                canon.step_orders.insert(key.clone(), order);
+            }
+            if let Some(skill) = skill.as_str().filter(|skill| !skill.is_empty()) {
+                canon.step_skills.insert(key, skill.to_string());
+            }
         }
     }
     Ok(canon)
@@ -377,21 +386,29 @@ fn slim(record: Value) -> Value {
 
 pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs: &[String], canon: &Canon, reports: &mut Reports) -> Vec<Round> {
     let mut found: Vec<(u64, Round)> = Vec::new();
+    // A step's cell is every step at its place in the chain, one per asset
+    // in use, such as "final shot" and "final shot, 2"; a step with no place
+    // known is its cell alone.
+    let order = step.and_then(|step| canon.step_orders.get(&(step.chain.clone(), step.step.clone())));
+    let cell_steps: Vec<String> = match (step, order) {
+        (Some(step), Some(order)) => canon.step_orders.iter().filter(|((chain, _), at)| *chain == step.chain && *at == order).map(|((_, name), _)| name.clone()).collect(),
+        (Some(step), None) => vec![step.step.clone()],
+        (None, _) => Vec::new(),
+    };
     // A report that names the step's chain and no step is a take made for
     // the chain, as Last order's LTX trial of its final shot is: it is the
-    // step's when it follows the step's skill and no other step of the
-    // chain follows that skill.
+    // cell's when it follows the step's skill and no other place in the
+    // chain has a step that follows that skill.
     let chain_take = |record: &Value, step: &StepRef| {
         let Some(skill) = canon.step_skills.get(&(step.chain.clone(), step.step.clone())) else { return false };
-        record.get("step").and_then(Value::as_str).is_none()
-            && record.get("skill").and_then(Value::as_str) == Some(skill.as_str())
-            && canon.step_skills.iter().filter(|((chain, _), other)| *chain == step.chain && *other == skill).count() == 1
+        let places: HashSet<Option<i64>> = canon.step_skills.iter().filter(|((chain, _), other)| *chain == step.chain && *other == skill).map(|(key, _)| canon.step_orders.get(key).copied()).collect();
+        record.get("step").and_then(Value::as_str).is_none() && record.get("skill").and_then(Value::as_str) == Some(skill.as_str()) && places.len() == 1
     };
     let names_cell = |record: &Value| {
         record.pointer("/setup/cell/item").and_then(Value::as_str) == Some(cell)
             || step.is_some_and(|step| {
                 record.get("chain").and_then(Value::as_str) == Some(step.chain.as_str())
-                    && (record.get("step").and_then(Value::as_str) == Some(step.step.as_str()) || chain_take(record, step))
+                    && (record.get("step").and_then(Value::as_str).is_some_and(|named| cell_steps.iter().any(|own| own == named)) || chain_take(record, step))
             })
     };
     // Each report, by its id, with its record and the file it is in.
@@ -429,8 +446,12 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
     // own outputs, and the file its step's artifact is published as.
     let mut matched: Vec<bool> = done.iter().map(|(_, _, record)| names_cell(record)).collect();
     let mut seeds: HashSet<String> = outputs.iter().cloned().collect();
-    if let Some(file) = step.and_then(|step| canon.step_artifacts.get(&(step.chain.clone(), step.step.clone()))).and_then(|artifact| canon.files.get(artifact)) {
-        seeds.insert(file.clone());
+    if let Some(step) = step {
+        for own in &cell_steps {
+            if let Some(file) = canon.step_artifacts.get(&(step.chain.clone(), own.clone())).and_then(|artifact| canon.files.get(artifact)) {
+                seeds.insert(file.clone());
+            }
+        }
     }
     // Then the rounds a found take was finished through, as a retime or an
     // upscale is: a request of the finishing skill, whose one reference of
@@ -458,7 +479,11 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
             named => named == own,
         };
         let other_cell = record.pointer("/setup/cell/item").and_then(Value::as_str).is_some_and(|item| item != cell);
-        !other_cell && named("step", step.map(|step| step.step.as_str())) && (step.is_none() || named("chain", step.map(|step| step.chain.as_str())))
+        let own_step = match record.get("step").and_then(Value::as_str) {
+            None => true,
+            Some(named) => cell_steps.iter().any(|own| own == named),
+        };
+        !other_cell && own_step && (step.is_none() || named("chain", step.map(|step| step.chain.as_str())))
     };
     for (index, (_, _, record)) in done.iter().enumerate() {
         if outputs_of(record).iter().any(|output| seeds.contains(output)) {
@@ -507,7 +532,14 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
         let report = format!("requests/{name}");
         let state = if failed { RoundState::Failed } else { RoundState::Done };
         let error = failed.then(|| String::from("Nothing came back. Open its report to see why."));
-        found.push((started, round_of(id, record, state, started, &outputs, error, Some(report))));
+        let mut round = round_of(id, record, state, started, &outputs, error, Some(report));
+        // The canon artifact of the step that made it, one of the cell's
+        // steps, or else the cell's own step's.
+        round.artifact = step.and_then(|step| {
+            let own = record.get("step").and_then(Value::as_str).filter(|named| cell_steps.iter().any(|own| own == named)).unwrap_or(step.step.as_str());
+            canon.step_artifacts.get(&(step.chain.clone(), own.to_string())).cloned()
+        });
+        found.push((started, round));
     }
     found.sort_by_key(|(started, round)| (*started, round.request.clone()));
     found
@@ -515,9 +547,10 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
         .enumerate()
         .map(|(index, (_, mut round))| {
             round.number = index as u32 + 1;
-            // The canon artifact the cell's step makes, so its takes can be
-            // published as it.
-            round.artifact = step.and_then(|step| canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned());
+            // A pending round is its cell's own step's.
+            if round.artifact.is_none() {
+                round.artifact = step.and_then(|step| canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned());
+            }
             for take in &mut round.takes {
                 take.canon = canon.published.contains(&take.path);
             }
@@ -900,6 +933,55 @@ impl PromptPage {
         self.forget();
         Ok(())
     }
+
+    /// Generate again on a step's cell: a new step at the cell's place,
+    /// `"<step>, N"`, holding the cell's prompt, references, and settings as
+    /// they stand, with its own artifact, `"<element>: <role>, N"`, as
+    /// Skills' project-pipeline names a second alternative. Returns the new
+    /// step, which the runner then makes a take of with `rerun --step`.
+    pub(crate) fn generate_again(&mut self, folder: &Path, scripts: &Path, setup: &[(String, String)], step: &StepRef, input: &[CellPart], settings: Option<&Value>) -> Result<StepRef, String> {
+        let pipeline = living_pipeline(folder).ok_or("This project has no pipeline yet.")?;
+        let canon = self.canon(folder, scripts, setup);
+        let read = self.step(folder, scripts, setup, step).ok_or("The step could not be read.")?;
+        let order = read.get("ord").and_then(Value::as_i64).ok_or("The step has no place in its chain.")?;
+        let base = alternative_of(&step.step).0;
+        let taken = |name: &str| canon.step_orders.contains_key(&(step.chain.clone(), name.to_string()));
+        let n = (2..).find(|n| !taken(&format!("{base}, {n}"))).unwrap_or(2);
+        let name = format!("{base}, {n}");
+        let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).map(|artifact| format!("{}, {n}", alternative_of(artifact).0));
+        let (template, refs, endpoint) = step_edits(&read, &canon, input, settings);
+        let text = |key: &str| read.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        let template = template.unwrap_or_else(|| text("template"));
+        // pipeline.py reads a template that starts with "@" as a file's name.
+        let template = if template.starts_with('@') { format!("@{}", write_template(folder, &template)?) } else { template };
+        let refs = refs.unwrap_or_else(|| text("refs"));
+        let endpoint = endpoint.unwrap_or_else(|| text("endpoint"));
+        let (skill, order) = (text("skill"), order.to_string());
+        let mut args: Vec<&str> = vec!["step", pipeline.as_str(), step.chain.as_str(), name.as_str(), "--order", order.as_str()];
+        for (flag, value) in [("--skill", &skill), ("--endpoint", &endpoint), ("--template", &template), ("--refs", &refs)] {
+            if !value.is_empty() {
+                args.extend([flag, value.as_str()]);
+            }
+        }
+        if let Some(artifact) = &artifact {
+            args.extend(["--artifact", artifact.as_str()]);
+        }
+        script(scripts, folder, setup, "pipeline.py", &args)?;
+        self.forget();
+        Ok(StepRef { chain: step.chain.clone(), step: name })
+    }
+}
+
+/// A step's or an artifact's name without its alternative's number, and
+/// the number: `"final shot, 2"` is `("final shot", Some(2))`.
+fn alternative_of(name: &str) -> (&str, Option<u32>) {
+    match name.rsplit_once(", ") {
+        Some((base, number)) if !base.is_empty() => match number.parse::<u32>() {
+            Ok(number) => (base, Some(number)),
+            Err(_) => (name, None),
+        },
+        _ => (name, None),
+    }
 }
 
 #[cfg(test)]
@@ -1071,6 +1153,48 @@ mod tests {
         assert_eq!(ids(image), ["keyframe"], "a take made from several images pulled them in as its rounds");
         let dusk = rounds(&folder, "dusk", None, &[String::from("library/dusk.png")], &Canon::default(), &mut Reports::default());
         assert_eq!(ids(dusk), ["dusk"], "an image made from another pulled in that one's family as its rounds");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches Generate again naming a third alternative "<step>, 2, 2", or
+    /// cutting a name whose last words are not a number.
+    #[test]
+    fn an_alternative_is_named_from_its_first() {
+        assert_eq!(alternative_of("final shot, 2"), ("final shot", Some(2)));
+        assert_eq!(alternative_of("final shot"), ("final shot", None));
+        assert_eq!(alternative_of("final frame, waiting"), ("final frame, waiting", None));
+        assert_eq!(alternative_of("Last order: final shot, 3"), ("Last order: final shot", Some(3)));
+    }
+
+    /// Catches a cell with two assets in use, two steps at one place, as
+    /// Generate again leaves it, opening with only one step's rounds, or the
+    /// chain's trial lost once two steps there follow its skill; and a
+    /// step at another place taken in.
+    #[test]
+    fn a_cell_is_every_step_at_its_place() {
+        let folder = std::env::temp_dir().join(format!("prompt-rounds-by-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("requests")).unwrap();
+        let report = |id: &str, started: &str, step: Option<&str>, skill: &str| {
+            let record = json!({ "id": id, "started": started, "prompt": "p", "sent": { "model": "m" }, "outputs": [format!("library/{id}.mp4")], "references": [], "chain": "the final shot", "step": step, "skill": skill, "setup": null });
+            std::fs::write(folder.join(format!("requests/{id}.html")), format!("<script type=\"application/json\" id=\"request\">{record}</script>")).unwrap();
+        };
+        report("first", "2026-11-14T12:00:00Z", Some("final shot"), "create-final-animation");
+        report("second", "2026-11-14T13:00:00Z", Some("final shot, 2"), "create-final-animation");
+        report("trial", "2026-11-14T14:00:00Z", None, "create-final-animation");
+        report("frame", "2026-11-14T11:00:00Z", Some("final frame"), "generate-keyframe");
+        let mut canon = Canon::default();
+        for (name, order, skill, artifact) in [("final shot", 5, "create-final-animation", "Last order: final shot"), ("final shot, 2", 5, "create-final-animation", "Last order: final shot, 2"), ("final frame", 3, "generate-keyframe", "Last order: final frame")] {
+            let key = (String::from("the final shot"), name.to_string());
+            canon.step_orders.insert(key.clone(), order);
+            canon.step_skills.insert(key.clone(), skill.to_string());
+            canon.step_artifacts.insert(key, artifact.to_string());
+        }
+        let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
+        let found = rounds(&folder, "final", Some(&step), &[], &canon, &mut Reports::default());
+        let ids: Vec<&str> = found.iter().map(|round| round.request.as_str()).collect();
+        assert_eq!(ids, ["first", "second", "trial"], "the cell's two steps and its chain's trial, and not another place's step");
+        assert_eq!(found[1].artifact.as_deref(), Some("Last order: final shot, 2"), "a round lost its own step's artifact");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
