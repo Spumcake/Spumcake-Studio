@@ -93,7 +93,7 @@ echo "== no-host check"
 
 if [ -n "${SPUMCAKE_RENDER:-}" ]; then
     echo "== Spumcake-Render ($(git -C "$SPUMCAKE_RENDER" rev-parse --short HEAD))"
-    render_key="$(git -C "$SPUMCAKE_RENDER" rev-parse 'HEAD^{tree}')-$(git -C "$SPUMCAKE_RENDER" status --porcelain | sha256sum | cut -c1-16)-$(echo "${LAST_ORDER:-}" | sha256sum | cut -c1-16)"
+    render_key="$(git -C "$SPUMCAKE_RENDER" rev-parse 'HEAD^{tree}')-$(git -C "$SPUMCAKE_RENDER" status --porcelain | sha256sum | cut -c1-16)-$( { echo "${LAST_ORDER:-}"; [ -n "${LAST_ORDER:-}" ] && git -C "$LAST_ORDER" rev-parse HEAD 2>/dev/null; } | sha256sum | cut -c1-16)"
     render_stamp="$target/checks-passed/render-$render_key"
     if [ -f "$render_stamp" ] && [ -z "$(git -C "$SPUMCAKE_RENDER" status --porcelain)" ]; then
         echo "unchanged since it passed: $(cat "$render_stamp")"

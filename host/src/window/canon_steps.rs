@@ -124,16 +124,18 @@ impl HostWindow {
     pub(super) fn take_canon_steps(&mut self) {
         let mut reads = Vec::new();
         let mut canon = Vec::new();
+        let mut touches = Vec::new();
         let mut edits = Vec::new();
         let mut scripts = Vec::new();
         for (app, started) in self.apps.iter_mut().enumerate() {
             let declared = &mut started.running.declared;
             reads.extend(declared.canon_reads.drain(..).map(|read| (app, read)));
             canon.extend(declared.canon_edits.drain(..).map(|edit| (app, edit)));
+            touches.extend(declared.touches_reads.drain(..).map(|read| (app, read)));
             edits.extend(declared.step_edits.drain(..).map(|edit| (app, edit)));
             scripts.extend(declared.skill_scripts.drain(..).map(|script| (app, script)));
         }
-        if reads.is_empty() && edits.is_empty() && scripts.is_empty() && canon.is_empty() {
+        if reads.is_empty() && edits.is_empty() && scripts.is_empty() && canon.is_empty() && touches.is_empty() {
             return;
         }
         let project = self.project_scripts();
@@ -152,6 +154,22 @@ impl HostWindow {
             run_off_thread(&self.canon_answers, app, place, String::from("pipeline.py"), args, move |result| match result {
                 Ok(printed) => HostMessage::CanonRows { id, rows: printed.lines().filter(|line| !line.is_empty()).map(canon_row).collect(), error: None },
                 Err(error) => HostMessage::CanonRows { id, rows: Vec::new(), error: Some(error) },
+            });
+        }
+        for (app, (id, artifact)) in touches {
+            let (Some((folder, env)), Some(pipeline)) = (&project, &pipeline) else {
+                self.send(app, HostMessage::TouchesRead { id, touches: Value::Null, error: Some(unread.clone()) });
+                continue;
+            };
+            let place = (env.scripts.clone().unwrap_or_default(), folder.clone(), env.vars.clone());
+            let mut args = vec![String::from("touches"), pipeline.clone()];
+            if let Some(artifact) = artifact {
+                args.extend([String::from("--artifact"), artifact]);
+            }
+            args.push(String::from("--json"));
+            run_off_thread(&self.canon_answers, app, place, String::from("pipeline.py"), args, move |result| match result.and_then(|printed| serde_json::from_str::<Value>(&printed).map_err(|error| format!("pipeline.py touches gave no JSON: {error}"))) {
+                Ok(touches) => HostMessage::TouchesRead { id, touches, error: None },
+                Err(error) => HostMessage::TouchesRead { id, touches: Value::Null, error: Some(error) },
             });
         }
         for (app, (id, skill, script, args)) in scripts {

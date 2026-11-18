@@ -143,6 +143,9 @@ pub struct Declared {
     pub canon_reads: VecDeque<(String, String)>,
     /// Step edits it asked for: the id, the tab, the step, and what to set.
     pub step_edits: VecDeque<(String, String, protocol::StepRef, crate::window::StepFields)>,
+    /// What is out of date that it asked for: the id, and the artifact a
+    /// change is named for, if any.
+    pub touches_reads: VecDeque<(String, Option<String>)>,
     /// Canon it asked to record: the id, and `pipeline.py`'s command after
     /// the pipeline's number, such as `element <name> --kind film`.
     pub canon_edits: VecDeque<(String, Vec<String>)>,
@@ -675,6 +678,13 @@ impl Running {
                 declared.step_edits.push_back((id, tab, step, crate::window::StepFields { script, refs, order, skill, artifact, endpoint }))
             }
             AppMessage::EditElement { id, name, kind, .. } => declared.canon_edits.push_back((id, vec![String::from("element"), name, String::from("--kind"), kind])),
+            AppMessage::KeepCanon { id, artifacts, reason, .. } => {
+                let mut args = vec![String::from("keep")];
+                args.extend(artifacts);
+                args.extend([String::from("--reason"), reason]);
+                declared.canon_edits.push_back((id, args));
+            }
+            AppMessage::ReadTouches { id, artifact } => declared.touches_reads.push_back((id, artifact)),
             AppMessage::EditChain { id, chain, order, .. } => declared.canon_edits.push_back((id, vec![String::from("chain"), chain, String::from("--order"), order.to_string()])),
             AppMessage::RunStep { id, tab, step } => declared.step_runs.push_back((id, tab, step)),
             AppMessage::OpenIn { path, media_type } => declared.open_ins.push_back((path, media_type)),

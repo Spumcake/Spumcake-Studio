@@ -322,6 +322,24 @@ pub enum AppMessage {
         #[serde(default)]
         kind: String,
     },
+    /// Asks the host what is out of date, with `pipeline.py touches <n>
+    /// --json`: with an `artifact`, everything a change to it reaches; with
+    /// none, everything out of date now and what is unverified. It runs at
+    /// once, as a read. The answer is `touches_read`.
+    ReadTouches {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
+    },
+    /// Asks the host to keep canon artifacts as they are against their
+    /// changed inputs, with `pipeline.py keep <n> <artifact>… --reason`, on
+    /// the user's own Keep, at once. The answer is `canon_edited`.
+    KeepCanon {
+        id: String,
+        tab: String,
+        artifacts: Vec<String>,
+        reason: String,
+    },
     /// Asks the host to record a chain that does not exist yet, `pipeline.py
     /// chain <n> <chain> --order <order>`; a chain that exists is never
     /// asked for, since this replaces its order. The answer is
@@ -697,7 +715,17 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// The answer to `edit_element` and `edit_chain`: recorded, or why not.
+    /// The answer to `read_touches`: `pipeline.py touches --json`'s answer as
+    /// it printed it, or why there is none.
+    TouchesRead {
+        id: String,
+        #[serde(default)]
+        touches: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `edit_element`, `edit_chain`, and `keep_canon`:
+    /// recorded, or why not.
     CanonEdited {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -940,6 +968,8 @@ impl Declaration {
             | AppMessage::EditStep { .. }
             | AppMessage::EditElement { .. }
             | AppMessage::EditChain { .. }
+            | AppMessage::ReadTouches { .. }
+            | AppMessage::KeepCanon { .. }
             | AppMessage::RunStep { .. }
             | AppMessage::RunSkillScript { .. }
             | AppMessage::OpenIn { .. }
@@ -1991,6 +2021,9 @@ mod tests {
         round_trip_app(AppMessage::EditElement { id: "c1".into(), tab: "1".into(), name: "The Last Signal".into(), kind: "film".into() });
         round_trip_app(AppMessage::EditChain { id: "c2".into(), tab: "1".into(), chain: "the animatic".into(), order: 7 });
         round_trip_host(HostMessage::CanonEdited { id: "c1".into(), error: None });
+        round_trip_app(AppMessage::ReadTouches { id: "t1".into(), artifact: Some("the keeper: model sheet".into()) });
+        round_trip_app(AppMessage::KeepCanon { id: "k1".into(), tab: "1".into(), artifacts: vec!["the diner: plate".into()], reason: "The change is to the door only.".into() });
+        round_trip_host(HostMessage::TouchesRead { id: "t1".into(), touches: serde_json::json!({"out_of_date": []}), error: None });
         round_trip_app(AppMessage::RunStep { id: "s1".into(), tab: "1".into(), step: animatic.clone() });
         round_trip_app(AppMessage::RunSkillScript {
             id: "w1".into(),
