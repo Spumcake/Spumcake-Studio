@@ -83,10 +83,11 @@ pub(crate) fn level_route(settings: &Settings, level: &Level, key: impl FnOnce(&
     Ok(Route::new(endpoint, key(&endpoint.id), &level.model, level.effort))
 }
 
-/// A skill's route: its model on its endpoint, at no set effort.
+/// A skill's route: the endpoint and model chosen for it, apart from the
+/// skill, at no set effort.
 pub(crate) fn skill_route(settings: &Settings, skill: &SkillSetting, key: impl FnOnce(&str) -> Option<String>) -> Result<Route, String> {
-    let endpoint = skill.endpoint.as_deref().and_then(|id| settings.endpoint(id)).ok_or(NO_ENDPOINT)?;
-    Ok(Route::new(endpoint, key(&endpoint.id), skill.model.as_deref().unwrap_or_default(), None))
+    let (endpoint, model) = settings.skill_route(skill).ok_or(NO_ENDPOINT)?;
+    Ok(Route::new(&endpoint, key(&endpoint.id), &model, None))
 }
 
 /// What a connection test found.
@@ -271,6 +272,20 @@ impl Probes {
         known
     }
 
+    /// Each endpoint's model ids already read, chat and image lists
+    /// together, by endpoint id: what the assistant is told an endpoint
+    /// offers. An endpoint not asked yet has none.
+    pub(crate) fn listed_by_endpoint(&mut self) -> HashMap<String, Vec<String>> {
+        let mut listed: HashMap<String, Vec<String>> = HashMap::new();
+        for (key, asked) in self.models.iter_mut() {
+            if let Some(Ok(list)) = asked.poll() {
+                let endpoint = key.strip_suffix("#images").unwrap_or(key).to_string();
+                listed.entry(endpoint).or_default().extend(list.iter().map(|model| model.id.clone()));
+            }
+        }
+        listed
+    }
+
     /// Asks again next time, as after an edit or when the page reopens.
     pub(crate) fn forget(&mut self, endpoint: &str) {
         self.statuses.remove(endpoint);
@@ -293,6 +308,7 @@ mod tests {
             name: "Mine".into(),
             kind,
             address: "http://localhost:11434/v1/".into(),
+            description: String::new(),
         }
     }
 

@@ -68,10 +68,13 @@ pub(crate) enum SettingsChoice {
         kind: EndpointKind,
         name: String,
         address: String,
+        description: String,
         key: Option<String>,
     },
     DeleteEndpoint(String),
     SaveSkill(SkillSetting),
+    /// The assistant's endpoint, beside the Discussion skill, by id.
+    ChooseAssistantEndpoint(String),
     DeleteSkill(String),
     /// Skill folders' Add folder…: choose a folder the assistant finds
     /// agent skills in.
@@ -93,6 +96,8 @@ pub(crate) struct EndpointForm {
     pub kind: EndpointKind,
     pub name: String,
     pub address: String,
+    /// What the endpoint is for, as the user writes it.
+    pub description: String,
     /// A key typed here. Empty keeps the stored one.
     pub key: String,
     pub has_key: bool,
@@ -107,12 +112,23 @@ impl Default for EndpointForm {
             kind: EndpointKind::Openrouter,
             name: name.to_string(),
             address: address.to_string(),
+            description: EndpointKind::Openrouter.note().to_string(),
             key: String::new(),
             has_key: false,
             error: None,
         }
     }
 }
+
+/// The Skills page's line, now that a skill names no endpoint.
+const SKILLS_PAGE_LINE: &str = "Each skill's cell chooses where its prompts go.";
+/// The endpoint form's row for what an endpoint is for, as the owner
+/// approved on 2026-11-17.
+const ENDPOINT_DESCRIPTION: &str = "Description";
+const ENDPOINT_DESCRIPTION_LINE: &str = "What it is for, which the assistant reads";
+/// A skill's page's line, now that a skill's cell chooses its endpoint and
+/// model, as the owner approved on 2026-11-17.
+const SKILL_PAGE_LINE: &str = "Runs its prompt in the conversation when the assistant calls it. Its cell chooses the endpoint and model.";
 
 /// The level form, as it is being filled in.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -182,7 +198,8 @@ pub(crate) fn unlisted(settings: &Settings, listed: &mut dyn FnMut(&EndpointSett
         .iter()
         .filter(|skill| skill.id != DISCUSSION)
         .filter(|skill| {
-            missing(skill.endpoint.as_deref().and_then(|id| settings.endpoint(id)), skill.model.as_deref().unwrap_or_default(), skill.makes)
+            let route = settings.skill_route(skill);
+            missing(route.as_ref().map(|(endpoint, _)| endpoint), route.as_ref().map_or("", |(_, model)| model.as_str()), skill.makes)
         })
         .map(|skill| skill.id.clone())
         .collect();
@@ -258,6 +275,7 @@ impl SettingsPanel {
             kind: endpoint.kind,
             name: endpoint.name.clone(),
             address: endpoint.address.clone(),
+            description: endpoint.description.clone(),
             key: String::new(),
             has_key,
             error: None,
@@ -889,7 +907,7 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
     }
     let editing = panel.endpoint_form.editing.is_some();
     header(ui, panel, if editing { "Edit endpoint" } else { "Add endpoint" }, "", None);
-    let rows = card(ui, 4);
+    let rows = card(ui, 5);
     let form = &mut panel.endpoint_form;
     // Type
     let kinds: Vec<String> = EndpointKind::ALL.iter().map(|kind| kind.label().to_string()).collect();
@@ -911,6 +929,10 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
         if form.address.trim().is_empty() || form.address == old.1 {
             form.address = kind.suggested().1.to_string();
         }
+        // So does the description, starting from the kind's own note.
+        if form.description.trim().is_empty() || form.description == form.kind.note() {
+            form.description = kind.note().to_string();
+        }
         form.kind = kind;
         env.probes.clear_form();
     }
@@ -922,9 +944,12 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
     if field(ui, address_rect, "endpoint-address", &mut form.address, true, false, "").changed() {
         env.probes.clear_form();
     }
-    let key_rect = control(rows[3], CONTROL_W, 0.0);
+    let description_rect = control(rows[3], CONTROL_W, 0.0);
+    row_text(ui, rows[3], rows[3].left() + PAD, description_rect.left() - 8.0, ENDPOINT_DESCRIPTION, ENDPOINT_DESCRIPTION_LINE);
+    field(ui, description_rect, "endpoint-description", &mut form.description, false, false, "");
+    let key_rect = control(rows[4], CONTROL_W, 0.0);
     let where_kept = if env.uses_file { "Kept in a private file, never in a project" } else { "Kept in your system keyring, never in a project" };
-    row_text(ui, rows[3], rows[3].left() + PAD, key_rect.left() - 8.0, "API key", where_kept);
+    row_text(ui, rows[4], rows[4].left() + PAD, key_rect.left() - 8.0, "API key", where_kept);
     let hint = if form.has_key { "Saved. Type to replace it" } else if form.kind == EndpointKind::Openrouter { "Required" } else { "Optional" };
     field(ui, key_rect, "endpoint-key", &mut form.key, false, true, hint);
     if let Some(error) = &form.error {
@@ -968,6 +993,7 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
             kind: form.kind,
             name: form.name.trim().to_string(),
             address: form.address.trim().to_string(),
+            description: form.description.trim().to_string(),
             key,
         });
         env.probes.clear_form();
@@ -991,13 +1017,13 @@ fn endpoint_options(settings: &Settings, current: Option<&str>, chats_only: bool
 }
 
 fn skills(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: &mut Vec<SettingsChoice>) {
-    if header(ui, panel, "Skills", "Each skill sends its prompts to the endpoint you choose for it.", Some("New skill")) {
+    if header(ui, panel, "Skills", SKILLS_PAGE_LINE, Some("New skill")) {
         let skill = SkillSetting {
             id: protocol::cell_id(),
             name: String::from("New Skill"),
             description: String::new(),
-            endpoint: env.settings.discussion().and_then(|skill| skill.endpoint.clone()),
-            model: None,
+            former_endpoint: None,
+            former_model: None,
             prompt: String::new(),
             makes: crate::workspace::Makes::Text,
         };
@@ -1013,16 +1039,20 @@ fn skills(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: 
         // Discussion has no "…", and its dropdown stays where the others' are.
         let trailing = 36.0;
         let menu = (!built_in).then(|| more(ui, row, &skill.id));
+        // Only Discussion's row chooses an endpoint, the assistant's own; a
+        // skill's cell chooses its own.
         let select_rect = control(row, 200.0, trailing);
-        let (names, ids, chosen) = endpoint_options(settings, skill.endpoint.as_deref(), built_in);
+        let (names, ids, chosen) = endpoint_options(settings, settings.assistant_endpoint.as_deref(), true);
         let shown = chosen.map_or("No endpoint", |index| names[index].as_str()).to_string();
-        let body = Rect::from_min_max(row.min, pos2(select_rect.left() - 8.0, row.bottom()));
+        let body_right = if built_in { select_rect.left() - 8.0 } else { row.right() - trailing - 8.0 };
+        let body = Rect::from_min_max(row.min, pos2(body_right, row.bottom()));
         let response = ui
             .interact(body, egui::Id::new(("settings-skill", &skill.id)), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         // The warning sits on the name's line; the description below keeps
         // the row's whole width.
-        let words = not_on(&shown);
+        let runs_on = if built_in { shown.clone() } else { settings.skill_route(skill).map_or_else(|| shown.clone(), |(endpoint, _)| endpoint.name) };
+        let words = not_on(&runs_on);
         let warned = panel.unlisted.skills.contains(&skill.id);
         let warning_w = ui.painter().layout_no_wrap(words.clone(), ts::small(), WARNING).size().x + 30.0;
         let name_right = if warned { body.right() - 8.0 - warning_w } else { body.right() };
@@ -1044,10 +1074,10 @@ fn skills(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: 
             tag(ui, name_right + 28.0, row.center().y - 10.0, "Built in");
         }
         panel.buttons.push((skill.name.clone(), body));
-        if let Some(index) = select(ui, select_rect, &format!("skill-endpoint-{}", skill.id), &shown, &names, chosen) {
-            let mut changed = skill.clone();
-            changed.endpoint = Some(ids[index].clone());
-            choices.push(SettingsChoice::SaveSkill(changed));
+        if built_in
+            && let Some(index) = select(ui, select_rect, &format!("skill-endpoint-{}", skill.id), &shown, &names, chosen)
+        {
+            choices.push(SettingsChoice::ChooseAssistantEndpoint(ids[index].clone()));
         }
         if response.clicked() {
             panel.open_skill(skill);
@@ -1180,10 +1210,9 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
         toolbar::paint_icon(ui.painter(), pos2(title.right() + 16.0, title.center().y), "lock", 16.0, MUTED);
         ui.painter().text(rect.left_top() + vec2(0.0, 44.0), Align2::LEFT_CENTER, "Built in. This skill can't be removed.", ts::body(), MUTED);
     } else {
-        header(ui, panel, &skill.name, "Runs its prompt on its own endpoint when the assistant calls it.", None);
+        header(ui, panel, &skill.name, SKILL_PAGE_LINE, None);
     }
-    let rows = card(ui, if built_in { 1 } else { 5 });
-    let mut index = 0;
+    let rows = card(ui, if built_in { 1 } else { 3 });
     if !built_in {
         let name_rect = control(rows[0], CONTROL_W, 0.0);
         row_text(ui, rows[0], rows[0].left() + PAD, name_rect.left() - 8.0, "Name", "The tool's name, as the assistant sees it");
@@ -1191,51 +1220,26 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
         let description_rect = control(rows[1], CONTROL_W, 0.0);
         row_text(ui, rows[1], rows[1].left() + PAD, description_rect.left() - 8.0, "Description", "When the assistant should use it");
         field(ui, description_rect, "skill-description", &mut skill.description, false, false, "");
-        index = 2;
     }
-    let endpoint_rect = control(rows[index], CONTROL_W, 0.0);
-    let line = if built_in { "Where the assistant's replies come from" } else { "Where its prompts go" };
-    row_text(ui, rows[index], rows[index].left() + PAD, endpoint_rect.left() - 8.0, "Endpoint", line);
-    let (names, ids, chosen) = endpoint_options(settings, skill.endpoint.as_deref(), built_in);
-    let shown = chosen.map_or("No endpoint", |index| names[index].as_str()).to_string();
-    if let Some(picked) = select(ui, endpoint_rect, &format!("skill-page-endpoint-{id}"), &shown, &names, chosen) {
-        skill.endpoint = Some(ids[picked].clone());
-    }
-    if !built_in {
+    if built_in {
+        // The assistant's endpoint, a setting beside the skill.
+        let endpoint_rect = control(rows[0], CONTROL_W, 0.0);
+        row_text(ui, rows[0], rows[0].left() + PAD, endpoint_rect.left() - 8.0, "Endpoint", "Where the assistant's replies come from");
+        let (names, ids, chosen) = endpoint_options(settings, settings.assistant_endpoint.as_deref(), true);
+        let shown = chosen.map_or("No endpoint", |index| names[index].as_str()).to_string();
+        if let Some(picked) = select(ui, endpoint_rect, &format!("skill-page-endpoint-{id}"), &shown, &names, chosen) {
+            choices.push(SettingsChoice::ChooseAssistantEndpoint(ids[picked].clone()));
+        }
+    } else {
         // What the skill makes: text, or an image as an Image cell.
-        let makes_rect = control(rows[3], CONTROL_W, 0.0);
-        row_text(ui, rows[3], rows[3].left() + PAD, makes_rect.left() - 8.0, "Makes", "Text, or an image shown as an Image cell");
+        let makes_rect = control(rows[2], CONTROL_W, 0.0);
+        row_text(ui, rows[2], rows[2].left() + PAD, makes_rect.left() - 8.0, "Makes", "Text, or an image shown as an Image cell");
         let kinds = [Makes::Text, Makes::Images];
         let labels: Vec<String> = ["Text", "Images"].iter().map(|label| label.to_string()).collect();
         let chosen = kinds.iter().position(|kind| *kind == skill.makes);
         let shown = chosen.map_or("Text", |index| labels[index].as_str()).to_string();
         if let Some(picked) = select(ui, makes_rect, &format!("skill-makes-{id}"), &shown, &labels, chosen) {
             skill.makes = kinds[picked];
-        }
-        let model_rect = control(rows[4], CONTROL_W, 0.0);
-        let endpoint = skill.endpoint.as_deref().and_then(|id| settings.endpoint(id)).cloned();
-        let line = match &endpoint {
-            Some(endpoint) if !endpoint.kind.chats() => "ComfyUI skills run from a later version",
-            Some(endpoint) if skill.makes == Makes::Images && endpoint.kind != EndpointKind::Openrouter => {
-                "Images are made only through OpenRouter for now"
-            }
-            _ if skill.makes == Makes::Images => "From the endpoint's image models",
-            _ => "From the endpoint's models",
-        };
-        let name = endpoint.as_ref().map_or("the endpoint", |endpoint| endpoint.name.as_str());
-        let missing = panel.unlisted.skills.contains(&skill.id).then_some(name);
-        model_row(ui, rows[4], model_rect.left() - 8.0, line, missing);
-        let known = env.probes.known_models();
-        let models = match &endpoint {
-            Some(endpoint) => {
-                let key = env.keys.get(&endpoint.id);
-                env.probes.models_for(ui.ctx(), endpoint, key, skill.makes).cloned()
-            }
-            None => None,
-        };
-        let current = skill.model.clone().unwrap_or_default();
-        if let Some(model) = model_select(ui, model_rect, &format!("skill-model-{id}"), &current, &known, models.as_ref(), &mut panel.model_search) {
-            skill.model = Some(model);
         }
     }
     gap(ui, 22.0);
@@ -1427,24 +1431,25 @@ mod tests {
     fn models_an_endpoint_lacks_are_warned_about() {
         let mut settings = Settings::default();
         settings.first_start("https://stand-in/v1");
-        let local = EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into() };
+        let local = EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into(), description: String::new() };
         settings.endpoints.push(local);
-        settings.skills[0].endpoint = Some("local".into());
+        settings.assistant_endpoint = Some("local".into());
         settings.skills.push(SkillSetting {
             id: "story".into(),
             name: "Story notes".into(),
             description: String::new(),
-            endpoint: Some("local".into()),
-            model: Some("anthropic/claude-haiku-5.5".into()),
+            former_endpoint: None,
+            former_model: None,
             prompt: String::new(),
             makes: crate::workspace::Makes::Text,
         });
+        settings.skill_routes.insert("story".into(), crate::workspace::SkillRoute { endpoint: "local".into(), model: "anthropic/claude-haiku-5.5".into() });
         let mut ollama = |endpoint: &EndpointSetting, _: Makes| (endpoint.id == "local").then(|| vec![String::from("llama3.2")]);
         let found = unlisted(&settings, &mut ollama);
         assert_eq!(found.levels.len(), 5, "every level on a Claude model should warn");
         assert_eq!(found.skills, ["story"]);
         settings.levels[0].model = "llama3.2".into();
-        settings.skills[1].model = Some("llama3.2".into());
+        settings.skill_routes.insert("story".into(), crate::workspace::SkillRoute { endpoint: "local".into(), model: "llama3.2".into() });
         let found = unlisted(&settings, &mut ollama);
         assert_eq!(found.levels.len(), 4);
         assert!(!found.levels.contains(&settings.levels[0].id));

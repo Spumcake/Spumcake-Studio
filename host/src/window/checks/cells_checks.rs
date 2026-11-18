@@ -2,7 +2,7 @@
 //! and the scripted stand-in. Nothing here writes a project by hand or
 //! answers a question it was not expecting.
 
-use super::{StandIn, Window, answer, built, call_reply, keep_ticking, project_window, scratch, spec, text_reply};
+use super::{StandIn, Window, built, call_reply, keep_ticking, project_window, scratch, spec, text_reply};
 use crate::chat::ChatEvent;
 use eframe::egui::{self, Pos2};
 use protocol::{CellState, HostMessage};
@@ -1207,6 +1207,7 @@ fn a_recipe_cell_runs_on_what_settings_say() {
             kind: endpoint.kind,
             name: endpoint.name.clone(),
             address: endpoint.address.clone(),
+            description: endpoint.description.clone(),
             key: Some(String::from("new-key")),
         },
         frame,

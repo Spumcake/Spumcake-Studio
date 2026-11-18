@@ -823,7 +823,7 @@ mod tests {
         std::fs::write(folder.join("models.json"), json!([{ "service": "fal", "model": "topaz/upscale/video/precision", "name": "Topaz Video Upscale" }]).to_string()).unwrap();
         let skill = crate::skills_setup::Skill { name: String::from("finish-shot"), description: String::new(), implements: Vec::new(), helps: Vec::new(), folder: folder.clone(), root: folder.clone() };
         let mut settings = Settings::default();
-        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("fal-1"), name: String::from("fal.ai"), kind: EndpointKind::Fal, address: String::from("https://fal.ai") });
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("fal-1"), name: String::from("fal.ai"), kind: EndpointKind::Fal, address: String::from("https://fal.ai"), description: String::new() });
         assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "topaz/upscale/video/precision").as_deref(), Some("fal-1"));
         assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "other/model"), None, "a model no skill names took an endpoint");
         settings.endpoints.clear();
