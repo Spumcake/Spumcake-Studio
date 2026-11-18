@@ -220,6 +220,42 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
     })
 }
 
+/// The endpoint and model the assistant named for a skill's cell, checked:
+/// one the user set up, that can run the skill, with a model, and one its
+/// list gives when the list is known. None when it named no endpoint, so
+/// the skill's own choice is used.
+pub(crate) fn named_route(
+    settings: &Settings,
+    skill: &SkillSetting,
+    endpoint: &str,
+    model: &str,
+    listed: &crate::endpoints::Listed,
+) -> Option<Result<(crate::workspace::EndpointSetting, String), String>> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
+    let Some(found) = settings.endpoints.iter().find(|known| known.name.eq_ignore_ascii_case(endpoint)).cloned() else {
+        return Some(Err(format!("No endpoint is named “{endpoint}”. Use one of those listed.")));
+    };
+    let fits = match skill.makes {
+        Makes::Images => found.kind == crate::workspace::EndpointKind::Openrouter,
+        Makes::Text => found.kind.chats(),
+    };
+    if !fits {
+        return Some(Err(format!("“{}” cannot run {}.", found.name, skill.name)));
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return Some(Err(format!("Name the model to run on “{}” too.", found.name)));
+    }
+    let known = listed.get(&found.id).map(|(chat, images)| if skill.makes == Makes::Images { images.as_slice() } else { chat.as_slice() }).unwrap_or_default();
+    if !known.is_empty() && !known.iter().any(|id| id == model) {
+        return Some(Err(format!("“{}” does not list {model}. Use one of its models.", found.name)));
+    }
+    Some(Ok((found, model.to_string())))
+}
+
 /// What a skill tool's `endpoint` input says.
 const ON_ENDPOINT: &str = "An endpoint's name, from those listed, to run on instead of the one chosen for the skill. Leave it out to use that one.";
 /// What a skill tool's `model` input says.
@@ -483,6 +519,22 @@ mod tests {
         let mut lone = Settings::default();
         lone.skills.push(skill("Story notes"));
         assert!(offered_skills(&lone).is_empty(), "a skill with nowhere to run was offered");
+    }
+
+    /// Catches the assistant running a skill on an endpoint that cannot run
+    /// it, or on a model the endpoint does not list.
+    #[test]
+    fn the_assistants_endpoint_for_a_skill_is_checked() {
+        let mut settings = Settings::default();
+        let id = settings.first_start("https://stand-in/v1").unwrap();
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("local"), name: String::from("Ollama"), kind: crate::workspace::EndpointKind::Openai, address: String::from("http://local/v1"), description: String::new() });
+        let image = SkillSetting { id: String::from("img"), name: String::from("Image generation"), description: String::new(), former_endpoint: None, former_model: None, prompt: String::new(), makes: Makes::Images };
+        let listed: crate::endpoints::Listed = [(id, (vec![String::from("anthropic/claude-haiku-5.5")], vec![String::from("openai/gpt-image-2.5-sunburst")]))].into_iter().collect();
+        assert!(named_route(&settings, &image, "", "", &listed).is_none());
+        assert!(matches!(named_route(&settings, &image, "Ollama", "x", &listed), Some(Err(reason)) if reason.contains("cannot run")));
+        assert!(matches!(named_route(&settings, &image, "OpenRouter", "anthropic/claude-haiku-5.5", &listed), Some(Err(reason)) if reason.contains("does not list")), "a chat model was taken for an image skill");
+        assert!(matches!(named_route(&settings, &image, "openrouter", "openai/gpt-image-2.5-sunburst", &listed), Some(Ok((_, model))) if model == "openai/gpt-image-2.5-sunburst"));
+        assert!(matches!(named_route(&settings, &image, "Nowhere", "m", &listed), Some(Err(reason)) if reason.contains("No endpoint is named")));
     }
 
     /// Catches the assistant told an endpoint's key or address, or not told
