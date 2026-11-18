@@ -35,7 +35,23 @@ enum Line {
     Reference { number: usize, path: String, label: String },
 }
 
-fn lines(asking: &Asking) -> (Vec<Line>, String) {
+/// The service a request kind goes to, as the user knows it.
+pub(crate) fn service_name(kind: &str) -> String {
+    match kind.split('-').next().unwrap_or(kind) {
+        "openrouter" => String::from("OpenRouter"),
+        "openai" => String::from("OpenAI"),
+        "fal" => String::from("fal.ai"),
+        _ => kind.to_string(),
+    }
+}
+
+/// A plan's cost as the card says it: the estimate, or "Cost unknown",
+/// never the script's own words for having no price.
+fn cost_words(estimate: &str) -> String {
+    if estimate.trim().is_empty() || estimate.starts_with("unknown") { String::from("Cost unknown") } else { estimate.to_string() }
+}
+
+fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, String) {
     match asking {
         Asking::Command { argv, why, .. } => {
             let mut lines = vec![Line::Title(String::from("Run this command?"))];
@@ -63,7 +79,7 @@ fn lines(asking: &Asking) -> (Vec<Line>, String) {
             } else if research {
                 String::from("nothing; research is filed, not sent")
             } else {
-                plans.iter().filter_map(|plan| plan.get("estimate").and_then(Value::as_str)).collect::<Vec<_>>().join(", ")
+                plans.iter().filter_map(|plan| plan.get("estimate").and_then(Value::as_str)).map(cost_words).collect::<Vec<_>>().join(", ")
             };
             let mut lines = vec![Line::Title(format!("{count} {noun} · {cost}"))];
             // What a listed price leaves out, such as charges per token.
@@ -73,9 +89,11 @@ fn lines(asking: &Asking) -> (Vec<Line>, String) {
             for plan in plans {
                 let endpoint = plan.get("endpoint").cloned().unwrap_or(Value::Null);
                 if !endpoint.is_null() {
-                    let model = endpoint.get("model").and_then(Value::as_str).unwrap_or("its default model");
+                    // The model and the service as the user knows them, as
+                    // the approved view reads: "GPT Image 2.5 on OpenRouter".
+                    let model = endpoint.get("model").and_then(Value::as_str).map(model_name).unwrap_or_else(|| String::from("its default model"));
                     let kind = endpoint.get("kind").and_then(Value::as_str).unwrap_or("");
-                    lines.push(Line::Muted(format!("{model} on {kind}")));
+                    lines.push(Line::Muted(format!("{model} on {}", service_name(kind))));
                 }
                 if let Some(script) = plan.get("script").and_then(Value::as_str) {
                     lines.push(Line::Label(String::from("Runs")));
@@ -155,8 +173,8 @@ fn lines(asking: &Asking) -> (Vec<Line>, String) {
 
 /// Draws the card. Returns the person's answer: true for Send request or
 /// Run, false for Cancel or Escape, None while they decide.
-pub(crate) fn show(ctx: &egui::Context, asking: &Asking) -> Option<bool> {
-    let (lines, send) = lines(asking);
+pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&str) -> String) -> Option<bool> {
+    let (lines, send) = lines(asking, model_name);
     let screen = ctx.content_rect();
     let mut answer = None;
     egui::Area::new(egui::Id::new("plan-card-overlay")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
@@ -265,5 +283,21 @@ fn paint_line(ui: &mut egui::Ui, line: &Line, width: f32) {
                 ui.add_space(extra);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches the card reading a script's own words for having no price,
+    /// or a request kind where the user knows a service.
+    #[test]
+    fn the_card_names_its_cost_and_service_as_the_user_reads_them() {
+        assert_eq!(cost_words("unknown: no price for this endpoint"), "Cost unknown");
+        assert_eq!(cost_words("about $0.24 a request"), "about $0.24 a request");
+        assert_eq!(service_name("openai-image-edit"), "OpenAI");
+        assert_eq!(service_name("openrouter-image"), "OpenRouter");
+        assert_eq!(service_name("fal"), "fal.ai");
     }
 }
