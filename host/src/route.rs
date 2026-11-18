@@ -172,7 +172,7 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
             // Where it runs now, so the assistant can keep it there or name
             // another endpoint and model.
             let described = match settings.skill_route(&skill) {
-                Some((endpoint, model)) if settings.skill_runs(&skill) && !model.trim().is_empty() => {
+                Some((endpoint, model)) if runs_as_chosen(settings, &skill) => {
                     format!("{described}. Runs on {} with {model} unless you name another endpoint and model", endpoint.name)
                 }
                 Some((endpoint, _)) => format!("{described}. Its chosen endpoint, {}, cannot run it: name an endpoint and model that can", endpoint.name),
@@ -218,6 +218,13 @@ fn your_skills(settings: &Settings) -> Option<protocol::ToolGroup> {
         instructions: "When the person asks for something one of these skills is described for, call it with what to ask. When they ask for an image, call a skill that makes images with the image described in full. Its result shows as a cell in the conversation. After the tool returns, reply briefly.".into(),
         tools,
     })
+}
+
+/// Whether a skill runs where it was last chosen to: an endpoint that can
+/// run it, and a model. The tool's description and a call naming no
+/// endpoint both go by this.
+pub(crate) fn runs_as_chosen(settings: &Settings, skill: &SkillSetting) -> bool {
+    settings.skill_runs(skill) && settings.skill_route(skill).is_some_and(|(_, model)| !model.trim().is_empty())
 }
 
 /// The endpoint and model the assistant named for a skill's cell, checked:
@@ -523,6 +530,10 @@ mod tests {
         settings.skill_routes.insert(String::from("Story notes"), crate::workspace::SkillRoute { endpoint: String::from("comfy"), model: String::from("graph") });
         let names: Vec<String> = offered_skills(&settings).into_iter().map(|(name, _)| name).collect();
         assert!(names.contains(&String::from("story_notes")), "a skill its own choice cannot run was hidden: {names:?}");
+        assert!(!runs_as_chosen(&settings, settings.skill("Story notes").unwrap()), "a skill on ComfyUI was taken as runnable");
+        // A chat endpoint with no model is not where it runs either.
+        settings.skill_routes.insert(String::from("Story notes"), crate::workspace::SkillRoute { endpoint: endpoint.clone(), model: String::new() });
+        assert!(!runs_as_chosen(&settings, settings.skill("Story notes").unwrap()), "a skill with no model was taken as runnable");
     }
 
     /// Catches the assistant running a skill on an endpoint that cannot run
