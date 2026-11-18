@@ -537,9 +537,12 @@ impl Session {
                     Err(error) => AppMessage::Kept { tab, path: None, error: Some(error) },
                 });
             }
+            // A `.vgx` in the project, or a video there, to play, such as
+            // an animatic in `library/` or a delivered film in `output/`.
             HostMessage::Claim { id, path } => {
-                let path = Path::new(&path);
-                out.push(AppMessage::Claimed { id, yours: files::is_vgx(path) && self.in_project(path) });
+                let path = self.in_project_path(Path::new(&path));
+                let yours = (files::is_vgx(&path) || is_video(&path)) && self.in_project(&path);
+                out.push(AppMessage::Claimed { id, yours });
             }
             // Nothing is an item: the protocol may still ask.
             HostMessage::Render { id, .. } => out.push(self.render(id)),
@@ -1298,6 +1301,8 @@ impl Session {
             self.declare_new(out);
             return;
         };
+        // A relative path is read from the project.
+        let path = self.in_project_path(&path);
         if let Some(index) = self.tabs.iter().position(|tab| tab.path.as_deref() == Some(path.as_path())) {
             self.active = index;
             out.extend(self.emit());
@@ -1350,19 +1355,36 @@ impl Session {
             }
             return;
         }
-        let title = file_title(&path);
-        self.push_tab(Gallery::default(), None, Some(title));
-        match self.add_take(&path, None) {
-            Ok(_) => {
-                // It is new work, so it is kept in the project as a video.
-                self.tabs[self.active].dirty = true;
+        // A video opens to play: a tab of one take linking it, with no file
+        // and nothing to keep until the person changes its gallery, then
+        // kept in `work/` as any new tab is. The same file open already
+        // shows its tab.
+        let whole = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let open = self.tabs.iter().position(|tab| tab.path.is_none() && tab.gallery.takes.len() == 1 && tab.gallery.takes[0].file == whole);
+        if let Some(index) = open {
+            self.stop_playing();
+            self.active = index;
+            out.extend(self.emit());
+            return;
+        }
+        match link_file(&path, self.project.as_deref()) {
+            Ok((link, file, info)) => {
+                let title = file_title(&path);
+                let gallery = Gallery::new(vec![(title.clone(), link, file, Some(info))], 0);
+                self.stop_playing();
+                self.push_tab(gallery, None, Some(title));
                 self.declare_new(out);
             }
-            Err(reason) => {
-                self.tabs.pop();
-                self.active = self.tabs.len().saturating_sub(1);
-                out.push(notice("This video could not be opened", &reason));
-            }
+            Err(reason) => out.push(notice("This video could not be opened", &reason)),
+        }
+    }
+
+    /// A path as the project names it: whole as it is, or else inside the
+    /// project when one is open.
+    fn in_project_path(&self, path: &Path) -> PathBuf {
+        match &self.project {
+            Some(project) if path.is_relative() => project.join(path),
+            _ => path.to_path_buf(),
         }
     }
 
@@ -1774,6 +1796,11 @@ pub fn film_size(width: u32, height: u32) -> (u32, u32) {
     let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
     let scale = (f64::from(FILM_SIZE[0]) / w).min(f64::from(FILM_SIZE[1]) / h);
     (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1))
+}
+
+/// Whether a file is a video a take can be, by its extension.
+fn is_video(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| VIDEO_EXTENSIONS.contains(&extension.to_lowercase().as_str()))
 }
 
 fn video_filter() -> FileFilter {
