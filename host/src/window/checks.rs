@@ -1580,8 +1580,8 @@ fn a_change_left_at_once_is_written_by_the_switch() {
     window.settle_on(&second);
     let file = crate::workspace::SessionFile::read(&folder, &first).unwrap();
     let written: Vec<String> = file.tabs.iter().filter_map(|tab| tab.path.clone()).collect();
-    assert_eq!(written, vec!["Untitled Storyboard.smx".to_string()], "the change left at once is not in its session");
-    assert!(folder.join("Untitled Storyboard.smx").is_file());
+    assert_eq!(written, vec!["work/Untitled Storyboard.smx".to_string()], "the change left at once is not in its session");
+    assert!(folder.join("work/Untitled Storyboard.smx").is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1613,12 +1613,17 @@ fn a_change_that_cannot_be_written_stops_the_switch() {
     let second = window.here().2;
     window.settle_on(&second);
     let tab = window.app.apps[0].running.tabs().1.clone().unwrap();
+    // A workspace's files go in the project's `work/`: it, too, refuses.
+    let work = folder.join("work");
+    std::fs::create_dir_all(&work).unwrap();
     let mut permissions = std::fs::metadata(&folder).unwrap().permissions();
     permissions.set_readonly(true);
+    std::fs::set_permissions(&work, permissions.clone()).unwrap();
     std::fs::set_permissions(&folder, permissions.clone()).unwrap();
     // Made writable again however the check ends, so cleaning `target/`
     // never stalls on a folder it cannot delete.
     let _writable = Writable(folder.clone());
+    let _work_writable = Writable(work.clone());
     window.app.send(
         0,
         protocol::HostMessage::Command { id: "new_clip".into(), tab: Some(tab), arg: None, node: None, viewport: [800.0, 600.0] },
@@ -1626,7 +1631,8 @@ fn a_change_that_cannot_be_written_stops_the_switch() {
     window.menu(SessionChoice::Open { project, session: first });
     window.until(|app| app.flows.idle() && app.chat.conversation.iter().any(|entry| entry.text.contains("could not be written")));
     permissions.set_readonly(false);
-    std::fs::set_permissions(&folder, permissions).unwrap();
+    std::fs::set_permissions(&folder, permissions.clone()).unwrap();
+    std::fs::set_permissions(&work, permissions).unwrap();
     assert_eq!(window.here().2, second, "the switch went on");
     assert!(window.app.apps[0].running.tabs().0.iter().any(|tab| tab.dirty), "the change was lost");
     let _ = std::fs::remove_dir_all(dir);
@@ -1795,7 +1801,8 @@ fn every_project_is_told_it_is_one() {
     let dir = scratch("project-heard");
     let heard = dir.join("heard.txt");
     let hearer = hearer_program(&dir, &heard);
-    let told = |heard: &Path| std::fs::read_to_string(heard).unwrap_or_default().lines().map(|line| line.contains(r#""skills":true"#)).collect::<Vec<_>>();
+    // Each `project` line a workspace heard, true when it names no kind.
+    let told = |heard: &Path| std::fs::read_to_string(heard).unwrap_or_default().lines().filter(|line| line.contains(r#""type":"project""#)).map(|line| !line.contains("skills")).collect::<Vec<_>>();
     let stand_in = StandIn::start(Vec::new());
     let mut window = project_window(vec![spec("hearer", "Hearer", &hearer)], &stand_in, &dir);
     let (_, folder, _) = window.here();

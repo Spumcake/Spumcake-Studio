@@ -54,6 +54,7 @@ enum Waiting {
     },
     Open,
     ImportSound,
+    ImageKey,
 }
 
 /// What was last sent of each declaration, so only a change is sent again.
@@ -229,6 +230,11 @@ impl Server {
                 // nothing to recover.
                 self.chrome.set_recoveries(Vec::new());
                 self.deferred.clear();
+                // The project's animatic is shown, once a restored
+                // workspace has its tabs back.
+                if !self.hidden {
+                    self.session.show_animatic();
+                }
             }
             // A path outside the project opens nothing.
             HostMessage::Open { path: Some(path) } if !self.allowed_project_path(std::path::Path::new(&path)) => {}
@@ -401,9 +407,16 @@ impl Server {
             | HostMessage::Takes { .. }
             | HostMessage::CellBecameStep { .. }
             | HostMessage::View3dCamera { .. }
-            | HostMessage::View3dPicked { .. } | HostMessage::Published { .. } | HostMessage::History { .. }
-            | HostMessage::CanonRows { .. } | HostMessage::Filed { .. } | HostMessage::StepEdited { .. } | HostMessage::StepRan { .. }
-            | HostMessage::SkillScriptRan { .. } | HostMessage::TransportTime { .. } | HostMessage::Delivered { .. } => {}
+            | HostMessage::View3dPicked { .. } | HostMessage::History { .. } | HostMessage::TransportTime { .. } | HostMessage::Delivered { .. } => {}
+            HostMessage::Published { artifact, file, error, .. } => {
+                self.session.published(&artifact, &file, error.as_deref());
+            }
+            HostMessage::CanonRows { id, rows, error } => self.session.canon_rows(&id, &rows, error.as_deref()),
+            HostMessage::Filed { id, file, error } => self.session.filed(&id, &file, error.as_deref()),
+            HostMessage::StepEdited { id, error } => self.session.step_edited(&id, error.as_deref()),
+            HostMessage::CanonEdited { id, error } => self.session.canon_edited(&id, error.as_deref()),
+            HostMessage::SkillScriptRan { id, output, error } => self.session.skill_script_ran(&id, &output, error.as_deref()),
+            HostMessage::StepRan { id, take, error } => self.session.step_ran(&id, take.as_deref(), error.as_deref()),
             HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {
                 id,
                 thumbnail: None,
@@ -503,6 +516,7 @@ impl Server {
     fn reveal(&mut self) {
         self.hidden = false;
         self.chrome.set_recoveries(std::mem::take(&mut self.deferred));
+        self.session.show_animatic();
     }
 
     /// Writes, inside a project, every storyboard whose change is a second old,
@@ -562,7 +576,9 @@ impl Server {
         }
         let mut out = Vec::new();
         let tab = tab_id(self.session.active_id());
-        let stage = self.session.playing_stage(crate::sheet::stage(self.session.active_storyboard(), tab.clone()));
+        let stage = crate::sheet::stage(self.session.active_storyboard(), tab.clone());
+        let stage = self.session.keyed_stage(stage);
+        let stage = self.session.playing_stage(stage);
         if self.sent.stage.as_ref() != Some(&stage) {
             out.push(AppMessage::Stage(stage.clone()));
             self.sent.stage = Some(stage);
@@ -593,13 +609,14 @@ impl Server {
                 self.write_due(Instant::now());
             }
             self.session.poll_imports();
-            self.session.poll_export();
             self.notice_updates(&mut out);
             return out;
         }
         self.full_tick = Instant::now();
-        // Imports and exports finish on threads of their own.
-        let finished = self.session.poll_imports() | self.session.poll_export();
+        // Imports finish on threads of their own.
+        let finished = self.session.poll_imports();
+        self.session.check_retimed(Instant::now());
+        let finished = finished || self.session.has_outgoing();
         if self.project.is_none() {
             return if finished { self.updates(false) } else { Vec::new() };
         }
@@ -707,7 +724,7 @@ impl Server {
             error: Some(error.to_string()),
         };
         let Some(project) = self.project.clone() else {
-            return failed(id, "The storyboard is not in a project.");
+            return failed(id, "No project is open.");
         };
         let path = project.join(&item.path);
         if item.item.as_deref() == Some(crate::board::ANIMATIC) {
@@ -823,6 +840,19 @@ impl Server {
                     filter,
                 }
             }
+            FileIntent::ImageKey => {
+                self.waiting = Some((request.clone(), Waiting::ImageKey));
+                AppMessage::File {
+                    id: request,
+                    kind: FileKind::Open,
+                    name: None,
+                    folder,
+                    filter: Some(FileFilter {
+                        name: "Images".to_string(),
+                        extensions: ["png", "jpg", "jpeg", "webp"].iter().map(|extension| extension.to_string()).collect(),
+                    }),
+                }
+            }
             FileIntent::ImportSound => {
                 self.waiting = Some((request.clone(), Waiting::ImportSound));
                 AppMessage::File {
@@ -873,6 +903,11 @@ impl Server {
             self.session.start_import(path);
             return false;
         }
+        // An image key names an image of the project, by its path there.
+        if let Waiting::ImageKey = wait {
+            self.session.image_key_chosen(&path);
+            return false;
+        }
         if !self.allowed_project_path(&path) {
             if let Waiting::Save {
                 close_after: true, ..
@@ -908,7 +943,7 @@ impl Server {
                 false
             }
             Waiting::Open => session.open_path(&path),
-            Waiting::ImportSound => false,
+            Waiting::ImportSound | Waiting::ImageKey => false,
         }
     }
 
@@ -1011,7 +1046,13 @@ impl Server {
             self.sent.timeline = Some(timeline);
         }
         self.notice_updates(&mut out);
-        let stage = self.session.playing_stage(crate::sheet::stage(self.session.active_storyboard(), tab));
+        for (artifact, source, from) in self.session.take_publishes() {
+            out.push(AppMessage::Publish { tab: tab.clone(), artifact, source, from, with: Vec::new() });
+        }
+        out.extend(self.session.take_outgoing());
+        let stage = crate::sheet::stage(self.session.active_storyboard(), tab);
+        let stage = self.session.keyed_stage(stage);
+        let stage = self.session.playing_stage(stage);
         if self.sent.stage.as_ref() != Some(&stage) {
             out.push(AppMessage::Stage(stage.clone()));
             self.sent.stage = Some(stage);
@@ -1600,15 +1641,17 @@ mod tests {
     fn changed_in(folder: &std::path::Path) -> (Server, String) {
         let mut server = Server::new(None);
         let _ = server.greeting();
-        let _ = server.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        let _ = server.handle(HostMessage::Project { folder: folder.display().to_string() });
         let tab = tab_id(server.session.active_id());
         let _ = server.handle(command("new_clip", Some(tab.clone())));
         (server, tab)
     }
 
+    /// The storyboards written into the project's `work/`.
     fn smx_files(folder: &std::path::Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(folder)
-            .expect("the folder")
+        let mut names: Vec<String> = std::fs::read_dir(folder.join("work"))
+            .into_iter()
+            .flatten()
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.ends_with(".smx"))
@@ -1618,7 +1661,7 @@ mod tests {
     }
 
     /// Catches a storyboard that waits for Save, or one written outside the
-    /// project: a second after a change, it is a file in the project's folder.
+    /// project: a second after a change, it is a file in the project's `work/`.
     #[test]
     fn a_change_is_written_into_the_project_by_itself() {
         let folder = scratch("written");
@@ -1638,12 +1681,12 @@ mod tests {
         let folder = scratch("names");
         let (mut first, _) = changed_in(&folder);
         first.write_due(Instant::now() + WRITE_AFTER * 2);
-        let before = std::fs::read(folder.join("Untitled Storyboard.smx")).expect("the first file");
+        let before = std::fs::read(folder.join("work/Untitled Storyboard.smx")).expect("the first file");
         let (mut second, _) = changed_in(&folder);
         let _ = second.handle(command("new_clip", None));
         second.write_due(Instant::now() + WRITE_AFTER * 2);
         assert_eq!(smx_files(&folder), vec!["Untitled Storyboard 2.smx".to_string(), "Untitled Storyboard.smx".to_string()]);
-        assert_eq!(std::fs::read(folder.join("Untitled Storyboard.smx")).expect("the first file"), before);
+        assert_eq!(std::fs::read(folder.join("work/Untitled Storyboard.smx")).expect("the first file"), before);
         let _ = std::fs::remove_dir_all(folder);
     }
 
@@ -1659,13 +1702,13 @@ mod tests {
             AppMessage::Kept { path, error, .. } => Some((path.clone(), error.clone())),
             _ => None,
         });
-        let expected = folder.canonicalize().expect("the folder").join("Untitled Storyboard.smx");
+        let expected = folder.canonicalize().expect("the folder").join("work/Untitled Storyboard.smx");
         assert_eq!(kept, Some((Some(path_text(expected)), None)));
         assert!(!replies.iter().any(|reply| matches!(reply, AppMessage::File { .. })), "a save dialog opened");
 
         let mut untouched = Server::new(None);
         let _ = untouched.greeting();
-        let _ = untouched.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        let _ = untouched.handle(HostMessage::Project { folder: folder.display().to_string() });
         let blank = tab_id(untouched.session.active_id());
         let replies = untouched.handle(HostMessage::Keep { tab: blank }).expect("replies");
         assert!(replies.iter().any(|reply| matches!(reply, AppMessage::Kept { path: None, error: None, .. })));
@@ -1693,7 +1736,9 @@ mod tests {
         let folder = scratch("menu");
         let (mut server, _) = changed_in(&folder);
         let rows: Vec<String> = server.session.declare_menu().into_iter().map(|row| row.label).collect();
-        assert!(!rows.iter().any(|label| label.starts_with("Save")), "{rows:?}");
+        // The file's Save, Save as, and Save a copy; Save timing to the
+        // project saves the animatic's timing, not the file.
+        assert!(!rows.iter().any(|label| label.starts_with("Save") && !label.starts_with("Save timing")), "{rows:?}");
         let _ = std::fs::remove_dir_all(folder);
     }
 
@@ -1712,10 +1757,11 @@ mod tests {
     #[test]
     fn new_storyboards_take_names_no_file_in_the_project_has() {
         let folder = scratch("untitled");
-        std::fs::write(folder.join("Untitled Storyboard.smx"), b"{}").expect("a file of that name");
+        std::fs::create_dir_all(folder.join("work")).expect("work/");
+        std::fs::write(folder.join("work/Untitled Storyboard.smx"), b"{}").expect("a file of that name");
         let mut server = Server::new(None);
         let _ = server.greeting();
-        let replies = server.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false }).expect("replies");
+        let replies = server.handle(HostMessage::Project { folder: folder.display().to_string() }).expect("replies");
         assert_eq!(tab_labels(&replies), Some(vec!["Untitled Storyboard 2".to_string()]));
         let replies = server.handle(command("new_storyboard", None)).expect("replies");
         assert_eq!(

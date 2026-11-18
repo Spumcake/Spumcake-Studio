@@ -70,6 +70,7 @@ pub(crate) enum Stored {
         onion: Onion,
         listening: f64,
         exported: Option<crate::export::Exported>,
+        assembly: Option<crate::assembly::Read>,
     },
 }
 
@@ -102,12 +103,13 @@ impl Stored {
     pub(crate) fn into_record(self, ids: &mut Allocator, palette: &[ToolColor]) -> Record {
         match self {
             Stored::Drawing(snapshot) => Record::from_snapshot(snapshot, ids, palette),
-            Stored::Film { id, name, film, drawings, cameras, onion, listening, exported } => {
+            Stored::Film { id, name, film, drawings, cameras, onion, listening, exported, assembly } => {
                 let mut record = Record::from_film(id, name, film, drawings, ids, palette);
                 record.set_cameras(cameras);
                 record.set_onion(onion);
                 record.set_listening(listening);
                 record.set_exported(exported);
+                record.set_assembly(assembly);
                 record.set_dirty(false);
                 record
             }
@@ -163,6 +165,7 @@ fn stored_from_value(value: &Value) -> Option<Stored> {
                 onion: Onion::from_value(object.get("onion")),
                 listening: object.get("listening_volume").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.0, 1.0),
                 exported: object.get("exports").and_then(|exports| exports.get("animatic")).and_then(crate::export::Exported::from_value),
+                assembly: object.get("assembly").and_then(crate::assembly::Read::from_value),
             })
         }
         _ => None,
@@ -194,6 +197,7 @@ pub(crate) fn storyboard_value(storyboard: &Record, name: &str) -> Value {
         "onion": storyboard.onion().to_value(),
         "listening_volume": storyboard.listening(),
         "exports": { "animatic": storyboard.exported().map(crate::export::Exported::to_value) },
+        "assembly": storyboard.assembly().map(crate::assembly::Read::to_value),
     })
 }
 

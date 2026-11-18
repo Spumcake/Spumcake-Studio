@@ -108,6 +108,19 @@ impl Session {
         changed
     }
 
+    /// `change_film`, which also makes `reading` what the storyboard read
+    /// from the project's animatic, in the same undo step.
+    pub(super) fn change_film_reading(&mut self, change: impl FnOnce(&mut Film) -> Option<Vec<NewDrawing>>, reading: crate::assembly::Read) -> bool {
+        self.settle();
+        let palette = self.brush_palette.clone();
+        let index = self.active;
+        let changed = self.storyboards[index].edit_film_reading(&mut self.ids, &palette, change, Some(reading));
+        if changed {
+            self.tidy_picked();
+        }
+        changed
+    }
+
     /// Drops what the film no longer has from the selection.
     fn tidy_picked(&mut self) {
         let film = self.film().clone();

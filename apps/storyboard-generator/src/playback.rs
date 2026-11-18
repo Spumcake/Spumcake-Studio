@@ -24,6 +24,7 @@ const LEAD_REPORTS: usize = 30;
 struct Renders {
     images: Vec<Image>,
     size: (u32, u32),
+    project: Option<std::path::PathBuf>,
     done: Mutex<HashMap<usize, Arc<Vec<u8>>>>,
     /// The image showing now, which the worker renders ahead of.
     want: AtomicUsize,
@@ -40,7 +41,7 @@ impl Renders {
         if let Some(found) = self.get(index) {
             return Some(found);
         }
-        let rendered = Arc::new(crate::export::render_image(looker, self.images.get(index)?, self.size));
+        let rendered = Arc::new(crate::export::render_image(looker, self.images.get(index)?, self.size, self.project.as_deref()));
         self.keep(index, rendered.clone());
         Some(rendered)
     }
@@ -68,7 +69,7 @@ impl Renders {
             let next = (want..(want + AHEAD).min(self.images.len())).find(|index| self.get(*index).is_none());
             match next {
                 Some(index) => {
-                    let rendered = Arc::new(crate::export::render_image(&mut looker, &self.images[index], self.size));
+                    let rendered = Arc::new(crate::export::render_image(&mut looker, &self.images[index], self.size, self.project.as_deref()));
                     self.keep(index, rendered);
                 }
                 None => std::thread::sleep(std::time::Duration::from_millis(10)),
@@ -169,7 +170,7 @@ impl Playback {
             return;
         }
         let images = plan.images.into_iter().map(|image| image.expect("a fresh plan")).collect();
-        let renders = Arc::new(Renders { images, size: plan.size, done: Mutex::new(HashMap::new()), want: AtomicUsize::new(0), stop: AtomicBool::new(false) });
+        let renders = Arc::new(Renders { images, size: plan.size, project: plan.project.clone(), done: Mutex::new(HashMap::new()), want: AtomicUsize::new(0), stop: AtomicBool::new(false) });
         let worker = renders.clone();
         std::thread::spawn(move || worker.work());
         self.player().set_tracks(plan.tracks);

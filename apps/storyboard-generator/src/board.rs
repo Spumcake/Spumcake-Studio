@@ -154,7 +154,8 @@ fn description(record: &Record, film: &Film, clip: &Clip, frame: u32) -> String 
         };
         let mut value = drawing.snapshot_value(draw::document::DrawingId::new(1), "Frame");
         strip(&mut value);
-        parts.push(format!("{}|{}", layer.opacity, value));
+        // An image key's image is part of the frame.
+        parts.push(format!("{}|{}|{}", layer.opacity, layer.image_at(frame).unwrap_or_default(), value));
     }
     parts.join("\n")
 }

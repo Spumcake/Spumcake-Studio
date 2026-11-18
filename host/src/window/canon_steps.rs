@@ -9,7 +9,7 @@
 
 use super::HostWindow;
 use protocol::{HostMessage, StepRef, ToolResult};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -49,6 +49,19 @@ fn edit_call(app: usize, id: &str) -> String {
     format!("step:{app}:{id}")
 }
 
+/// The runner's call for a workspace's element or chain, so its answer goes
+/// back.
+fn canon_call(app: usize, id: &str) -> String {
+    format!("canon:{app}:{id}")
+}
+
+/// A step's script names Skills' scripts as `${SPUMCAKE_AGENT}`, as a
+/// workspace that does not know where the checkout is writes it; recorded,
+/// it falls back to the checkout Studio found, as Skills' own form does.
+pub(crate) fn with_checkout(script: &str, checkout: &std::path::Path) -> String {
+    script.replace("${SPUMCAKE_AGENT}", &format!("${{SPUMCAKE_AGENT:-{}}}", checkout.display()))
+}
+
 /// One printed line of `pipeline.py sql`: JSON when it holds an object or
 /// a list, otherwise the whole line, never split on " | ".
 pub(crate) fn canon_row(line: &str) -> Value {
@@ -71,6 +84,7 @@ pub(crate) struct StepFields {
     pub order: Option<u32>,
     pub skill: Option<String>,
     pub artifact: Option<String>,
+    pub endpoint: Option<String>,
 }
 
 /// The `pipeline.py step` command that sets only what is given, so it
@@ -85,6 +99,9 @@ pub(crate) fn step_command(pipeline: &str, step: &StepRef, fields: &StepFields) 
     }
     if let Some(artifact) = &fields.artifact {
         argv.extend([String::from("--artifact"), artifact.clone()]);
+    }
+    if let Some(endpoint) = &fields.endpoint {
+        argv.extend([String::from("--endpoint"), endpoint.clone()]);
     }
     if let Some(script) = &fields.script {
         argv.extend([String::from("--script"), script.clone()]);
@@ -106,15 +123,17 @@ impl HostWindow {
     /// asked for.
     pub(super) fn take_canon_steps(&mut self) {
         let mut reads = Vec::new();
+        let mut canon = Vec::new();
         let mut edits = Vec::new();
         let mut scripts = Vec::new();
         for (app, started) in self.apps.iter_mut().enumerate() {
             let declared = &mut started.running.declared;
             reads.extend(declared.canon_reads.drain(..).map(|read| (app, read)));
+            canon.extend(declared.canon_edits.drain(..).map(|edit| (app, edit)));
             edits.extend(declared.step_edits.drain(..).map(|edit| (app, edit)));
             scripts.extend(declared.skill_scripts.drain(..).map(|script| (app, script)));
         }
-        if reads.is_empty() && edits.is_empty() && scripts.is_empty() {
+        if reads.is_empty() && edits.is_empty() && scripts.is_empty() && canon.is_empty() {
             return;
         }
         let project = self.project_scripts();
@@ -155,16 +174,30 @@ impl HostWindow {
                 Err(error) => self.send(app, HostMessage::SkillScriptRan { id, output: String::new(), error: Some(error) }),
             }
         }
-        for (app, (id, _tab, step, fields)) in edits {
+        // A workspace records canon on the user's own Save, which spends
+        // nothing, so it runs at once, as filing a file does.
+        for (app, (id, args)) in canon {
+            let (Some((folder, env)), Some(pipeline)) = (project.clone(), pipeline.clone()) else {
+                self.send(app, HostMessage::CanonEdited { id, error: Some(unread.clone()) });
+                continue;
+            };
+            let mut command = vec![String::from("pipeline.py"), args[0].clone(), pipeline.clone()];
+            command.extend(args[1..].iter().cloned());
+            if let Err(reason) = self.runner.run_now(&folder, env, &canon_call(app, &id), &command) {
+                self.send(app, HostMessage::CanonEdited { id, error: Some(reason) });
+            }
+        }
+        for (app, (id, _tab, step, mut fields)) in edits {
             let (Some((folder, env)), Some(pipeline)) = (project.clone(), pipeline.clone()) else {
                 self.send(app, HostMessage::StepEdited { id, error: Some(unread.clone()) });
                 continue;
             };
+            if let (Some(script), Some(checkout)) = (&fields.script, env.scripts.as_ref().and_then(|scripts| scripts.parent())) {
+                fields.script = Some(with_checkout(script, checkout));
+            }
             let command = step_command(&pipeline, &step, &fields);
-            let why = format!("Edit the step {}: {}.", step.chain, step.step);
-            let call = edit_call(app, &id);
-            if let crate::runner::Begun::Answered(answer) = self.runner.begin(&folder, env, &call, "", crate::runner::RUN_COMMAND, &json!({ "command": command, "why": why })) {
-                self.answer_step_edit(answer);
+            if let Err(reason) = self.runner.run_now(&folder, env, &edit_call(app, &id), &command) {
+                self.send(app, HostMessage::StepEdited { id, error: Some(reason) });
             }
         }
     }
@@ -181,6 +214,13 @@ impl HostWindow {
     /// The runner's answer to a step edit, sent to the workspace that asked.
     /// Returns false when the answer is not a step edit's.
     pub(super) fn answer_step_edit(&mut self, answer: ToolResult) -> bool {
+        if let Some(rest) = answer.call.strip_prefix("canon:") {
+            let Some((app, id)) = rest.split_once(':') else { return false };
+            let Ok(app) = app.parse::<usize>() else { return false };
+            let error = (!answer.ok).then(|| answer.output.get("error").or_else(|| answer.output.get("output")).and_then(Value::as_str).unwrap_or("It was not recorded.").to_string());
+            self.send(app, HostMessage::CanonEdited { id: id.to_string(), error });
+            return true;
+        }
         let Some((app, id)) = answer.call.strip_prefix("step:").and_then(|rest| rest.split_once(':')) else {
             return false;
         };
@@ -194,6 +234,7 @@ impl HostWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// Catches a row split where a script holds " | ", or JSON left as text.
     #[test]
@@ -211,8 +252,19 @@ mod tests {
         assert_eq!(step_command("002", &step, &script), ["pipeline.py", "step", "002", "the animatic", "animatic", "--script", "python3 assemble.py a.json"]);
         let refs = StepFields { refs: Some("[]".into()), ..Default::default() };
         assert_eq!(step_command("002", &step, &refs), ["pipeline.py", "step", "002", "the animatic", "animatic", "--refs", "[]"]);
-        let new = StepFields { order: Some(1), skill: Some("build-animatic".into()), artifact: Some("The Last Signal: animatic".into()), ..script };
+        let new = StepFields { order: Some(1), skill: Some("build-animatic".into()), artifact: Some("The Last Signal: animatic".into()), ..script.clone() };
         assert_eq!(step_command("002", &step, &new)[5..9], ["--order", "1", "--skill", "build-animatic"]);
+    }
+
+    /// Catches a recorded script that names Skills' scripts by a variable
+    /// Claude Code may not set, with no fallback to the checkout.
+    #[test]
+    fn a_steps_script_falls_back_to_the_checkout() {
+        let script = r#"python3 "${SPUMCAKE_AGENT}/skills/build-animatic/scripts/assemble.py" a.json .build/animatic.mp4"#;
+        assert_eq!(
+            with_checkout(script, std::path::Path::new("/src/spumcake-skills")),
+            r#"python3 "${SPUMCAKE_AGENT:-/src/spumcake-skills}/skills/build-animatic/scripts/assemble.py" a.json .build/animatic.mp4"#
+        );
     }
 
     /// Catches a skill or script name that would reach outside its folder.

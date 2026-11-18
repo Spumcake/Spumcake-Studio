@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Catches saving that waits for the host or for quitting: inside a
-/// project, a change is in its file two seconds later, even when the
+/// project, a change is in its file in `work/` two seconds later, even when the
 /// program is then killed with no `quit` and no `keep`.
 #[test]
 fn a_change_survives_a_kill_with_no_host() {
@@ -42,7 +42,7 @@ fn a_change_survives_a_kill_with_no_host() {
     let send = |input: &mut std::process::ChildStdin, message: protocol::HostMessage| {
         writeln!(input, "{}", serde_json::to_string(&message).expect("json")).expect("sent");
     };
-    send(&mut input, protocol::HostMessage::Project { folder: folder.display().to_string(), skills: false });
+    send(&mut input, protocol::HostMessage::Project { folder: folder.display().to_string() });
     send(
         &mut input,
         protocol::HostMessage::Command {
@@ -56,6 +56,6 @@ fn a_change_survives_a_kill_with_no_host() {
     std::thread::sleep(Duration::from_millis(2500));
     child.kill().expect("killed");
     let _ = child.wait();
-    assert!(folder.join("Untitled Storyboard.smx").is_file(), "nothing was written before the kill");
+    assert!(folder.join("work/Untitled Storyboard.smx").is_file(), "nothing was written before the kill");
     let _ = std::fs::remove_dir_all(folder);
 }

@@ -33,7 +33,9 @@ pub struct View {
 #[derive(Clone, Debug)]
 enum Entry {
     Draw { drawing: u64, step: Step, at: View },
-    Film { before: Box<Film>, after: Box<Film>, at: View },
+    /// `assembly`, when the change also changed what the storyboard read
+    /// from the project's animatic, as Follow does: before and after.
+    Film { before: Box<Film>, after: Box<Film>, at: View, assembly: Option<Box<Reads>> },
     Batch(Vec<Entry>),
 }
 
@@ -45,6 +47,10 @@ impl Entry {
         }
     }
 }
+
+/// What a storyboard read from the project's animatic, before and after a
+/// change.
+type Reads = (Option<crate::assembly::Read>, Option<crate::assembly::Read>);
 
 /// The fields that left `draw`'s drawing, wrapped around the film.
 pub struct Record {
@@ -69,6 +75,9 @@ pub struct Record {
     listening: f64,
     /// What the last finished animatic export was made from.
     exported: Option<crate::export::Exported>,
+    /// The project's assembly this storyboard was opened from or last saved
+    /// as, with each time as read.
+    assembly: Option<crate::assembly::Read>,
     id: DrawingId,
     name: String,
     generated_name: String,
@@ -112,6 +121,7 @@ impl Record {
             onion: Onion::default(),
             listening: 1.0,
             exported: None,
+            assembly: None,
             id,
             generated_name: name.clone(),
             name,
@@ -198,6 +208,19 @@ impl Record {
         self.listening = volume;
         self.dirty = true;
         true
+    }
+
+    pub fn assembly(&self) -> Option<&crate::assembly::Read> {
+        self.assembly.as_ref()
+    }
+
+    /// Kept beside the film, so undo never takes it back, except where a
+    /// film change takes it with it, in `edit_film_reading`.
+    pub fn set_assembly(&mut self, assembly: Option<crate::assembly::Read>) {
+        if self.assembly != assembly {
+            self.assembly = assembly;
+            self.dirty = true;
+        }
     }
 
     pub fn exported(&self) -> Option<&crate::export::Exported> {
@@ -293,6 +316,18 @@ impl Record {
         palette: &[ToolColor],
         change: impl FnOnce(&mut Film) -> Option<Vec<NewDrawing>>,
     ) -> bool {
+        self.edit_film_reading(ids, palette, change, None)
+    }
+
+    /// `edit_film`, which also makes `reading` what the storyboard read from
+    /// the project's animatic, in the same undo step.
+    pub fn edit_film_reading(
+        &mut self,
+        ids: &mut Allocator,
+        palette: &[ToolColor],
+        change: impl FnOnce(&mut Film) -> Option<Vec<NewDrawing>>,
+        reading: Option<crate::assembly::Read>,
+    ) -> bool {
         let before = self.film.clone();
         let Some(made) = change(&mut self.film) else {
             self.film = before;
@@ -300,6 +335,10 @@ impl Record {
         };
         if self.film == before && made.is_empty() {
             return false;
+        }
+        let assembly = reading.map(|after| Box::new((self.assembly.clone(), Some(after))));
+        if let Some(reads) = &assembly {
+            self.assembly = reads.1.clone();
         }
         for drawing in made {
             let new = match drawing.copy_of.and_then(|source| self.drawing_of(source)) {
@@ -311,7 +350,7 @@ impl Record {
         let at = self.view;
         self.dirty = true;
         self.redo.clear();
-        self.push_undo(Entry::Film { before: Box::new(before), after: Box::new(self.film.clone()), at });
+        self.push_undo(Entry::Film { before: Box::new(before), after: Box::new(self.film.clone()), at, assembly });
         self.go(at);
         true
     }
@@ -446,6 +485,14 @@ impl Record {
         self.redo.clear();
     }
 
+    /// Forgets every undo and redo step, as a storyboard just opened has
+    /// none.
+    pub fn clear_history(&mut self) {
+        self.group = None;
+        self.undo.clear();
+        self.redo.clear();
+    }
+
     pub fn undo_len(&self) -> usize {
         self.undo.len()
     }
@@ -553,8 +600,20 @@ impl Record {
                     }
                 }
             }
-            Entry::Film { before, after, .. } => {
+            Entry::Film { before, after, assembly, .. } => {
                 self.film = if forward { (**after).clone() } else { (**before).clone() };
+                // Only the timing Follow changed goes back: a save, a step,
+                // or a board published since stays.
+                if let Some(reads) = assembly {
+                    let target = if forward { &reads.1 } else { &reads.0 };
+                    self.assembly = match (self.assembly.take(), target) {
+                        (Some(mut now), Some(target)) => {
+                            now.take_timing(target);
+                            Some(now)
+                        }
+                        (now, target) => now.or_else(|| target.clone()),
+                    };
+                }
                 // The drawing shown may have left the film; settle on one it has.
                 let view = self.view;
                 self.go(view);
@@ -711,7 +770,7 @@ pub fn copy_drawing(source: &Drawing, ids: &mut Allocator) -> Option<Drawing> {
 }
 
 /// A new keyframe's drawing: one canvas, with the brush's colours.
-fn blank_drawing(ids: &mut Allocator, palette: &[ToolColor]) -> Drawing {
+pub(crate) fn blank_drawing(ids: &mut Allocator, palette: &[ToolColor]) -> Drawing {
     let mut drawing = Drawing::untitled(ids, palette);
     drawing.focus_origin();
     drawing

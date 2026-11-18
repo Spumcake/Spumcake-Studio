@@ -1686,7 +1686,7 @@ mod tests {
     /// A launched session inside `folder`, its recipe changed.
     fn changed_in(folder: &Path) -> Session {
         let mut session = Session::launch();
-        let _ = session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        let _ = session.handle(HostMessage::Project { folder: folder.display().to_string() });
         let _ = command(&mut session, "add_cell");
         session
     }
