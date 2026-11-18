@@ -78,6 +78,9 @@ pub struct Record {
     /// The project's assembly this storyboard was opened from or last saved
     /// as, with each time as read.
     assembly: Option<crate::assembly::Read>,
+    /// Holds published as rough boards before the storyboard read any
+    /// animatic, as a new film's are until its first save takes them.
+    loose_boards: Vec<crate::assembly::RoughBoard>,
     id: DrawingId,
     name: String,
     generated_name: String,
@@ -122,6 +125,7 @@ impl Record {
             listening: 1.0,
             exported: None,
             assembly: None,
+            loose_boards: Vec::new(),
             id,
             generated_name: name.clone(),
             name,
@@ -219,6 +223,18 @@ impl Record {
     pub fn set_assembly(&mut self, assembly: Option<crate::assembly::Read>) {
         if self.assembly != assembly {
             self.assembly = assembly;
+            self.dirty = true;
+        }
+    }
+
+    pub fn loose_boards(&self) -> &[crate::assembly::RoughBoard] {
+        &self.loose_boards
+    }
+
+    /// Kept beside the film, as what it read is.
+    pub fn set_loose_boards(&mut self, boards: Vec<crate::assembly::RoughBoard>) {
+        if self.loose_boards != boards {
+            self.loose_boards = boards;
             self.dirty = true;
         }
     }

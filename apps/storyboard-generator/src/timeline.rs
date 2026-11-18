@@ -137,6 +137,7 @@ fn declare_film(session: &Session, boards: &mut Boards, looker: &mut Looker, tab
         button("skip-next", "Step forward (.)", "step_forward", true, false),
         ToolItem::Label { text: timecode(view.film_frame), strong: true },
         ToolItem::Label { text: format!("/ {}", timecode(length)), strong: false },
+        volume_icon(),
         volume_slider(session),
     ];
     let items = film
@@ -231,11 +232,18 @@ fn play_button(session: &Session, enabled: bool) -> ToolItem {
     }
 }
 
-/// How loud the film plays here: never in the export.
+/// The speaker before the volume slider, as film-transport shows it.
+fn volume_icon() -> ToolItem {
+    ToolItem::Button { icon: "sound-high".to_string(), tip: "Volume".to_string(), enabled: true, selected: false, action: None, menu: Vec::new() }
+}
+
+/// How loud the film plays here: never in the export. The speaker before it
+/// names it, so it has no caption, and it is wide enough that its knob never
+/// meets its value.
 fn volume_slider(session: &Session) -> ToolItem {
     ToolItem::Slider {
-        caption: "Volume".to_string(),
-        width: 80.0,
+        caption: String::new(),
+        width: 160.0,
         value: (session.listening() * 100.0).round() as i32,
         min: 0,
         max: 100,

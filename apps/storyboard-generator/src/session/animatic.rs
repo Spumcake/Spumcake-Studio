@@ -175,7 +175,8 @@ impl Session {
                     (false, [only]) => Some(only.to_string()),
                     _ => {
                         let stamp = hold_stamp(record, clip, *start);
-                        record.assembly().and_then(|read| read.board(clip.id, *start, &stamp)).map(|board| board.file.clone())
+                        let mut boards = record.assembly().map(|read| read.boards.iter()).into_iter().flatten().chain(record.loose_boards());
+                        boards.find(|board| board.clip == clip.id && board.frame == *start && board.stamp == stamp).map(|board| board.file.clone())
                     }
                 };
                 Hold { start: *start, length: end - start, image, blank: !drawn && images.is_empty() }
@@ -200,7 +201,11 @@ impl Session {
         };
         let record = &mut self.storyboards[index];
         let was = record.assembly().cloned();
-        let boards = was.as_ref().map(|read| read.boards.clone()).unwrap_or_default();
+        // What it published before it read any animatic is kept from now
+        // with what it read.
+        let mut boards = was.as_ref().map(|read| read.boards.clone()).unwrap_or_default();
+        boards.extend(record.loose_boards().iter().cloned());
+        record.set_loose_boards(Vec::new());
         let mut read = notes.read(assembly, path, fingerprint, boards);
         read.step = was.and_then(|read| read.step);
         record.set_assembly(Some(read));
@@ -215,11 +220,18 @@ impl Session {
             return;
         };
         let record = &mut self.storyboards[index];
+        let board = RoughBoard { clip, frame, file: file.to_string(), stamp: stamp.to_string() };
+        // Before it read any animatic, as a new film's storyboard, the board
+        // is kept on the storyboard itself.
         let Some(mut read) = record.assembly().cloned() else {
+            let mut boards = record.loose_boards().to_vec();
+            boards.retain(|kept| !(kept.clip == clip && kept.frame == frame));
+            boards.push(board);
+            record.set_loose_boards(boards);
             return;
         };
-        read.boards.retain(|board| !(board.clip == clip && board.frame == frame));
-        read.boards.push(RoughBoard { clip, frame, file: file.to_string(), stamp: stamp.to_string() });
+        read.boards.retain(|kept| !(kept.clip == clip && kept.frame == frame));
+        read.boards.push(board);
         record.set_assembly(Some(read));
     }
 
@@ -910,6 +922,35 @@ mod tests {
         // The storyboard is the project's animatic from now on.
         let read = session.active_storyboard().assembly().unwrap();
         assert_eq!((read.path.as_str(), read.step.clone()), ("prompts/resources/first.json", Some(("the animatic".to_string(), "animatic".to_string()))));
+    }
+
+    #[test]
+    fn a_new_film_keeps_its_published_holds_until_its_first_save() {
+        let dir = project("new-film-boards");
+        let mut session = Session::new();
+        session.set_project(&dir);
+        let clip = session.add_clip(None, 24).unwrap();
+        session.enter_clip(clip);
+        stroke(&mut session, 100.0);
+        session.leave_clip();
+        assert!(session.active_storyboard().assembly().is_none());
+        // Published before it read any animatic: kept on the storyboard.
+        let stamp = stamp_of(&session, clip);
+        session.hold_published(session.active_id(), clip, 0, &stamp, "prompts/resources/board.png");
+        assert_eq!(session.active_storyboard().loose_boards().len(), 1);
+        assert_eq!(session.holds_of(clip)[0].image.as_deref(), Some("prompts/resources/board.png"));
+        // Kept in its file, as it is.
+        let path = dir.join("New film.smx");
+        crate::store::write_smx(&path, session.active_storyboard(), "New film").unwrap();
+        let mut ids = draw::document::Allocator::new();
+        let reopened = crate::store::read_smx(&path).unwrap().into_record(&mut ids, &[]);
+        assert_eq!(reopened.loose_boards(), session.active_storyboard().loose_boards());
+        // Its first save takes them into what it read.
+        session.import_sound(&dir.join("library/2026-11-12_20-27-scene-3.wav"), None, Some(0)).unwrap();
+        let (saved, notes) = session.timing(None).unwrap_or_else(|reason| panic!("{reason}"));
+        session.timing_saved(session.active_id(), saved, &notes, "prompts/resources/first.json", "f");
+        assert!(session.active_storyboard().loose_boards().is_empty());
+        assert_eq!(session.active_storyboard().assembly().unwrap().boards.len(), 1);
     }
 
     #[test]
