@@ -412,3 +412,20 @@ fn an_older_cell_counts_as_on_the_level_of_its_model() {
     assert_eq!(ran.effort.as_deref(), Some("medium"), "the run did not record its effort: {ran:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Catches a skill's "Runs on" and "Model" written into the skill, which
+/// keeps no endpoint, or not kept as its remembered choice.
+#[test]
+fn a_skills_runs_on_and_model_are_kept_apart_from_it() {
+    let dir = scratch("settings-skill-route");
+    let stand_in = StandIn::start(vec![text_reply("Kept.")]);
+    let mut window = project_window(both(), &stand_in, &dir);
+    window.app.settings.add_image_skill();
+    let image = window.app.settings.image_skill().cloned().expect("an image skill");
+    let endpoint = window.app.settings.endpoints[0].id.clone();
+    window.setting(SettingsChoice::ChooseSkillRoute { skill: image.id.clone(), endpoint: endpoint.clone(), model: String::from("stand-in/image") });
+    let route = window.app.settings.skill_routes.get(&image.id).cloned().expect("no remembered choice");
+    assert_eq!((route.endpoint.as_str(), route.model.as_str()), (endpoint.as_str(), "stand-in/image"));
+    assert_eq!(window.app.settings.skill(&image.id), Some(&image), "the skill itself changed");
+    let _ = std::fs::remove_dir_all(dir);
+}

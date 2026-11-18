@@ -131,6 +131,9 @@ const ENDPOINT_DESCRIPTION_LINE: &str = "What it is for, which the assistant rea
 /// A skill's page's line, now that a skill's cell chooses its endpoint and
 /// model, as the owner approved on 2026-11-17.
 const SKILL_PAGE_LINE: &str = "Runs its prompt in the conversation when the assistant calls it. Its cell chooses the endpoint and model.";
+/// The same line for a skill that makes images, whose cell has no chooser
+/// yet: its "Runs on" and "Model" choose instead.
+const IMAGE_SKILL_PAGE_LINE: &str = "Runs its prompt in the conversation when the assistant calls it.";
 /// A skill's page's row for the endpoint its cells run on, kept apart from
 /// the skill, as the Studio session manager set on 2026-11-17.
 const RUNS_ON: &str = "Runs on";
@@ -1021,6 +1024,20 @@ fn endpoint_options(settings: &Settings, current: Option<&str>, chats_only: bool
     (names, ids, chosen)
 }
 
+/// The endpoints a skill's "Runs on" offers: those that chat, for a skill
+/// that makes text, and only OpenRouter's, whose image API Studio speaks,
+/// for one that makes images.
+fn skill_endpoint_options(settings: &Settings, current: Option<&str>, makes: Makes) -> (Vec<String>, Vec<String>, Option<usize>) {
+    let (names, ids, _) = endpoint_options(settings, None, true);
+    let (names, ids): (Vec<String>, Vec<String>) = names
+        .into_iter()
+        .zip(ids)
+        .filter(|(_, id)| makes == Makes::Text || settings.endpoint(id).is_some_and(|endpoint| endpoint.kind == EndpointKind::Openrouter))
+        .unzip();
+    let chosen = current.and_then(|current| ids.iter().position(|id| id == current));
+    (names, ids, chosen)
+}
+
 fn skills(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choices: &mut Vec<SettingsChoice>) {
     if header(ui, panel, "Skills", SKILLS_PAGE_LINE, Some("New skill")) {
         let skill = SkillSetting {
@@ -1215,7 +1232,7 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
         toolbar::paint_icon(ui.painter(), pos2(title.right() + 16.0, title.center().y), "lock", 16.0, MUTED);
         ui.painter().text(rect.left_top() + vec2(0.0, 44.0), Align2::LEFT_CENTER, "Built in. This skill can't be removed.", ts::body(), MUTED);
     } else {
-        header(ui, panel, &skill.name, SKILL_PAGE_LINE, None);
+        header(ui, panel, &skill.name, if skill.makes == Makes::Images { IMAGE_SKILL_PAGE_LINE } else { SKILL_PAGE_LINE }, None);
     }
     let rows = card(ui, if built_in { 1 } else { 5 });
     if !built_in {
@@ -1252,7 +1269,7 @@ fn skill_page(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, id: &
         let endpoint_rect = control(rows[3], CONTROL_W, 0.0);
         row_text(ui, rows[3], rows[3].left() + PAD, endpoint_rect.left() - 8.0, RUNS_ON, "Where its cells send their prompts");
         let current = route.as_ref().map(|(endpoint, _)| endpoint.id.clone());
-        let (names, ids, chosen) = endpoint_options(settings, current.as_deref(), true);
+        let (names, ids, chosen) = skill_endpoint_options(settings, current.as_deref(), skill.makes);
         let shown = chosen.map_or("No endpoint", |index| names[index].as_str()).to_string();
         let model_now = route.as_ref().map(|(_, model)| model.clone()).unwrap_or_default();
         if let Some(picked) = select(ui, endpoint_rect, &format!("skill-route-endpoint-{id}"), &shown, &names, chosen) {
@@ -1467,6 +1484,19 @@ mod tests {
     /// Catches a switched endpoint that leaves levels and skills on models
     /// it does not have, with nothing said: each warns until a listed model
     /// is chosen, and nothing warns while the list is unknown.
+    #[test]
+    fn an_image_skill_runs_on_offers_only_what_makes_images() {
+        let mut settings = Settings::default();
+        let openrouter = settings.first_start("https://stand-in/v1").unwrap();
+        settings.endpoints.push(EndpointSetting { id: "local".into(), name: "Ollama".into(), kind: EndpointKind::Openai, address: "http://local/v1".into(), description: String::new() });
+        let (_, images, _) = skill_endpoint_options(&settings, None, Makes::Images);
+        assert_eq!(images, [openrouter.clone()], "an endpoint that makes no images was offered to an image skill");
+        let (_, text, chosen) = skill_endpoint_options(&settings, Some("local"), Makes::Text);
+        assert_eq!(text, [openrouter, String::from("local")]);
+        assert_eq!(chosen, Some(1));
+    }
+
+    /// Catches a model an endpoint does not list run on without a warning.
     #[test]
     fn models_an_endpoint_lacks_are_warned_about() {
         let mut settings = Settings::default();

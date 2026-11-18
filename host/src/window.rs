@@ -1205,32 +1205,14 @@ impl HostWindow {
     /// the user set up, cannot run the skill, or comes with no model. None
     /// when it named none, so the skill's own choice is used.
     fn skill_route_named(&mut self, skill: &workspace::SkillSetting, endpoint: &str, model: &str) -> Option<Result<crate::endpoints::Route, String>> {
-        let endpoint = endpoint.trim();
-        if endpoint.is_empty() {
-            return None;
-        }
-        let Some(found) = self.settings.endpoints.iter().find(|known| known.name.eq_ignore_ascii_case(endpoint)).cloned() else {
-            return Some(Err(format!("No endpoint is named “{endpoint}”. Use one of those listed.")));
-        };
-        let fits = match skill.makes {
-            workspace::Makes::Images => found.kind == workspace::EndpointKind::Openrouter,
-            workspace::Makes::Text => found.kind.chats(),
-        };
-        if !fits {
-            return Some(Err(format!("“{}” cannot run {}.", found.name, skill.name)));
-        }
-        let model = model.trim();
-        if model.is_empty() {
-            return Some(Err(format!("Name the model to run on “{}” too.", found.name)));
-        }
-        // A model the endpoint's list does not give, when the list is known.
         let listed = self.probes.listed_by_endpoint();
-        let known = listed.get(&found.id).map(|(chat, images)| if skill.makes == workspace::Makes::Images { images.clone() } else { chat.clone() }).unwrap_or_default();
-        if !known.is_empty() && !known.iter().any(|id| id == model) {
-            return Some(Err(format!("“{}” does not list {model}. Use one of its models.", found.name)));
+        match route::named_route(&self.settings, skill, endpoint, model, &listed)? {
+            Ok((found, model)) => {
+                let key = self.keys.get(&found.id);
+                Some(Ok(crate::endpoints::Route::new(&found, key, &model, None)))
+            }
+            Err(reason) => Some(Err(reason)),
         }
-        let key = self.keys.get(&found.id);
-        Some(Ok(crate::endpoints::Route::new(&found, key, model, None)))
     }
 
     fn note_cell_actions(&mut self, actions: Vec<crate::cells::CardAction>) {
