@@ -201,6 +201,7 @@ pub(crate) fn kind_label(kind: &str) -> &str {
         protocol::IMAGE_KIND => "Image",
         protocol::MARKDOWN_KIND => "Markdown",
         protocol::VIDEO_KIND => "Video",
+        protocol::SOUND_KIND => "Audio",
         other => other,
     }
 }
