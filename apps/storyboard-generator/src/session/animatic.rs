@@ -39,19 +39,9 @@ pub fn rough_board(film: &str, shot: &str) -> String {
 }
 
 impl Session {
-    /// The film's name: its animatic step's, when the storyboard is the
-    /// project's animatic, else the film's title.
-    pub(crate) fn film_name(&self) -> String {
-        let read = self.active_storyboard().assembly();
-        let step = read.and_then(|read| read.step.as_ref()).and_then(|(chain, name)| self.steps.get(&format!("{chain}: {name}")));
-        match (step, self.project.as_deref()) {
-            (Some(step), Some(project)) => step.film(project),
-            _ => self.film().title.clone(),
-        }
-    }
-
-    /// Opens an assembly file of the project as a new storyboard named
-    /// `title`, the film's, shown in place of an untouched blank.
+    /// Opens an assembly file of the project as a new storyboard, its film
+    /// titled `title`, the film's, shown in place of an untouched blank. It
+    /// is named as every new storyboard is.
     pub fn open_assembly(&mut self, path: &Path, title: &str) -> Result<DrawingId, String> {
         let bytes = std::fs::read(path).map_err(|error| crate::store::reason(&error))?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "It is not an animatic's assembly, or it is damaged.".to_string())?;
@@ -71,8 +61,9 @@ impl Session {
             drawings.insert(drawing.id, crate::record::blank_drawing(&mut self.ids, &palette));
         }
         let blank = self.untouched_blank();
+        let name = self.fresh_name(blank);
         let id = self.allocate_storyboard();
-        let mut record = crate::record::Record::from_film(id, title.to_string(), film, drawings, &mut self.ids, &palette);
+        let mut record = crate::record::Record::from_film(id, name, film, drawings, &mut self.ids, &palette);
         record.set_assembly(Some(read));
         record.set_dirty(true);
         self.settle();
@@ -288,6 +279,10 @@ impl Session {
     /// The host's answer to a publish: a hold asked for is now its rough
     /// board's file, or a card says why not.
     pub fn published(&mut self, artifact: &str, file: &str, error: Option<&str>) {
+        // Whatever was published, a hold or a sound, the animatic can name it.
+        if error.is_none() && !file.is_empty() {
+            self.note_published(artifact, file);
+        }
         let Some((storyboard, clip, frame, stamp, written)) = self.publishing.remove(artifact) else {
             return;
         };
@@ -302,7 +297,6 @@ impl Session {
         if file.is_empty() {
             return;
         }
-        self.note_published(artifact, file);
         self.hold_published(storyboard, clip, frame, &stamp, file);
     }
 
@@ -499,6 +493,13 @@ mod tests {
         std::fs::create_dir_all(dir.join("prompts/resources")).unwrap();
         std::fs::copy(&outside, dir.join("prompts/resources/2026-11-17_10-00-outside.wav")).unwrap();
         session.filed(&id, "prompts/resources/2026-11-17_10-00-outside.wav", None);
+        // Filed, it is offered as canon under the film, after its file.
+        let Some(protocol::AppMessage::Publish { artifact, source, .. }) = session.take_outgoing().pop() else {
+            panic!("the sound was not offered for publishing");
+        };
+        let stem = outside.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(artifact, crate::session::sound::sound_artifact(&session.film_name(), &stem));
+        assert_eq!(source, "prompts/resources/2026-11-17_10-00-outside.wav");
         assert!(!dir.join(&path).exists(), "the copy in work/ was kept");
         let started = std::time::Instant::now();
         while !session.poll_imports() && started.elapsed() < std::time::Duration::from_secs(5) {
@@ -750,13 +751,13 @@ mod tests {
         let mut session = Session::new();
         session.set_project(&dir);
         assert_eq!(session.storyboards.len(), 1);
-        // Told the project, it shows the animatic in place of the blank,
-        // named after the film.
+        // Told the project, it shows the animatic in place of the blank.
         session.show_animatic();
         answer_steps(&mut session, "prompts/resources/2026-11-14_16-07-animatic-assembly.json");
         assert_eq!(session.storyboards.len(), 1);
+        // The film is Last order; the storyboard is named as every new one.
         assert_eq!(session.film().title, "Last order");
-        assert_eq!(session.active_storyboard().name(), "Last order");
+        assert_eq!(session.active_storyboard().name(), "Untitled Storyboard");
         let read = session.active_storyboard().assembly().unwrap().clone();
         assert_eq!(read.step, Some(("the animatic".to_string(), "animatic".to_string())));
         // Shown again after another tool retimed it, the same storyboard
@@ -774,7 +775,27 @@ mod tests {
     }
 
     #[test]
-    fn a_file_of_the_film_s_name_that_read_no_timing_is_left_alone() {
+    fn the_kept_animatic_opens_under_the_name_it_was_given() {
+        let dir = project("renamed");
+        let mut first = Session::new();
+        first.set_project(&dir);
+        first.show_animatic();
+        answer_steps(&mut first, "prompts/resources/2026-11-14_16-07-animatic-assembly.json");
+        // Renamed by the person, and kept in work/.
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        crate::store::write_smx(&dir.join("work/My cut.smx"), first.active_storyboard(), "My cut").unwrap();
+        let mut again = Session::new();
+        again.set_project(&dir);
+        again.show_animatic();
+        answer_steps(&mut again, "prompts/resources/2026-11-14_16-07-animatic-assembly.json");
+        assert_eq!(again.storyboards.len(), 1);
+        assert_eq!(again.active_storyboard().name(), "My cut");
+        assert!(again.active_storyboard().assembly().is_some());
+        assert_eq!(again.active_storyboard().undo_len(), 0, "opening left an undo step");
+    }
+
+    #[test]
+    fn a_storyboard_that_read_no_timing_is_left_alone() {
         let dir = project("kept-other");
         std::fs::create_dir_all(dir.join("work")).unwrap();
         std::fs::write(dir.join("work/Last order.smx"), b"{}").unwrap();
@@ -804,6 +825,55 @@ mod tests {
     }
 
     #[test]
+    fn a_new_film_s_first_save_records_its_animatic_step() {
+        let (mut session, _) = opened("new-film");
+        let dir = session.project().unwrap().to_path_buf();
+        // A storyboard of the film's frames and sounds that no step made
+        // yet, in a project whose films and chains were read.
+        session.active_storyboard_mut().set_assembly(None);
+        let read_files = ["library/2026-11-12_20-48-keyframe-wiping-2.png", "library/2026-11-14_16-04-keyframe-the-bell.png", "library/2026-11-14_15-37-keyframe-the-line.png", "library/2026-11-14_15-40-keyframe-waiting.png", "library/2026-11-12_20-27-scene-3.wav", "library/2026-11-12_20-03-otis-line-1.wav"];
+        for file in read_files {
+            session.canon_files.insert(file.to_string(), format!("Harbor: {file}"));
+        }
+        // No film element yet, and no chain for the animatic.
+        session.chain_orders = Some(crate::session::project::ChainOrders { chain_there: false, last_step: 0, last_chain: 4 });
+        session.film_element = None;
+        let film = session.film_name();
+        session.save_timing().unwrap();
+        let Some(protocol::AppMessage::RunSkillScript { id, script, .. }) = session.take_outgoing().pop() else {
+            panic!("Skills' writer was not asked");
+        };
+        assert_eq!(script, "write-assembly.py");
+        std::fs::copy(dir.join("prompts/resources/2026-11-14_16-07-animatic-assembly.json"), dir.join("prompts/resources/first.json")).unwrap();
+        session.skill_script_ran(&id, "{\"path\": \"prompts/resources/first.json\"}", None);
+        // The film's element first, named after the project, then the chain
+        // after the last one, then the step, each once the host answers.
+        let Some(protocol::AppMessage::EditElement { id, name, kind, .. }) = session.take_outgoing().pop() else {
+            panic!("the film was not recorded");
+        };
+        assert_eq!((name.as_str(), kind.as_str()), (film.as_str(), "film"));
+        session.canon_edited(&id, None);
+        let Some(protocol::AppMessage::EditChain { id, chain, order, .. }) = session.take_outgoing().pop() else {
+            panic!("the chain was not recorded");
+        };
+        assert_eq!((chain.as_str(), order), ("the animatic", 5));
+        session.canon_edited(&id, None);
+        let Some(protocol::AppMessage::EditStep { id, step, script, order, skill, artifact, refs, endpoint, .. }) = session.take_outgoing().pop() else {
+            panic!("the step was not recorded");
+        };
+        assert_eq!((step.chain.as_str(), step.step.as_str()), ("the animatic", "animatic"));
+        assert_eq!((order, skill.as_deref(), artifact), (Some(1), Some("build-animatic"), Some(format!("{film}: animatic"))));
+        assert_eq!(script.as_deref(), Some("python3 \"${SPUMCAKE_AGENT}/skills/build-animatic/scripts/assemble.py\" prompts/resources/first.json .build/animatic.mp4"));
+        assert_eq!(endpoint.as_deref(), Some(r#"{"kind": "script", "outputs": [".build/animatic.mp4"]}"#));
+        assert!(refs.unwrap().contains("frame, 0.0 to 3.0 s"));
+        session.step_edited(&id, None);
+        assert_eq!(session.film_name(), film);
+        // The storyboard is the project's animatic from now on.
+        let read = session.active_storyboard().assembly().unwrap();
+        assert_eq!((read.path.as_str(), read.step.clone()), ("prompts/resources/first.json", Some(("the animatic".to_string(), "animatic".to_string()))));
+    }
+
+    #[test]
     fn a_project_with_no_animatic_keeps_its_blank() {
         let dir = project("none");
         let mut session = Session::new();
@@ -817,7 +887,8 @@ mod tests {
         assert_eq!(session.storyboards.len(), 1);
         assert!(session.active_storyboard().assembly().is_none());
         assert!(session.kept_notices.is_empty(), "a card was shown");
-        assert_eq!(session.save_timing().unwrap_err(), "This project has no animatic yet.");
+        // Its save waits for where the project's chains stand.
+        assert_eq!(session.save_timing().unwrap_err(), "The project's animatic step is not known yet.");
         // With a shot to export, it says why it cannot.
         session.add_clip(None, 24).unwrap();
         assert_eq!(session.start_export().unwrap_err(), "This project has no animatic yet.");

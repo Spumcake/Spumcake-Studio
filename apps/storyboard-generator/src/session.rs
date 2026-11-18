@@ -380,6 +380,10 @@ pub struct Session {
     /// The last Save timing to the project that finished: the storyboard
     /// and the assembly it filed.
     last_saved: Option<(DrawingId, String)>,
+    /// The project's film, its canon element of kind film, once read.
+    film_element: Option<String>,
+    /// Where the project's chains stand, once read, for a new animatic step.
+    chain_orders: Option<project::ChainOrders>,
     /// Export animatic video, running the project's animatic step.
     stepping: Option<project::Stepping>,
     /// Sounds from outside the project being filed into it, by the
@@ -453,6 +457,8 @@ impl Session {
             saving: None,
             retimed: None,
             last_saved: None,
+            film_element: None,
+            chain_orders: None,
             stepping: None,
             filing: HashMap::new(),
             last_check: None,

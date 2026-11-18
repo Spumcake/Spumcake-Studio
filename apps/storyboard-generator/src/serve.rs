@@ -414,6 +414,7 @@ impl Server {
             HostMessage::CanonRows { id, rows, error } => self.session.canon_rows(&id, &rows, error.as_deref()),
             HostMessage::Filed { id, file, error } => self.session.filed(&id, &file, error.as_deref()),
             HostMessage::StepEdited { id, error } => self.session.step_edited(&id, error.as_deref()),
+            HostMessage::CanonEdited { id, error } => self.session.canon_edited(&id, error.as_deref()),
             HostMessage::SkillScriptRan { id, output, error } => self.session.skill_script_ran(&id, &output, error.as_deref()),
             HostMessage::StepRan { id, take, error } => self.session.step_ran(&id, take.as_deref(), error.as_deref()),
             HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {

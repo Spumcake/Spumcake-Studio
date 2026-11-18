@@ -28,6 +28,24 @@ const SEPARATOR: char = '\u{1f}';
 const STEPS: &str = "SELECT chain || char(31) || name || char(31) || coalesce(artifact, '') || char(31) || script FROM step WHERE skill = 'build-animatic' AND script LIKE '%assemble.py%' ORDER BY chain, ord";
 /// Every published file and the artifact it is published as.
 const ARTIFACTS: &str = "SELECT file || char(31) || id FROM artifact WHERE file IS NOT NULL";
+/// The project's film: its canon element of kind film.
+const FILM: &str = "SELECT name FROM element WHERE kind = 'film' ORDER BY name";
+/// The chain an animatic is recorded in, as `build-animatic` names it.
+pub const ANIMATIC_CHAIN: &str = "the animatic";
+/// The step that makes the animatic, in that chain.
+pub const ANIMATIC_STEP: &str = "animatic";
+/// Where the animatic's chain stands: whether it is there, its last step's
+/// order, and the last chain's order.
+const ORDERS: &str = "SELECT (SELECT count(*) FROM chain WHERE name = 'the animatic') || char(31) || (SELECT coalesce(max(ord), 0) FROM step WHERE chain = 'the animatic') || char(31) || (SELECT coalesce(max(ord), 0) FROM chain)";
+
+/// Where the project's chains stand, for a new animatic step: it goes last
+/// in its chain, and a missing chain goes after the last one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainOrders {
+    pub chain_there: bool,
+    pub last_step: u32,
+    pub last_chain: u32,
+}
 
 /// One animatic step.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +106,10 @@ pub fn writer_args(assembly: &Assembly) -> Vec<String> {
 pub enum Asked {
     /// Showing the project's animatic, when the project opens.
     Open,
+    /// The project's film.
+    Film,
+    /// Where the project's chains stand.
+    Orders,
     /// Whether the animatic a storyboard read was retimed elsewhere.
     Check(DrawingId),
     Artifacts,
@@ -109,6 +131,33 @@ pub struct Saving {
     /// Export animatic video asked for the save: the step runs once it is
     /// done, made from these items.
     pub then_export: Option<Vec<(String, String)>>,
+    /// The project had no animatic: the save records its step.
+    pub new_step: Option<NewStep>,
+    /// What is still to be recorded once the host answers the last ask:
+    /// the chain and the step, after the film's element.
+    pub then: Vec<AppMessage>,
+}
+
+/// What a new film's first save records, as `build-animatic` records it.
+#[derive(Clone, Debug)]
+pub struct NewStep {
+    /// The step's order, last in its chain.
+    pub order: u32,
+    /// The chain's order, when the chain is not there yet.
+    pub chain_order: Option<u32>,
+    /// The film's element, when the project has none yet.
+    pub film: Option<String>,
+}
+
+/// The step's endpoint, as `build-animatic` records it.
+pub const ANIMATIC_ENDPOINT: &str = r#"{"kind": "script", "outputs": [".build/animatic.mp4"]}"#;
+
+/// The animatic step's script: `assemble.py` from the agent's Skills
+/// checkout, on the assembly, into `.build/`. The host records it in
+/// Skills' own form, with the checkout it found as `SPUMCAKE_AGENT`'s
+/// default.
+pub fn animatic_script(assembly: &str) -> String {
+    format!("python3 \"${{SPUMCAKE_AGENT}}/skills/build-animatic/scripts/assemble.py\" {assembly} .build/animatic.mp4")
 }
 
 /// Export animatic video: the animatic's step running again through the
@@ -121,6 +170,26 @@ pub struct Stepping {
     /// The items the animatic is made from, as the export began.
     pub sources: Vec<(String, String)>,
     pub since: Instant,
+}
+
+/// The storyboard in `folder` whose timing was read from the step `key`,
+/// by what its file keeps, whatever it is named.
+fn kept_for(folder: &std::path::Path, key: &(String, String)) -> Option<std::path::PathBuf> {
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(folder)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "smx"))
+        .filter(|path| {
+            let stored = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            stored.is_some_and(|stored| {
+                let step = &stored["assembly"]["step"];
+                step["chain"].as_str() == Some(key.0.as_str()) && step["name"].as_str() == Some(key.1.as_str())
+            })
+        })
+        .collect();
+    // The same every time, when more than one was kept.
+    found.sort();
+    found.into_iter().next()
 }
 
 fn row_text(row: &Value) -> Option<String> {
@@ -181,6 +250,8 @@ impl Session {
             return;
         }
         self.ask_canon(ARTIFACTS, Asked::Artifacts);
+        self.ask_canon(FILM, Asked::Film);
+        self.ask_canon(ORDERS, Asked::Orders);
         self.ask_canon(STEPS, Asked::Open);
     }
 
@@ -219,6 +290,18 @@ impl Session {
             return;
         }
         match asked {
+            Asked::Film => {
+                // With several, the first by name; Skills asks which, and
+                // Studio has one film to a project.
+                self.film_element = rows.iter().filter_map(row_text).map(|name| name.trim().to_string()).find(|name| !name.is_empty());
+            }
+            Asked::Orders => {
+                let text = rows.iter().filter_map(row_text).next().unwrap_or_default();
+                let numbers: Vec<u32> = text.split(SEPARATOR).map(|part| part.trim().parse().unwrap_or(0)).collect();
+                if let [there, step, chain] = numbers.as_slice() {
+                    self.chain_orders = Some(ChainOrders { chain_there: *there > 0, last_step: *step, last_chain: *chain });
+                }
+            }
             Asked::Artifacts => {
                 for text in rows.iter().filter_map(row_text) {
                     if let Some((file, artifact)) = text.split_once(SEPARATOR) {
@@ -275,29 +358,21 @@ impl Session {
             self.activate(id);
             return self.take_timing(&file);
         }
-        let film = step.film(&project);
-        let kept = project.join(super::WORK).join(format!("{film}.smx"));
-        // Only a storyboard that read an animatic's timing is kept as the
-        // animatic; any other file of that name is left alone.
-        let timed = std::fs::read(&kept).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).is_some_and(|stored| stored.get("assembly").is_some_and(|read| !read.is_null()));
+        let film = self.film_element.clone().unwrap_or_else(|| step.film(&project));
+        // The storyboard kept in `work/` whose timing came from this step,
+        // under whatever name the person gave it.
         let blank = self.untouched_blank();
-        if timed && self.open_path(&kept) {
+        if let Some(kept) = kept_for(&project.join(super::WORK), &key)
+            && self.open_path(&kept)
+        {
             self.drop_blank(blank);
-            if !ours(self.active_storyboard()) {
-                // Kept before it knew its step: it is the step's from now.
-                let record = self.active_storyboard_mut();
-                if let Some(mut read) = record.assembly().cloned() {
-                    read.step = Some(key.clone());
-                    record.set_assembly(Some(read));
-                }
-            }
             self.take_timing(&file)?;
             // Opening is not an edit: the timing it took is no undo step.
             self.active_storyboard_mut().clear_history();
             return Ok(());
         }
-        // A kept file that would not open has said why in the window's own
-        // card; the animatic opens from its assembly instead.
+        // None kept, or one that would not open, which has said why in the
+        // window's own card: the animatic opens from its assembly instead.
         self.file_error = None;
         self.open_assembly(&project.join(&file), &film)?;
         let record = self.active_storyboard_mut();
@@ -306,6 +381,22 @@ impl Session {
             record.set_assembly(Some(read));
         }
         Ok(())
+    }
+
+    /// The film's canon name, the project's element of kind film; else the
+    /// element the animatic's step makes its artifact under; else the
+    /// project's name; else the film's title.
+    pub(crate) fn film_name(&self) -> String {
+        if let Some(film) = &self.film_element {
+            return film.clone();
+        }
+        let read = self.active_storyboard().assembly();
+        let step = read.and_then(|read| read.step.as_ref()).and_then(|(chain, name)| self.steps.get(&format!("{chain}: {name}")));
+        match (step, self.project.as_deref()) {
+            (Some(step), Some(project)) => step.film(project),
+            (None, Some(project)) => project.file_name().map_or_else(|| self.film().title.clone(), |name| name.to_string_lossy().into_owned()),
+            _ => self.film().title.clone(),
+        }
     }
 
     /// Opening the animatic takes the timing its step names now, made in
@@ -327,11 +418,9 @@ impl Session {
         if self.project.is_none() {
             return Err("No project is open.".to_string());
         }
-        // A project with no animatic yet: its storyboard's save will make
-        // one, once the owner has said how the film's title and its sounds
-        // are asked for.
+        // A project with no animatic yet: this storyboard's save makes it.
         if self.active_storyboard().assembly().is_none() && self.steps.is_empty() {
-            return Err("This project has no animatic yet.".to_string());
+            return self.save_new_animatic();
         }
         let read = self.active_storyboard().assembly().cloned().ok_or("This storyboard was not opened from the project's animatic.")?;
         let (chain, name) = read.step.clone().ok_or("This storyboard was not opened from the project's animatic.")?;
@@ -358,7 +447,44 @@ impl Session {
             args: writer_args(&assembly),
         });
         let storyboard = self.active_id();
-        self.saving = Some(Saving { storyboard, since: Instant::now(), assembly, notes, refs, step, file: None, waiting: id, then_export: None });
+        self.saving = Some(Saving { storyboard, since: Instant::now(), assembly, notes, refs, step, file: None, waiting: id, then_export: None, new_step: None, then: Vec::new() });
+        Ok(())
+    }
+
+    /// A new film's first Save timing to the project: the timing as an
+    /// assembly, filed by Skills' writer, then the film's element and the
+    /// animatic's chain when they are not there yet, and the step itself,
+    /// as `build-animatic` records them. The film's name is the project's
+    /// canon film, or the project's name.
+    fn save_new_animatic(&mut self) -> Result<(), String> {
+        if self.saving.is_some() {
+            return Err("The timing is already being saved.".to_string());
+        }
+        let orders = self.chain_orders.ok_or("The project's animatic step is not known yet.")?;
+        let (assembly, notes) = self.timing(None)?;
+        let files = self.canon_files.clone();
+        let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned())?;
+        let film = self.film_name();
+        let step = AnimaticStep {
+            chain: ANIMATIC_CHAIN.to_string(),
+            name: ANIMATIC_STEP.to_string(),
+            artifact: format!("{film}: animatic"),
+            script: animatic_script(""),
+        };
+        let new_step = NewStep {
+            order: if orders.chain_there { orders.last_step + 1 } else { 1 },
+            chain_order: (!orders.chain_there).then_some(orders.last_chain + 1),
+            film: self.film_element.is_none().then_some(film),
+        };
+        let id = self.next_request();
+        self.outgoing.push(AppMessage::RunSkillScript {
+            id: id.clone(),
+            skill: "build-animatic".to_string(),
+            script: "write-assembly.py".to_string(),
+            args: writer_args(&assembly),
+        });
+        let storyboard = self.active_id();
+        self.saving = Some(Saving { storyboard, since: Instant::now(), assembly, notes, refs, step, file: None, waiting: id, then_export: None, new_step: Some(new_step), then: Vec::new() });
         Ok(())
     }
 
@@ -482,7 +608,13 @@ impl Session {
             }
             return;
         }
-        let Some(script) = crate::assembly::repoint(&saving.step.script, file) else {
+        // A new step names the filed assembly in Last order's form; an
+        // existing one has it swapped in.
+        let script = match &saving.new_step {
+            Some(_) => Some(animatic_script(file)),
+            None => crate::assembly::repoint(&saving.step.script, file),
+        };
+        let Some(script) = script else {
             let export = self.saving.take().is_some_and(|saving| saving.then_export.is_some());
             self.timing_refused("The animatic's step names no assembly.");
             if export {
@@ -490,9 +622,14 @@ impl Session {
             }
             return;
         };
+        let Some(saving) = self.saving.as_mut() else {
+            return;
+        };
         saving.file = Some(file.to_string());
         let refs = Value::Array(saving.refs.clone()).to_string();
         let step = saving.step.step_ref();
+        let new_step = saving.new_step.clone();
+        let artifact = saving.step.artifact.clone();
         let id = self.next_request();
         let mut tab = self.tab();
         if let Some(saving) = self.saving.as_mut() {
@@ -501,7 +638,64 @@ impl Session {
             saving.step.script = script.clone();
             tab = saving.storyboard.get().to_string();
         }
-        self.outgoing.push(AppMessage::EditStep { id, tab, step, script: Some(script), refs: Some(refs), order: None, skill: None, artifact: None });
+        let (order, skill, artifact, endpoint) = match &new_step {
+            Some(new_step) => (Some(new_step.order), Some("build-animatic".to_string()), Some(artifact), Some(ANIMATIC_ENDPOINT.to_string())),
+            None => (None, None, None, None),
+        };
+        let edit = AppMessage::EditStep { id: id.clone(), tab: tab.clone(), step, script: Some(script), refs: Some(refs), order, skill, artifact, endpoint };
+        // A new film's element and its animatic's chain are recorded first,
+        // when the project has neither, each once the host answers the one
+        // before; the step last.
+        let mut asks = Vec::new();
+        if let Some(new_step) = &new_step {
+            if let Some(film) = &new_step.film {
+                asks.push(AppMessage::EditElement { id: self.next_request(), tab: tab.clone(), name: film.clone(), kind: "film".to_string() });
+            }
+            if let Some(order) = new_step.chain_order {
+                asks.push(AppMessage::EditChain { id: self.next_request(), tab: tab.clone(), chain: ANIMATIC_CHAIN.to_string(), order });
+            }
+        }
+        asks.push(edit);
+        self.send_next(asks);
+    }
+
+    /// Sends the first of `asks` and keeps the rest for when the host
+    /// answers it; the save waits on its id.
+    fn send_next(&mut self, mut asks: Vec<AppMessage>) {
+        if asks.is_empty() {
+            return;
+        }
+        let first = asks.remove(0);
+        let id = match &first {
+            AppMessage::EditElement { id, .. } | AppMessage::EditChain { id, .. } | AppMessage::EditStep { id, .. } => id.clone(),
+            _ => String::new(),
+        };
+        if let Some(saving) = self.saving.as_mut() {
+            saving.waiting = id;
+            saving.since = Instant::now();
+            saving.then = asks;
+        }
+        self.outgoing.push(first);
+    }
+
+    /// The host recorded the film's element or the animatic's chain: the
+    /// next is asked for, or a card says why the timing was not saved.
+    pub fn canon_edited(&mut self, id: &str, error: Option<&str>) {
+        let Some(saving) = self.saving.as_mut().filter(|saving| saving.waiting == id) else {
+            return;
+        };
+        if let Some(error) = error {
+            let error = error.to_string();
+            let export = self.saving.take().is_some_and(|saving| saving.then_export.is_some());
+            self.timing_refused(&error);
+            if export {
+                self.step_export_failed(&error);
+            }
+            return;
+        }
+        let then = std::mem::take(&mut saving.then);
+        self.send_next(then);
+    }
     }
 
     /// The host edited the step: the storyboard reads the saved timing as
@@ -523,6 +717,10 @@ impl Session {
         let file = saving.file.clone().unwrap_or_default();
         let bytes = self.project.as_ref().and_then(|project| std::fs::read(project.join(&file)).ok()).unwrap_or_default();
         self.steps.insert(saving.step.key(), saving.step.clone());
+        // A new film's element is the project's film from now on.
+        if let Some(film) = saving.new_step.as_ref().and_then(|new_step| new_step.film.clone()) {
+            self.film_element = Some(film);
+        }
         // The storyboard that saved reads it, wherever the person is now.
         if self.timing_saved(saving.storyboard, saving.assembly, &saving.notes, &file, &protocol::fingerprint(&bytes))
             && let Some(index) = self.index_of(saving.storyboard)

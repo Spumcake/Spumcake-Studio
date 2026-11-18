@@ -24,6 +24,13 @@ pub struct Import {
     result: Receiver<Result<Imported, String>>,
 }
 
+/// An imported sound's canon artifact: under the film, named after its file,
+/// as the Studio session manager set on 2026-11-18, such as
+/// "Last order: door creak, sound".
+pub fn sound_artifact(film: &str, file_stem: &str) -> String {
+    format!("{film}: {file_stem}, sound")
+}
+
 /// A sound from outside the project, copied into `work/` and being
 /// filed into the project by the host: placed once it is filed.
 pub struct Filing {
@@ -175,7 +182,19 @@ impl Session {
         };
         let _ = std::fs::remove_file(&filing.copy);
         match (error, self.project.clone()) {
-            (None, Some(project)) if !file.is_empty() => self.begin_import(project.join(file), filing.storyboard, filing.at, filing.track),
+            (None, Some(project)) if !file.is_empty() => {
+                self.begin_import(project.join(file), filing.storyboard, filing.at, filing.track);
+                // Offered as canon, so the animatic can name it: under the
+                // film, after its file.
+                let stem = Path::new(&filing.name).file_stem().map_or_else(|| filing.name.clone(), |stem| stem.to_string_lossy().into_owned());
+                self.outgoing.push(protocol::AppMessage::Publish {
+                    tab: filing.storyboard.get().to_string(),
+                    artifact: sound_artifact(&self.film_name(), &stem),
+                    source: file.to_string(),
+                    from: Vec::new(),
+                    with: Vec::new(),
+                });
+            }
             (error, _) => self.keep_failed(filing.notice, "Sound not imported", error.unwrap_or_default()),
         }
     }
