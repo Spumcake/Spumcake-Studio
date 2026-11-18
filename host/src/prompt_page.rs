@@ -134,6 +134,8 @@ pub(crate) fn media_type(path: &str) -> &'static str {
         Some("webm") => "video/webm",
         Some("wav") => "audio/wav",
         Some("mp3") => "audio/mpeg",
+        Some("flac") => "audio/flac",
+        Some("aif" | "aiff") => "audio/aiff",
         Some("md" | "txt") => "text/plain",
         _ => "application/octet-stream",
     }
@@ -180,14 +182,21 @@ pub(crate) fn cell_endpoint(settings: &Settings, cell: &Cell) -> Option<String> 
     })
 }
 
+/// Why a sound cell does not run on an endpoint other than fal.ai.
+const SOUND_ON_FAL: &str = "Sound is made only through fal.ai.";
+
 /// The kind of request `request.py` makes for a cell on this endpoint.
 fn request_kind(settings: &Settings, cell: &Cell) -> Result<&'static str, String> {
     let endpoint = cell_endpoint(settings, cell).and_then(|id| settings.endpoint(&id).cloned()).ok_or("This cell has no endpoint. Choose one for it.")?;
     let image = cell.kind == protocol::IMAGE_KIND;
     let video = cell.kind == protocol::VIDEO_KIND;
+    let sound = cell.kind == protocol::SOUND_KIND;
     let has_references = !references(cell).is_empty();
     Ok(match endpoint.kind {
         EndpointKind::Fal => "fal",
+        // A voice take or a sound bed is made through fal, as Last order's
+        // were; anywhere else it would be sent as text.
+        _ if sound => return Err(String::from(SOUND_ON_FAL)),
         EndpointKind::Openrouter if image => "openrouter-image",
         EndpointKind::Openrouter if !video => "openrouter-text",
         EndpointKind::Openai if endpoint.address.contains("openai.com") && image => {
@@ -829,6 +838,31 @@ mod tests {
         settings.endpoints.clear();
         assert_eq!(endpoint_for(&settings, &[skill], "topaz/upscale/video/precision"), None, "a service the user has no endpoint for took one");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a voice take or a sound bed sent anywhere but fal, where it
+    /// would go as text, or its takes read as files of unknown kind.
+    #[test]
+    fn a_sound_cell_runs_through_fal() {
+        let mut settings = Settings::default();
+        let openrouter = settings.first_start("https://stand-in/v1").unwrap();
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("fal-1"), name: String::from("fal.ai"), kind: EndpointKind::Fal, address: String::from("https://fal.ai"), description: String::new() });
+        let at = ItemRef { path: String::from("work/Sound.sbx"), item: Some(String::from("c1")) };
+        let mut cell = draft(vec![CellPart::Text { text: String::from("The diner at closing: the fridge hums, a tap drips.") }]);
+        cell.kind = protocol::SOUND_KIND.to_string();
+        cell.model = Some(String::from("bytedance/seed-audio-1.0"));
+        cell.settings = Some(json!({ "output_format": "wav", "sample_rate": 48000 }));
+        cell.endpoint = Some(String::from("fal-1"));
+        let spec = draft_spec(&settings, &cell, &at).unwrap();
+        assert_eq!(spec["endpoint"]["kind"], "fal");
+        assert_eq!(spec["endpoint"]["model"], "bytedance/seed-audio-1.0");
+        assert_eq!(spec["endpoint"]["settings"]["sample_rate"], 48000);
+        assert_eq!(spec["setup"]["cell"]["item"], "c1");
+        cell.endpoint = Some(openrouter);
+        assert_eq!(draft_spec(&settings, &cell, &at).unwrap_err(), SOUND_ON_FAL, "a sound cell was sent to OpenRouter");
+        for (file, kind) in [("a.wav", "audio/wav"), ("a.mp3", "audio/mpeg"), ("a.flac", "audio/flac"), ("a.aiff", "audio/aiff")] {
+            assert_eq!(media_type(file), kind);
+        }
     }
 
     /// Catches a cell's rounds read from requests it did not make, out of

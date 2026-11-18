@@ -858,8 +858,9 @@ impl eframe::App for HostWindow {
             }
             crate::prices::local_name(&skills, model).unwrap_or_else(|| model.to_string())
         };
+        self.ask_plan_previews();
         if let Some(asking) = self.runner.asking()
-            && let Some(approved) = crate::plan_card::show(&ctx, asking, &model_name)
+            && let Some(approved) = crate::plan_card::show(&ctx, asking, &model_name, &self.previews.shown)
             && let Some(answer) = self.runner.answer(approved)
         {
             // A cell's cancelled plan goes to the cell, the assistant's to it.

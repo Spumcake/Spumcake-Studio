@@ -2,7 +2,8 @@
 //! and corner words, such as a video's first frame and "8.0 s" or a sound's
 //! waveform, asked once of the workspace that declared `previews` for its
 //! media type, or else of one whose `edits` covers it, and asked again when
-//! the file changes. The host decodes no media itself.
+//! the file changes. The plan card's references are asked the same way.
+//! The host decodes no media itself.
 
 use super::HostWindow;
 use crate::panel::ReferencePreview;
@@ -32,25 +33,48 @@ impl HostWindow {
         let root = self.project.as_ref().map(|project| project.folder.clone());
         for part in &cell.input {
             let CellPart::Path { path, media_type, .. } = part else { continue };
-            if media_type.is_empty() {
-                continue;
-            }
-            let key = crate::panel::reference_key(part);
             let file = match &root {
                 Some(root) if !std::path::Path::new(path).is_absolute() => root.join(path),
                 _ => std::path::PathBuf::from(path),
             };
-            let changed = std::fs::metadata(&file).and_then(|meta| meta.modified()).ok();
-            if self.previews.asked.get(&key) == Some(&changed) {
+            self.ask_preview(crate::panel::reference_key(part), &file, media_type);
+        }
+    }
+
+    /// Asks for a preview of each reference the plan card shows that is
+    /// not an image, such as a video's first frame, by its path.
+    pub(super) fn ask_plan_previews(&mut self) {
+        let Some(asking) = self.runner.asking() else { return };
+        let root = self.project.as_ref().map(|project| project.folder.clone());
+        for path in crate::plan_card::reference_paths(asking) {
+            let media_type = crate::prompt_page::media_type(&path);
+            if media_type.starts_with("image/") {
                 continue;
             }
-            let apps = self.apps.iter().filter(|started| !started.running.exited()).map(|started| (started.running.declared.previews.as_slice(), started.running.declared.edits.as_slice()));
-            let Some(found) = previewer(apps, media_type) else { continue };
-            // `found` counts only running workspaces; find its index among all.
-            let Some(app) = self.apps.iter().enumerate().filter(|(_, started)| !started.running.exited()).nth(found).map(|(app, _)| app) else { continue };
-            self.previews.asked.insert(key.clone(), changed);
-            self.send(app, HostMessage::Preview { id: key, path: file.display().to_string(), media_type: media_type.clone() });
+            let file = match &root {
+                Some(root) if !std::path::Path::new(&path).is_absolute() => root.join(&path),
+                _ => std::path::PathBuf::from(&path),
+            };
+            self.ask_preview(path, &file, media_type);
         }
+    }
+
+    /// Asks the workspace that previews `media_type` for `file`'s preview,
+    /// kept under `key`, when it is new or has changed since it was asked.
+    fn ask_preview(&mut self, key: String, file: &std::path::Path, media_type: &str) {
+        if media_type.is_empty() {
+            return;
+        }
+        let changed = std::fs::metadata(file).and_then(|meta| meta.modified()).ok();
+        if self.previews.asked.get(&key) == Some(&changed) {
+            return;
+        }
+        let apps = self.apps.iter().filter(|started| !started.running.exited()).map(|started| (started.running.declared.previews.as_slice(), started.running.declared.edits.as_slice()));
+        let Some(found) = previewer(apps, media_type) else { return };
+        // `found` counts only running workspaces; find its index among all.
+        let Some(app) = self.apps.iter().enumerate().filter(|(_, started)| !started.running.exited()).nth(found).map(|(app, _)| app) else { return };
+        self.previews.asked.insert(key.clone(), changed);
+        self.send(app, HostMessage::Preview { id: key, path: file.display().to_string(), media_type: media_type.to_string() });
     }
 
     /// Keeps the previews workspaces answered.
