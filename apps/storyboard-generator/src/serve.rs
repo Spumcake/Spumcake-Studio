@@ -723,7 +723,7 @@ impl Server {
             error: Some(error.to_string()),
         };
         let Some(project) = self.project.clone() else {
-            return failed(id, "The storyboard is not in a project.");
+            return failed(id, "No project is open.");
         };
         let path = project.join(&item.path);
         if item.item.as_deref() == Some(crate::board::ANIMATIC) {
@@ -1735,7 +1735,9 @@ mod tests {
         let folder = scratch("menu");
         let (mut server, _) = changed_in(&folder);
         let rows: Vec<String> = server.session.declare_menu().into_iter().map(|row| row.label).collect();
-        assert!(!rows.iter().any(|label| label.starts_with("Save")), "{rows:?}");
+        // The file's Save, Save as, and Save a copy; Save timing to the
+        // project saves the animatic's timing, not the file.
+        assert!(!rows.iter().any(|label| label.starts_with("Save") && !label.starts_with("Save timing")), "{rows:?}");
         let _ = std::fs::remove_dir_all(folder);
     }
 

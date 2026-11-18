@@ -213,12 +213,9 @@ impl Session {
         let Some(asked) = self.canon_asked.remove(id) else {
             return;
         };
-        if let Some(error) = error {
-            if let Asked::Open = asked {
-                let id = self.next_notice;
-                self.next_notice += 1;
-                self.keep_failed(id, "Animatic not opened", error);
-            }
+        // A read that failed is the host's to say, where it can say what to
+        // do; the storyboard stays as it is.
+        if error.is_some() {
             return;
         }
         match asked {
@@ -271,7 +268,7 @@ impl Session {
     /// assembly alone.
     fn show_step(&mut self, step: &AnimaticStep) -> Result<(), String> {
         let file = crate::assembly::named_in(&step.script).ok_or("The animatic's step names no assembly.")?;
-        let project = self.project.clone().ok_or("The storyboard is not in a project.")?;
+        let project = self.project.clone().ok_or("No project is open.")?;
         let key = (step.chain.clone(), step.name.clone());
         let ours = |record: &crate::record::Record| record.assembly().is_some_and(|read| read.step.as_ref() == Some(&key));
         if let Some(id) = self.storyboards.iter().find(|record| ours(record)).map(|record| record.id()) {
@@ -280,11 +277,11 @@ impl Session {
         }
         let film = step.film(&project);
         let kept = project.join(super::WORK).join(format!("{film}.smx"));
-        if kept.is_file() {
-            let blank = self.untouched_blank();
-            if !self.open_path(&kept) {
-                return Err(self.file_error.as_ref().map_or_else(String::new, |error| error.reason.clone()));
-            }
+        // Only a storyboard that read an animatic's timing is kept as the
+        // animatic; any other file of that name is left alone.
+        let timed = std::fs::read(&kept).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).is_some_and(|stored| stored.get("assembly").is_some_and(|read| !read.is_null()));
+        let blank = self.untouched_blank();
+        if timed && self.open_path(&kept) {
             self.drop_blank(blank);
             if !ours(self.active_storyboard()) {
                 // Kept before it knew its step: it is the step's from now.
@@ -294,8 +291,14 @@ impl Session {
                     record.set_assembly(Some(read));
                 }
             }
-            return self.take_timing(&file);
+            self.take_timing(&file)?;
+            // Opening is not an edit: the timing it took is no undo step.
+            self.active_storyboard_mut().clear_history();
+            return Ok(());
         }
+        // A kept file that would not open has said why in the window's own
+        // card; the animatic opens from its assembly instead.
+        self.file_error = None;
         self.open_assembly(&project.join(&file), &film)?;
         let record = self.active_storyboard_mut();
         if let Some(mut read) = record.assembly().cloned() {
@@ -308,16 +311,12 @@ impl Session {
     /// Opening the animatic takes the timing its step names now, made in
     /// Studio or in another tool, as Follow would, with no card.
     fn take_timing(&mut self, file: &str) -> Result<(), String> {
-        let read = self.active_storyboard().assembly().cloned();
-        match read {
+        match self.active_storyboard().assembly() {
             Some(read) if read.path != file => {
                 self.retimed = Some((self.active_id(), file.to_string()));
                 self.follow_retime()
             }
-            Some(_) => Ok(()),
-            // A storyboard with no timing read: its drawing is kept, and the
-            // step's timing is read as its own.
-            None => Err("This storyboard was not opened from the project's animatic.".to_string()),
+            _ => Ok(()),
         }
     }
 
@@ -325,9 +324,12 @@ impl Session {
     /// and asks the host to file it; once filed, the step is pointed at it.
     /// The error says why it cannot be saved.
     pub fn save_timing(&mut self) -> Result<(), String> {
-        let project = self.project.clone().ok_or("The storyboard is not in a project.")?;
+        if self.project.is_none() {
+            return Err("No project is open.".to_string());
+        }
         // A project with no animatic yet: its storyboard's save will make
-        // one, once Studio can record the step build-animatic records.
+        // one, once the owner has said how the film's title and its sounds
+        // are asked for.
         if self.active_storyboard().assembly().is_none() && self.steps.is_empty() {
             return Err("This project has no animatic yet.".to_string());
         }
@@ -347,7 +349,6 @@ impl Session {
             }
         }
         let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned())?;
-        let _ = project;
         // Skills' writer writes and files it, so its format stays Skills'.
         let id = self.next_request();
         self.outgoing.push(AppMessage::RunSkillScript {
@@ -366,6 +367,9 @@ impl Session {
     /// the timing when it differs. The take is then offered for publishing
     /// on the publish card. Returns the step being run.
     pub(crate) fn export_by_step(&mut self) -> Result<String, String> {
+        if self.active_storyboard().assembly().is_none() && self.steps.is_empty() {
+            return Err("This project has no animatic yet.".to_string());
+        }
         let read = self.active_storyboard().assembly().cloned().ok_or("This storyboard was not opened from the project's animatic.")?;
         let (chain, name) = read.step.clone().ok_or("This storyboard was not opened from the project's animatic.")?;
         let step = self.steps.get(&format!("{chain}: {name}")).cloned().ok_or("The project's animatic step is not known yet.")?;
@@ -448,7 +452,7 @@ impl Session {
         self.keep_failed(id, "Timing not saved", reason);
     }
 
-    /// Open animatic, Follow, or Publish hold failed, by hand: a card says
+    /// Follow or Publish hold failed, by hand: a card says
     /// why, under `text`, or alone when there is none.
     pub fn failed_by_hand(&mut self, text: Option<&str>, reason: &str) {
         let id = self.next_notice;
@@ -497,7 +501,7 @@ impl Session {
             saving.step.script = script.clone();
             tab = saving.storyboard.get().to_string();
         }
-        self.outgoing.push(AppMessage::EditStep { id, tab, step, script: Some(script), refs: Some(refs) });
+        self.outgoing.push(AppMessage::EditStep { id, tab, step, script: Some(script), refs: Some(refs), order: None, skill: None, artifact: None });
     }
 
     /// The host edited the step: the storyboard reads the saved timing as
@@ -571,7 +575,7 @@ impl Session {
     /// its drawing on the frames it held.
     pub fn follow_retime(&mut self) -> Result<(), String> {
         let file = self.retimed().map(str::to_string).ok_or("The animatic was not retimed elsewhere.")?;
-        let project = self.project.clone().ok_or("No project folder.")?;
+        let project = self.project.clone().ok_or("No project is open.")?;
         // A gesture still open is committed first, so Follow keeps it.
         self.settle();
         let bytes = std::fs::read(project.join(&file)).map_err(|error| crate::store::reason(&error))?;

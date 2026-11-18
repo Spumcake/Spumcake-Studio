@@ -1,7 +1,7 @@
 //! The film's Sound tracks: sounds placed on the film, trimmed, at a volume.
 //! Like the Shots track's clips they are part of the film, so every change
 //! is one undo step with the film before and after. The sound itself is a
-//! file in the project's `sounds/` folder, which `crate::sounds` decodes;
+//! file where it is in the project, which `crate::sounds` decodes;
 //! the film keeps only where and how it plays.
 //!
 //! Every place, trim, and length is in film frames, as `media::Track` takes

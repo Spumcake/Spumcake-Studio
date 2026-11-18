@@ -215,7 +215,7 @@ fn last_order_on_a_test_copy() {
         ("Claude Code's retime with Studio's files gone", claude_codes_retime_needs_none_of_studios_files),
         ("the step found by its skill", the_step_is_found_by_its_skill),
         ("drawing reaches the animatic through canon", drawing_reaches_the_animatic_through_canon),
-        ("import and export the Skills way", import_and_export_the_skills_way),
+        ("import and export through the project", import_and_export_through_the_project),
         ("playback is what the step's take is", playback_is_the_take),
     ];
     for (name, check) in checks {
@@ -541,7 +541,7 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
 
 /// Check 10: a sound from outside is filed into the project, never into
 /// sounds/, and Export animatic video runs the step, never writing exports/.
-fn import_and_export_the_skills_way(copy: &Copy) {
+fn import_and_export_through_the_project(copy: &Copy) {
     let (mut server, tab) = opened(copy);
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
     assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");

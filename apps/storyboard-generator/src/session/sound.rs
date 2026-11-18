@@ -84,13 +84,6 @@ impl Session {
         self.sounds.tracks(self.project.as_deref(), &film)
     }
 
-    /// The files the active storyboard's sounds name that are missing or
-    /// cannot be read.
-    pub fn absent_sounds(&mut self) -> Vec<String> {
-        let film = self.film().clone();
-        self.sounds.absent(self.project.as_deref(), &film)
-    }
-
     /// The peaks of the film's sound over `frames` frames from `from`, every
     /// unmuted Sound track mixed, from the sounds already decoded.
     pub fn film_sound_peaks(&self, from: u32, frames: u32) -> Vec<f32> {

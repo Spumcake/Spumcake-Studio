@@ -485,6 +485,14 @@ impl Record {
         self.redo.clear();
     }
 
+    /// Forgets every undo and redo step, as a storyboard just opened has
+    /// none.
+    pub fn clear_history(&mut self) {
+        self.group = None;
+        self.undo.clear();
+        self.redo.clear();
+    }
+
     pub fn undo_len(&self) -> usize {
         self.undo.len()
     }

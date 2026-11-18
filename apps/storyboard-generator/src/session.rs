@@ -760,7 +760,7 @@ impl Session {
     /// file, or none for an untouched storyboard that has nothing to write.
     pub(crate) fn write_into_project(&mut self, id: DrawingId) -> Result<Option<PathBuf>, String> {
         let Some(project) = self.project.clone() else {
-            return Err("No project folder.".to_string());
+            return Err("No project is open.".to_string());
         };
         // A workspace's files are kept in the project's `work/`.
         let folder = project.join(WORK);

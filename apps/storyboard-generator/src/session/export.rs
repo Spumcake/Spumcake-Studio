@@ -39,7 +39,7 @@ impl Session {
     /// Why the animatic cannot be exported now, if it cannot.
     fn export_refusal(&mut self) -> Option<String> {
         if self.project.is_none() {
-            return Some("The storyboard is not in a project.".to_string());
+            return Some("No project is open.".to_string());
         }
         if self.film().clips.is_empty() {
             return Some("The film has no clips to export.".to_string());
@@ -86,11 +86,13 @@ impl Session {
     /// The export's card while the step runs, or while the timing is saved
     /// before it.
     pub(crate) fn export_notice(&self) -> Option<Notice> {
-        let step = self.stepping.as_ref().map(|stepping| stepping.step.key()).or_else(|| self.saving.as_ref().filter(|saving| saving.then_export.is_some()).map(|saving| saving.step.key()))?;
+        if !self.exporting_by_step() {
+            return None;
+        }
         Some(Notice {
             id: CARD.to_string(),
             text: "Exporting animatic video".to_string(),
-            detail: step,
+            detail: String::new(),
             progress: None,
             state: NoticeState::Working,
             actions: Vec::new(),
@@ -101,7 +103,7 @@ impl Session {
     /// The animatic as a file for another workspace's cell: the step's take
     /// itself, where it is in the project.
     pub fn render_animatic(&self) -> Result<(String, String), String> {
-        let project = self.project.as_deref().ok_or("The storyboard is not in a project.")?;
+        let project = self.project.as_deref().ok_or("No project is open.")?;
         let exported = self.active_storyboard().exported().ok_or("The animatic has not been exported yet.")?;
         crate::export::render(project, exported)
     }

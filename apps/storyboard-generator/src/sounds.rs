@@ -135,18 +135,6 @@ impl Library {
         }
         out
     }
-
-    /// The files the film's sounds name that are not there, or cannot be
-    /// read, each once.
-    pub fn absent(&mut self, project: Option<&Path>, film: &Film) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for (_, clip) in film.sounds() {
-            if self.loaded(project, &clip.file).is_none() && !out.contains(&clip.file) {
-                out.push(clip.file.clone());
-            }
-        }
-        out
-    }
 }
 
 /// A sound's file on disk: relative to the project, or as it is when the

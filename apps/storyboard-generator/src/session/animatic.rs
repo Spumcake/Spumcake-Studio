@@ -32,9 +32,8 @@ pub(crate) fn hold_stamp(record: &Record, clip: &Clip, start: u32) -> String {
 }
 
 /// A hold's rough board, as `build-animatic` names it, under the film as
-/// Last order names a shot's images: "Last order: rough board, Shot 2".
-/// Proposed to the owner on 2026-11-17 in place of the approved
-/// "<shot>: rough board", not yet approved.
+/// Last order names a shot's images: "Last order: rough board, Shot 2",
+/// as the owner approved on 2026-11-17.
 pub fn rough_board(film: &str, shot: &str) -> String {
     format!("{film}: rough board, {shot}")
 }
@@ -242,7 +241,7 @@ impl Session {
     /// show. The storyboard in `work/` is never named as an input. Returns
     /// the artifact asked for, or why not.
     pub fn publish_hold(&mut self) -> Result<String, String> {
-        let project = self.project.clone().ok_or("The storyboard is not in a project.")?;
+        let project = self.project.clone().ok_or("No project is open.")?;
         let nothing = || "that hold has nothing to publish".to_string();
         let view = self.view();
         let clip_id = view.clip.ok_or_else(nothing)?;
@@ -775,6 +774,36 @@ mod tests {
     }
 
     #[test]
+    fn a_file_of_the_film_s_name_that_read_no_timing_is_left_alone() {
+        let dir = project("kept-other");
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        std::fs::write(dir.join("work/Last order.smx"), b"{}").unwrap();
+        let mut session = Session::new();
+        session.set_project(&dir);
+        session.show_animatic();
+        answer_steps(&mut session, "prompts/resources/2026-11-14_16-07-animatic-assembly.json");
+        assert_eq!(session.storyboards.len(), 1);
+        assert!(session.active_storyboard().assembly().is_some(), "the animatic did not open");
+        assert!(session.kept_notices.is_empty(), "a card was shown");
+        assert_eq!(std::fs::read(dir.join("work/Last order.smx")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn a_failed_read_on_opening_shows_no_card() {
+        let dir = project("read-failed");
+        let mut session = Session::new();
+        session.set_project(&dir);
+        session.show_animatic();
+        for message in session.take_outgoing() {
+            if let protocol::AppMessage::ReadCanon { id, .. } = message {
+                session.canon_rows(&id, &[], Some("sqlite3.OperationalError: no such table: step"));
+            }
+        }
+        assert!(session.kept_notices.is_empty(), "the host's error reached a card");
+        assert_eq!(session.storyboards.len(), 1);
+    }
+
+    #[test]
     fn a_project_with_no_animatic_keeps_its_blank() {
         let dir = project("none");
         let mut session = Session::new();
@@ -789,6 +818,9 @@ mod tests {
         assert!(session.active_storyboard().assembly().is_none());
         assert!(session.kept_notices.is_empty(), "a card was shown");
         assert_eq!(session.save_timing().unwrap_err(), "This project has no animatic yet.");
+        // With a shot to export, it says why it cannot.
+        session.add_clip(None, 24).unwrap();
+        assert_eq!(session.start_export().unwrap_err(), "This project has no animatic yet.");
     }
 
     #[test]
