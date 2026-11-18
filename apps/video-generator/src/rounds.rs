@@ -5,7 +5,7 @@
 //! for each take still being made, or one for a round that failed. A take
 //! shown in the working area is drawn as any take of the gallery is.
 
-use protocol::{FilmPending, Item, Round, RoundState, TakeFile};
+use protocol::{FilmPending, Round, RoundState, TakeFile};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -22,9 +22,6 @@ pub const SLOTS: [&str; 2] = ["Start frame", "End frame"];
 /// What "Add reference" offers: images, videos, and sounds.
 pub const REFERENCE_TYPES: [&str; 8] =
     ["image/png", "image/jpeg", "image/webp", "video/mp4", "video/quicktime", "audio/wav", "audio/mpeg", "audio/flac"];
-
-/// How an item of the tab's file names a take: this, then its path.
-const TAKE_ITEM: &str = "take ";
 
 /// One tile of the filmstrip a round made: a take, or a place for one.
 #[derive(Debug, Clone)]
@@ -55,9 +52,7 @@ pub struct Read {
     pub file: PathBuf,
     /// What `media` says it is, when it opened.
     pub info: Option<media::Info>,
-    /// `protocol::fingerprint` of its bytes, as its item declares it, and
-    /// their sha256, by which its notes are kept.
-    pub fingerprint: String,
+    /// The sha256 of its bytes, by which its notes are kept.
     pub sha256: String,
 }
 
@@ -156,7 +151,7 @@ impl Rounds {
     }
 
     /// Reads each take's file the strip does not hold yet, or that changed
-    /// on disk: what it is, through `media`, and its fingerprint. A path is
+    /// on disk: what it is, through `media`, and its sha256. A path is
     /// read from `root`, the project, unless it is whole.
     pub fn read_files(&mut self, root: &Path) {
         let paths: Vec<String> = self.tiles.iter().filter_map(|tile| tile.path().map(str::to_string)).collect();
@@ -166,10 +161,9 @@ impl Rounds {
             if self.reads.get(&path).is_some_and(|read| read.stamp == stamp) {
                 continue;
             }
-            let (fingerprint, sha256) =
-                std::fs::read(&file).map(|bytes| (protocol::fingerprint(&bytes), layers::link::sha256(&bytes))).unwrap_or_default();
+            let sha256 = std::fs::read(&file).map(|bytes| layers::link::sha256(&bytes)).unwrap_or_default();
             let info = media::Video::open(&file).ok().map(|video| video.info());
-            self.reads.insert(path, Read { stamp, file, info, fingerprint, sha256 });
+            self.reads.insert(path, Read { stamp, file, info, sha256 });
         }
     }
 
@@ -240,44 +234,6 @@ impl Rounds {
     pub fn shape(&self) -> Option<(u32, u32)> {
         self.tiles.iter().filter_map(Tile::path).filter_map(|path| self.reads.get(path)).find_map(|read| read.info).map(|info| (info.width, info.height))
     }
-
-    /// Each take as an item of the tab's file, with its file's fingerprint.
-    pub fn items(&self) -> Vec<Item> {
-        let mut items: Vec<Item> = Vec::new();
-        for tile in &self.tiles {
-            let Some(file) = &tile.file else {
-                continue;
-            };
-            let Some(read) = self.reads.get(&file.path).filter(|read| !read.fingerprint.is_empty()) else {
-                continue;
-            };
-            let id = take_item(&file.path);
-            if items.iter().any(|item| item.id == id) {
-                continue;
-            }
-            items.push(Item {
-                id,
-                name: crate::session::file_title(Path::new(&file.path)),
-                media_types: vec![file.media_type.clone()],
-                fingerprint: read.fingerprint.clone(),
-                made: None,
-            });
-        }
-        items
-    }
-
-    /// A take's file and fingerprint, by its item's id.
-    pub fn take_by_item(&self, id: &str) -> Option<(TakeFile, String)> {
-        let path = id.strip_prefix(TAKE_ITEM)?;
-        let tile = self.tiles.iter().find(|tile| tile.path() == Some(path))?;
-        let read = self.reads.get(path).filter(|read| !read.fingerprint.is_empty())?;
-        Some((tile.file.clone()?, read.fingerprint.clone()))
-    }
-}
-
-/// How an item of the tab's file names the take at `path`.
-pub fn take_item(path: &str) -> String {
-    format!("{TAKE_ITEM}{path}")
 }
 
 /// The model as a round's label reads it: its name, "MiniMax H3 Max", or

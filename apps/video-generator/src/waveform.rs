@@ -30,8 +30,8 @@ pub enum Heard {
     Silent,
 }
 
-/// The sounds decoded, by the key their file is known by (its sha256 or
-/// fingerprint), and those still being decoded.
+/// The sounds decoded, by the key their file is known by, its sha256, and
+/// those still being decoded.
 pub struct Sounds {
     jobs: Sender<(String, PathBuf)>,
     done: Receiver<(String, Heard)>,

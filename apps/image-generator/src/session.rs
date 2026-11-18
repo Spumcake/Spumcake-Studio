@@ -3,11 +3,10 @@
 //! filmstrip's clicks, files, and the project.
 //!
 //! Inside a project, which the host names with `project`, every image is
-//! written into the project's folder by itself, a second after it changes,
-//! and before its tab closes, a `keep` is answered, or the host quits, as
-//! Recipe Creation's recipes are; in a Skills project, into its `work/`
-//! folder, without where it was opened from. Save and Save As are offered
-//! only outside a project.
+//! written into the project's `work/` folder by itself, without where it
+//! was opened from, a second after it changes, and before its tab closes,
+//! a `keep` is answered, or the host quits, as Recipe Creation's recipes
+//! are. Save and Save As are offered only with no project open.
 //!
 //! Each tab has cells, the Prompt page's, and the rounds the host says
 //! they made, with `takes`, shown on the filmstrip and never kept.
@@ -21,13 +20,14 @@ use crate::layered::{Blend, Curves, Grade, Kind, LayeredImage, Pixels};
 use crate::rounds::{Rounds, View};
 use crate::text::{Align, Face, Style};
 use protocol::{
-    AppMessage, Ask, AskButton, Cell, CellPart, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage, Item,
+    AppMessage, Ask, AskButton, Cell, CellPart, ContentsKind, DocumentCamera, FileFilter, FileKind, HostMessage,
     ItemRef, PanelSide, PropValue, RasterGesture, RasterTool, RasterView, TextEditing, Thumbnail,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod filing;
 mod publish;
 mod requests;
 use publish::notices;
@@ -58,13 +58,6 @@ const FIT_MARGIN: f64 = 40.0;
 /// The largest a preview the host asks for is, in pixels: a reference
 /// row's thumbnail, drawn sharp at twice its size.
 const PREVIEW_SIZE: [u32; 2] = [160, 96];
-/// This workspace's id, as its renders are filed under it.
-const OWNER: &str = "image-generator";
-/// How an item of a tab's file names a marked image a next round sends,
-/// and a layer written out: these, then its fingerprint, or its layer's
-/// id and its image's name.
-const MARKED_ITEM: &str = "marked ";
-const LAYER_ITEM: &str = "layer ";
 /// The words a next round's prompt gives its notes, and the role of the
 /// marked image it sends, as ig-notes-next-round shows them.
 const NOTES_WORDS: &str = "Notes on the last round";
@@ -232,17 +225,8 @@ pub struct Image {
     /// The rounds its cells made, as the host last sent them, and the take
     /// shown, if one is. Never kept in its file.
     pub rounds: Rounds,
-    /// What the host was last told of its cells and of its file's items.
+    /// What the host was last told of its cells.
     cells_sent: Option<(Vec<Cell>, Option<String>)>,
-    items_sent: Option<(String, Vec<Item>)>,
-    /// The marked images a next round sends, by item id, with their
-    /// fingerprints, and the layers written out, by image name and layer
-    /// id, declared as items while the program runs.
-    marked: Vec<(String, String)>,
-    written_out: Vec<(String, u64)>,
-    /// A written-out layer's fingerprint, by its image and layer, and the
-    /// pixels' generation it was taken at.
-    layer_prints: std::collections::HashMap<(u64, u64), (u64, String)>,
     /// Publishing, while the program runs and never in the file: the
     /// takes beneath the last edit refused, which "Ask the assistant"
     /// names; the image a `publish` was sent for; and each image
@@ -331,10 +315,8 @@ pub struct Session {
     /// The curve point last moved, for its input and output.
     pub curve_point: Option<[f64; 2]>,
     pub project: Option<PathBuf>,
-    /// The host says the project is a Skills project: images are kept in
-    /// its `work/` folder, and what leaves the workspace is filed by its
-    /// runner.
-    pub skills: bool,
+    /// The files written for drafts, being filed.
+    filings: Vec<filing::Filing>,
     /// Where images and thumbnails for the host are written, and whether
     /// it is a folder of this session's own in memory, which stays when a
     /// project is named.
@@ -395,7 +377,7 @@ impl Session {
             curve_channel: 0,
             curve_point: None,
             project: None,
-            skills: false,
+            filings: Vec::new(),
             in_memory: memory.is_some(),
             display_failed: false,
             cache: memory.unwrap_or_else(scratch_folder),
@@ -520,8 +502,9 @@ impl Session {
                 }
                 self.note_quit(&mut out);
             }
-            HostMessage::Project { folder, skills } => {
-                self.skills = skills;
+            // Every project is organized one way, so nothing but its folder
+            // is read.
+            HostMessage::Project { folder, .. } => {
                 let folder = PathBuf::from(folder);
                 let folder = folder.canonicalize().unwrap_or(folder);
                 // Images in memory stay where they are; otherwise they go
@@ -553,7 +536,6 @@ impl Session {
                 }
                 self.project = Some(folder);
                 out.extend(self.emit());
-                out.extend(self.items_due());
             }
             // An image file from outside the project opens nothing.
             HostMessage::Open { path: Some(path) }
@@ -679,14 +661,13 @@ impl Session {
                     Ok(path) => AppMessage::Kept { tab, path: path.map(|path| path.display().to_string()), error: None },
                     Err(error) => AppMessage::Kept { tab, path: None, error: Some(error) },
                 });
-                // A file written for the first time has items to declare.
-                out.extend(self.items_due());
             }
             HostMessage::Claim { id, path } => {
                 let path = Path::new(&path);
                 out.push(AppMessage::Claimed { id, yours: files::is_ipx(path) && self.in_project(path) });
             }
-            HostMessage::Render { id, item, media_type, .. } => out.push(self.render(id, &item, &media_type)),
+            // Nothing is an item: the protocol may still ask.
+            HostMessage::Render { id, .. } => out.push(self.render(id)),
             HostMessage::Preview { id, path, media_type } => out.push(self.preview(id, &path, &media_type)),
             HostMessage::Takes { cell, rounds } => {
                 if let Some(id) = cell.item {
@@ -718,6 +699,17 @@ impl Session {
                 let file = if error.is_some() { String::new() } else { file };
                 self.published(&tab, file, version, &mut out);
             }
+            // A draft's file filed.
+            HostMessage::Filed { id, file, error } => {
+                // A layer written out: only a refusal is said.
+                if id.starts_with(requests::WRITTEN_OUT) {
+                    if let Some(error) = error.filter(|error| !error.is_empty()) {
+                        out.push(notice("The layer could not be filed", &error));
+                    }
+                } else {
+                    self.filed_for_draft(&id, &file, error, &mut out);
+                }
+            }
             _ => {}
         }
         if self.finish_writes(false) {
@@ -741,9 +733,6 @@ impl Session {
         if self.finish_writes(false) {
             out.extend(self.declared());
         }
-        // A file written for the first time, or a written-out layer
-        // painted on since, changes what the host is told of its items.
-        out.extend(self.items_due());
         out
     }
 
@@ -848,22 +837,20 @@ impl Session {
         })
     }
 
-    /// Where a tab never written goes: the project's folder, or in a
-    /// Skills project its `work/` folder, as the contract with
-    /// Spumcake-Skills keeps workspace files.
+    /// Where a tab never written goes: the project's `work/` folder, as the
+    /// contract with Spumcake-Skills keeps workspace files.
     fn work_folder(&self) -> Option<PathBuf> {
-        let project = self.project.as_ref()?;
-        Some(if self.skills { project.join("work") } else { project.clone() })
+        Some(self.project.as_ref()?.join("work"))
     }
 
     /// What a tab's file keeps besides its images: its cells, the notes
-    /// marked on its takes, and, outside a Skills project, where it was
-    /// opened from. In one, that record is Spumcake-Skills', so it is never
-    /// written.
+    /// marked on its takes, and, with no project open, where it was opened
+    /// from. Inside a project that record is Spumcake-Skills', so it is
+    /// never written.
     fn extra(&self, image: &Image) -> files::Extra {
         let gallery = &image.gallery;
         files::Extra {
-            source: if self.skills { None } else { gallery.source.clone() },
+            source: if self.project.is_some() { None } else { gallery.source.clone() },
             cells: gallery.cells.clone(),
             cell: gallery.cell.clone(),
             take_notes: image.rounds.notes_to_keep(),
@@ -901,10 +888,6 @@ impl Session {
             thumbs_owed: false,
             rounds: Rounds::default(),
             cells_sent: None,
-            items_sent: None,
-            marked: Vec::new(),
-            written_out: Vec::new(),
-            layer_prints: std::collections::HashMap::new(),
             refused: Vec::new(),
             publishing: None,
             published: std::collections::HashMap::new(),
@@ -2012,13 +1995,7 @@ impl Session {
                 };
                 let written = layer_png(self.images[index].doc(), node).and_then(|(_, png)| files::write_atomic(&path, &png));
                 match written {
-                    Ok(()) => {
-                        let name = self.images[index].gallery.frame().name.clone();
-                        let image = &mut self.images[index];
-                        if !image.written_out.contains(&(name.clone(), node)) {
-                            image.written_out.push((name, node));
-                        }
-                    }
+                    Ok(()) => {}
                     Err(reason) => out.push(notice("The image could not be exported", &reason)),
                 }
             }
@@ -2233,7 +2210,7 @@ impl Session {
         // The writer's earlier writes land first, so none lands after this.
         self.finish_writes(true);
         let Some(folder) = self.work_folder() else {
-            return Err("No project folder.".into());
+            return Err("No project is open.".into());
         };
         let Some(image) = self.images.get(index) else {
             return Ok(None);
@@ -3111,6 +3088,13 @@ pub fn respond(session: &mut Session, line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host's `project` for `folder`, read from its line, so it says
+    /// nothing but the folder: every project is organized one way.
+    fn in_project(folder: &Path) -> HostMessage {
+        let line = serde_json::json!({ "type": "project", "folder": folder.display().to_string() }).to_string();
+        protocol::parse_host_message(&line).expect("a project")
+    }
     use protocol::ToolItem;
     use serde_json::json;
 
@@ -3300,12 +3284,12 @@ mod tests {
         let folder = folder.canonicalize().unwrap();
         let mut session = Session::launch();
         let _ = session.greeting();
-        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        session.handle(in_project(&folder));
         let labels: Vec<String> = declare::menu(&session).into_iter().map(|row| row.label).collect();
         assert!(!labels.iter().any(|label| label.starts_with("Save")), "{labels:?}");
         command(&mut session, "add_layer", json!({}));
         let replies = session.handle(HostMessage::Keep { tab: "1".into() });
-        let expected = folder.join("Untitled Image.ipx").display().to_string();
+        let expected = folder.join("work/Untitled Image.ipx").display().to_string();
         assert!(replies.iter().any(|reply| matches!(reply, AppMessage::Kept { path: Some(path), error: None, .. } if *path == expected)));
         assert_eq!(files::read_ipx(Path::new(&expected)).unwrap().images[0].image.nodes.len(), 2);
 
@@ -3568,7 +3552,7 @@ mod tests {
         let folder = folder.canonicalize().unwrap();
         let mut session = Session::launch();
         let _ = session.greeting();
-        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        session.handle(in_project(&folder));
         command(&mut session, "tool", json!({ "tool": "brush" }));
         stroke(&mut session, [100.0, 100.0], [300.0, 100.0]);
         // Due, a write waits for the program to be idle, never a message.
@@ -3799,7 +3783,7 @@ mod tests {
         let folder = folder.canonicalize().unwrap();
         let mut session = Session::launch();
         let _ = session.greeting();
-        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        session.handle(in_project(&folder));
         command(&mut session, "film_new", json!({}));
         command(&mut session, "add_layer", json!({}));
         command(&mut session, "film_duplicate", json!({ "image": 1 }));
@@ -3807,11 +3791,11 @@ mod tests {
         command(&mut session, "film_rename", json!({ "image": 0, "value": "Sky" }));
         command(&mut session, "film_select", json!({ "value": 1 }));
         let replies = session.handle(HostMessage::Keep { tab: "1".into() });
-        let path = folder.join("Untitled Image.ipx");
+        let path = folder.join("work/Untitled Image.ipx");
         assert!(replies.iter().any(|reply| matches!(reply, AppMessage::Kept { path: Some(_), error: None, .. })));
 
         let mut again = Session::restored();
-        again.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        again.handle(in_project(&folder));
         let messages = again.handle(HostMessage::Open { path: Some(path.display().to_string()) });
         let film = film_of(&messages);
         let names: Vec<&str> = film.items.iter().map(|item| item.name.as_str()).collect();
@@ -4111,7 +4095,7 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let folder = folder.canonicalize().unwrap();
         let mut session = patterned(64, 48, 2, 1, 0);
-        session.handle(HostMessage::Project { folder: folder.display().to_string(), skills: false });
+        session.handle(in_project(&folder));
         preview(&mut session, "grade_exposure", PropValue::Number(0.75));
         session.take_live();
         session.images[0].unwritten_since = Some(Instant::now() - WRITE_AFTER * 2);
