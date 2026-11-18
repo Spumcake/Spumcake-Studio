@@ -848,8 +848,18 @@ impl eframe::App for HostWindow {
         self.draw_settings(&ctx, frame);
         // What the runner asks the person, over the conversation.
         self.runner.wake_with(&ctx);
+        // A model's name as the card shows it: its endpoint's list's, or a
+        // skill's models.json, or its id as it is.
+        let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&self.settings.skill_folders));
+        let model_name = |model: &str| {
+            let shown = crate::cells::model_name(&ctx, model);
+            if shown != model.rsplit('/').next().unwrap_or(model) {
+                return shown;
+            }
+            crate::prices::local_name(&skills, model).unwrap_or_else(|| model.to_string())
+        };
         if let Some(asking) = self.runner.asking()
-            && let Some(approved) = crate::plan_card::show(&ctx, asking)
+            && let Some(approved) = crate::plan_card::show(&ctx, asking, &model_name)
             && let Some(answer) = self.runner.answer(approved)
         {
             // A cell's cancelled plan goes to the cell, the assistant's to it.
