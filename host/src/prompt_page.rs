@@ -401,13 +401,17 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
     if let Some(file) = step.and_then(|step| canon.step_artifacts.get(&(step.chain.clone(), step.step.clone()))).and_then(|artifact| canon.files.get(artifact)) {
         seeds.insert(file.clone());
     }
-    // Then the rounds a found take was finished through, both ways: a
-    // report made from one file of its own media alone, as a retime or an
-    // upscale is from its take, joins that file's rounds, and a found round
-    // so made brings the round before it. A take made from several files of
-    // its media, such as a keyframe from its sheets, stops there, and a
-    // report that names another step, or another cell, is that one's own.
-    let lone_source = |record: &Value| -> Option<String> {
+    // Then the rounds a found take was finished through, as a retime or an
+    // upscale is: a request with no prompt that sends one file of its own
+    // media, the take it finishes. Each found take brings what was finished
+    // from it, and each found round the take it finished, back to the round
+    // that made it; never the other rounds made from that one, nor a take
+    // made with a prompt, such as an image made from another image, and
+    // never a report that names another step or another cell.
+    let finished_from = |record: &Value| -> Option<String> {
+        if record.get("prompt").and_then(Value::as_str).is_some_and(|prompt| !prompt.trim().is_empty()) {
+            return None;
+        }
         let media = media_type(outputs_of(record).first()?);
         let same: Vec<&str> = record.get("references").and_then(Value::as_array).into_iter().flatten().filter_map(|reference| reference.get("file").and_then(Value::as_str)).filter(|path| media_type(path) == media).collect();
         if let [only] = same.as_slice() { Some(only.to_string()) } else { None }
@@ -420,29 +424,20 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
         let other_cell = record.pointer("/setup/cell/item").and_then(Value::as_str).is_some_and(|item| item != cell);
         !other_cell && named("step", step.map(|step| step.step.as_str())) && (step.is_none() || named("chain", step.map(|step| step.chain.as_str())))
     };
-    loop {
-        // What is found so far: the seeds and every found round's takes,
-        // which a round made from one of them alone joins; and the one file
-        // each found round was made from, whose own round joins.
-        let mut takes = seeds.clone();
-        let mut sources: HashSet<String> = HashSet::new();
-        for (index, (_, _, record)) in done.iter().enumerate() {
-            if matched[index] {
-                takes.extend(outputs_of(record));
-                sources.extend(lone_source(record));
-            }
+    for (index, (_, _, record)) in done.iter().enumerate() {
+        if outputs_of(record).iter().any(|output| seeds.contains(output)) {
+            matched[index] = true;
         }
+    }
+    let first: Vec<bool> = matched.clone();
+    // Forward, from the found rounds' takes to what was finished from them.
+    let mut after = first.clone();
+    loop {
+        let takes: HashSet<String> = done.iter().zip(&after).filter(|(_, found)| **found).flat_map(|((_, _, record), _)| outputs_of(record)).collect();
         let mut grew = false;
         for (index, (_, _, record)) in done.iter().enumerate() {
-            if matched[index] {
-                continue;
-            }
-            let made = outputs_of(record);
-            let direct = made.iter().any(|output| seeds.contains(output));
-            let before = made.iter().any(|output| takes.contains(output) || sources.contains(output));
-            let after = lone_source(record).is_some_and(|source| takes.contains(&source));
-            if direct || (own_step(record) && (before || after)) {
-                matched[index] = true;
+            if !after[index] && own_step(record) && finished_from(record).is_some_and(|source| takes.contains(&source)) {
+                after[index] = true;
                 grew = true;
             }
         }
@@ -450,6 +445,22 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
             break;
         }
     }
+    // Back, from the found rounds to the takes they finished.
+    let mut before = first;
+    loop {
+        let sources: HashSet<String> = done.iter().zip(&before).filter(|(_, found)| **found).filter_map(|((_, _, record), _)| finished_from(record)).collect();
+        let mut grew = false;
+        for (index, (_, _, record)) in done.iter().enumerate() {
+            if !before[index] && own_step(record) && outputs_of(record).iter().any(|output| sources.contains(output)) {
+                before[index] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let matched: Vec<bool> = after.iter().zip(&before).map(|(after, before)| *after || *before).collect();
     for ((id, name, record), matched) in done.iter().zip(matched) {
         if !matched {
             continue;
@@ -966,14 +977,17 @@ mod tests {
     /// retime and upscale made from that take, each with its own role, as
     /// Last order's are; and catches the images a take was made from,
     /// another step's video, or another take made from the same motion
-    /// reference, pulled in as its rounds.
+    /// reference, or the other images made from the same one, pulled in as
+    /// its rounds.
     #[test]
     fn a_report_with_no_step_opens_with_the_file_it_made() {
         let folder = std::env::temp_dir().join(format!("prompt-rounds-by-file-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(folder.join("requests")).unwrap();
+        // A finishing request sends no prompt; every other one does.
         let report = |id: &str, started: &str, step: Value, outputs: Value, references: Value| {
-            let record = json!({ "id": id, "started": started, "prompt": "p", "sent": { "model": "m" }, "outputs": outputs, "references": references, "chain": step.get("chain"), "step": step.get("step"), "setup": null });
+            let prompt = if id == "retime" || id == "upscale" { "" } else { "p" };
+            let record = json!({ "id": id, "started": started, "prompt": prompt, "sent": { "model": "m" }, "outputs": outputs, "references": references, "chain": step.get("chain"), "step": step.get("step"), "setup": null });
             std::fs::write(folder.join(format!("requests/{id}.html")), format!("<script type=\"application/json\" id=\"request\">{record}</script>")).unwrap();
         };
         let reference = |file: &str, role: &str| json!({ "file": file, "role": role });
@@ -986,6 +1000,11 @@ mod tests {
         report("upscale", "2026-11-14T14:00:00Z", none.clone(), json!(["library/shot-4k.mp4"]), json!([reference("library/shot-60.mp4", "the final shot at 60 fps, 1344x768")]));
         report("other", "2026-11-14T15:00:00Z", none.clone(), json!(["library/other.mp4"]), json!([reference("library/shot.mp4", "Video 1"), reference("library/elsewhere.mp4", "Video 2")]));
         report("sibling", "2026-11-14T16:00:00Z", none.clone(), json!(["library/sibling.mp4"]), json!([reference("library/line-art.mp4", "the control video")]));
+        // Images made each from one image alone, with a prompt, as Last
+        // order's first pipeline made its studies from its texture.
+        report("texture", "2026-11-11T09:00:00Z", none.clone(), json!(["library/texture.png"]), json!([]));
+        report("otis", "2026-11-11T09:30:00Z", none.clone(), json!(["library/otis.png"]), json!([reference("library/texture.png", "image 1")]));
+        report("dusk", "2026-11-11T10:00:00Z", none.clone(), json!(["library/dusk.png"]), json!([reference("library/texture.png", "image 1")]));
         let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
         let mut canon = Canon::default();
         canon.step_artifacts.insert((step.chain.clone(), step.step.clone()), String::from("the final shot: final shot"));
@@ -1000,7 +1019,46 @@ mod tests {
         // An image whose cell names its take, made from two images.
         let image = rounds(&folder, "mood", None, &[String::from("library/keyframe.png")], &Canon::default(), &mut Reports::default());
         assert_eq!(ids(image), ["keyframe"], "a take made from several images pulled them in as its rounds");
+        let dusk = rounds(&folder, "dusk", None, &[String::from("library/dusk.png")], &Canon::default(), &mut Reports::default());
+        assert_eq!(ids(dusk), ["dusk"], "an image made from another pulled in that one's family as its rounds");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a take of Last order opening with rounds it was not made in,
+    /// such as every study made from the same texture: each take its
+    /// requests made, as a cell's own, opens with its round and at most the
+    /// rounds it was finished through. It only reads: set `LAST_ORDER` to
+    /// its folder.
+    #[test]
+    fn each_of_last_orders_takes_opens_with_its_own_rounds() {
+        let Ok(folder) = std::env::var("LAST_ORDER") else { return };
+        let folder = PathBuf::from(folder);
+        let mut reports = Reports::default();
+        let takes: Vec<String> = std::fs::read_dir(folder.join("requests"))
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .filter_map(|text| crate::skills_setup::record_of(&text))
+            .flat_map(|record| record.get("outputs").and_then(Value::as_array).cloned().unwrap_or_default())
+            .filter_map(|output| output.as_str().map(String::from))
+            .collect();
+        assert!(takes.len() > 400, "Last order's takes were not read: {}", takes.len());
+        for take in &takes {
+            let found = rounds(&folder, "a take", None, std::slice::from_ref(take), &Canon::default(), &mut reports);
+            assert!(!found.is_empty() && found.len() <= 3, "{take} opens with {} rounds", found.len());
+        }
+        // The final shot's step: its nine takes, then the retime and the
+        // upscale finished from the approved one, and not the LTX attempt.
+        let step = StepRef { chain: String::from("the final shot"), step: String::from("final shot") };
+        let shot = rounds(&folder, "a take", Some(&step), &[], &Canon::default(), &mut reports);
+        let ids = found_ids(&shot);
+        assert_eq!(ids.len(), 11, "{ids:?}");
+        assert_eq!(ids[9..], ["2026-11-15_08-12-final-shot-60fps", "2026-11-15_08-17-final-shot-60fps-4k"]);
+        assert!(!ids.iter().any(|id| id.ends_with("-ltx")), "{ids:?}");
+    }
+
+    fn found_ids(rounds: &[Round]) -> Vec<&str> {
+        rounds.iter().map(|round| round.request.as_str()).collect()
     }
 
     /// Catches an edit to a step's prompt that rewrites or drops its
