@@ -120,9 +120,12 @@ impl HostWindow {
         let project = self.project_scripts();
         let pipeline = project.as_ref().and_then(|(folder, _)| crate::prompt_page::living_pipeline(folder));
         let outside = String::from(self.scripts_missing());
+        // Skills found, but the project has no pipeline yet to read.
+        let no_pipeline = String::from("This project has no pipeline yet.");
+        let unread = if project.is_some() { no_pipeline.clone() } else { outside.clone() };
         for (app, (id, query)) in reads {
             let (Some((folder, env)), Some(pipeline)) = (&project, &pipeline) else {
-                self.send(app, HostMessage::CanonRows { id, rows: Vec::new(), error: Some(outside.clone()) });
+                self.send(app, HostMessage::CanonRows { id, rows: Vec::new(), error: Some(unread.clone()) });
                 continue;
             };
             let place = (env.scripts.clone().unwrap_or_default(), folder.clone(), env.vars.clone());
@@ -154,7 +157,7 @@ impl HostWindow {
         }
         for (app, (id, _tab, step, fields)) in edits {
             let (Some((folder, env)), Some(pipeline)) = (project.clone(), pipeline.clone()) else {
-                self.send(app, HostMessage::StepEdited { id, error: Some(outside.clone()) });
+                self.send(app, HostMessage::StepEdited { id, error: Some(unread.clone()) });
                 continue;
             };
             let command = step_command(&pipeline, &step, &fields);

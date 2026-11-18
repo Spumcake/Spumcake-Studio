@@ -477,8 +477,9 @@ pub enum HostMessage {
     /// Make sure that tab's file is written. The answer is `kept`.
     Keep { tab: String },
     /// The project's folder, as an absolute path. New activities are created
-    /// in it, and paths outside it are refused. `skills` says it is a Skills
-    /// project, whose requests run through Spumcake-Skills' scripts.
+    /// in it, and paths outside it are refused. Every project is organized
+    /// the way Last order is, so `skills` is always true; nothing should
+    /// read it, and it is removed once no workspace does.
     Project {
         folder: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
