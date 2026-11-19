@@ -605,8 +605,9 @@ fn ignore_take(place: &Place, path: &str) -> Result<(), String> {
     place.script("pipeline.py", &["keep", &place.pipeline, &artifact, "--reason", protocol::IGNORED_REASON]).map(|_| ())
 }
 
-/// Use this take: the take at `path` published as its own step's
-/// artifact, beside the cell's assets already in use. A take whose step's
+/// Use this take: the asset of the take at `path`, at its latest
+/// iteration, published as its own step's artifact, beside the cell's
+/// assets already in use. A take whose step's
 /// artifact holds another take already gets a step of its own at the same
 /// place, the next alternative, as Generate again makes one. Returns the
 /// artifact.
@@ -619,15 +620,19 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
         .and_then(|record| Some(protocol::StepRef { chain: record.get("chain")?.as_str()?.to_string(), step: record.get("step")?.as_str()?.to_string() }));
     let step = named.or(cell_step).ok_or_else(|| String::from(IN_NO_RECIPE))?;
     let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned().ok_or_else(|| String::from(NO_ARTIFACT))?;
-    let holds = canon.files.get(&artifact).filter(|file| canon.published.contains(*file));
-    if holds.is_some_and(|file| file == path) {
-        return Ok(artifact);
+    // The asset is put in use at its latest iteration, canon as the guide
+    // has it; one already in use stays as it is.
+    let asset = asset_at(assets_of(place)?, path)?;
+    if let Some(in_use) = asset.artifact.clone().filter(|_| asset.in_use) {
+        return Ok(in_use);
     }
+    let latest = asset.canonical().to_string();
+    let holds = canon.files.get(&artifact).filter(|file| canon.published.contains(*file));
     let artifact = match holds {
         None => artifact,
         Some(_) => alternative_step(place, &canon, &step, &artifact)?,
     };
-    let asked = Asked::Publish { asker: super::publishing::Asker::Workspace { app, tab: tab.to_string() }, artifact: artifact.clone(), source: path.to_string(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+    let asked = Asked::Publish { asker: super::publishing::Asker::Workspace { app, tab: tab.to_string() }, artifact: artifact.clone(), source: latest, from: Vec::new(), with: Vec::new(), sources: Vec::new() };
     let view = prepare(place, &asked)?;
     carry(place, &Card { asked, view }, false)?;
     Ok(artifact)
@@ -669,14 +674,20 @@ fn iteration_warning(place: &Place, path: &str) -> Result<Option<(String, String
     if made.is_empty() {
         return Ok(None);
     }
-    // Each cell by its step's name, as the recipe shows it.
-    let mut cells: Vec<String> = Vec::new();
+    // Each cell once, by its chain and place, named as its step is, with
+    // its chain when two chains have a step of the same name.
+    let mut cells: Vec<(Option<(String, i64)>, String, String)> = Vec::new();
     for other in &made {
-        let name = other.artifact.as_deref().and_then(|artifact| artifact.split_once(": ").map(|(_, role)| crate::prompt_page::alternative_of(role).0.to_string())).unwrap_or_default();
-        if !name.is_empty() && !cells.contains(&name) {
-            cells.push(name);
+        let step = other.artifact.as_deref().and_then(|artifact| artifact.split_once(": ").map(|(_, role)| crate::prompt_page::alternative_of(role).0.to_string())).unwrap_or_default();
+        let chain = other.cell.as_ref().map(|(chain, _)| chain.clone()).unwrap_or_default();
+        if !step.is_empty() && !cells.iter().any(|(cell, name, _)| (other.cell.is_some() && *cell == other.cell) || (other.cell.is_none() && *name == step)) {
+            cells.push((other.cell.clone(), step, chain));
         }
     }
+    let cells: Vec<String> = cells
+        .iter()
+        .map(|(_, name, chain)| if cells.iter().filter(|(_, other, _)| other == name).count() > 1 && !chain.is_empty() { format!("{name} in {chain}") } else { name.clone() })
+        .collect();
     let take = take_number(place, &asset.first).map_or_else(|| String::from("This take"), |number| format!("Take {number}"));
     let warning = format!("{take} is in use as a dependency, and new iterations would break canonical consistency.");
     let cells = match cells.as_slice() {
@@ -698,8 +709,17 @@ fn save_iteration(place: &Place, path: &str, source: &str) -> Result<Option<Stri
     let latest = asset.canonical().to_string();
     let in_use = asset.artifact.clone().filter(|_| asset.in_use);
     let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
-    // What the latest iteration was made from, so the new one keeps it.
-    let sources: Vec<(String, String)> = in_use.as_ref().and_then(|artifact| version_sources(place, artifact, &latest)).unwrap_or_default().into_iter().filter(|(name, _)| canon.files.contains_key(name)).collect();
+    // What the latest iteration was made from, so the new one keeps it: its
+    // version's sources while it is in use, or else what its own step and
+    // its take's report name, so a later Use can publish it.
+    let sources: Vec<(String, String)> = match (&in_use, &asset.artifact) {
+        (Some(artifact), _) => version_sources(place, artifact, &latest).unwrap_or_default(),
+        (None, Some(artifact)) => sources_of(place, artifact, request_of(place, &asset.first).as_deref(), &asset.first, &[]).unwrap_or_default(),
+        (None, None) => Vec::new(),
+    }
+    .into_iter()
+    .filter(|(name, _)| canon.files.contains_key(name))
+    .collect();
     let stem = Path::new(source).file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_else(|| String::from("iteration"));
     let mut printed = Err(String::new());
     for n in 1..10 {
@@ -1273,6 +1293,18 @@ mod tests {
         assert!(history.contains(&filed), "the iteration was not published as the layout's next version");
         let keyframe = assets.iter().find(|asset| asset.first == first).unwrap();
         assert!(keyframe.outlined, "what was made from the layout was not outlined: {keyframe:?}");
+        // A third take, edited before it is used: Use puts in use its edit,
+        // its latest iteration, never the take as first made; and Use again
+        // on an asset in use makes no new step.
+        let third = take(&[first.clone(), second.clone()]);
+        std::fs::write(folder.join("work/third-edit.png"), b"\x89PNG\r\n\x1a\nthird edit").unwrap();
+        let edit = save_iteration(&place, &third, "work/third-edit.png").unwrap().unwrap();
+        let used = use_take(&place, 0, "1", Some(protocol::StepRef { chain: String::from("the diner"), step: String::from("keyframe") }), &third).unwrap();
+        let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
+        assert_eq!(canon.files.get(&used), Some(&edit), "Use left the take's edit out of canon");
+        let steps = skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step WHERE chain='the diner'", "--read-only"]);
+        assert_eq!(use_take(&place, 0, "1", None, &third), Ok(used.clone()));
+        assert_eq!(skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step WHERE chain='the diner'", "--read-only"]), steps, "Use on an asset in use made a new step");
         // Ignore clears the first keyframe's outline, and not the second's.
         ignore_take(&place, &first).unwrap();
         let assets = assets_of(&place).unwrap();
