@@ -498,20 +498,28 @@ pub(crate) const SET_PRICES: &str = "Set its prices in Settings, under its endpo
 
 /// A model's token counts as its skill's `models.json` gives them, the
 /// service's own: `tokens: {per_image_in, per_image_out: {"<size>
-/// <quality>": n}}`, read from the skill folders the data folder's
-/// settings list. None when no skill gives them.
+/// <quality>": n}}`, with the entry's `sizes` the service may choose,
+/// read from the skill folders the data folder's settings list. None when
+/// no skill gives them.
 fn listed_tokens(data: &Path, service: &str, model: &str) -> Option<Value> {
     let settings: crate::workspace::Settings = std::fs::read_to_string(data.join("settings.json")).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
-    let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders));
+    // The folders Settings names come before the checkout Studio finds.
+    let folders = crate::skills_checkout::skill_folders(&settings.skill_folders);
+    let skills: Vec<crate::skills_setup::Skill> = folders.iter().flat_map(|folder| crate::skills_setup::listed_skills(std::slice::from_ref(folder))).collect();
     skills.iter().find_map(|skill| {
         let listed: Value = std::fs::read_to_string(skill.folder.join("models.json")).ok().and_then(|text| serde_json::from_str(&text).ok())?;
         listed
             .as_array()?
             .iter()
-            .find(|entry| entry.get("service").and_then(Value::as_str) == Some(service) && entry.get("model").and_then(Value::as_str) == Some(model))?
-            .get("tokens")
-            .filter(|tokens| tokens.is_object())
-            .cloned()
+            .find(|entry| entry.get("service").and_then(Value::as_str) == Some(service) && entry.get("model").and_then(Value::as_str) == Some(model))
+            .and_then(|entry| {
+                // The sizes the service may choose, beside the counts.
+                let mut tokens = entry.get("tokens").filter(|tokens| tokens.is_object())?.clone();
+                if let Some(sizes) = entry.get("sizes").filter(|sizes| sizes.is_array()) {
+                    tokens["sizes"] = sizes.clone();
+                }
+                Some(tokens)
+            })
     })
 }
 
