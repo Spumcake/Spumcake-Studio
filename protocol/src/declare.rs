@@ -468,6 +468,14 @@ pub struct LayerRow {
     /// Words at the row's right, such as "−6 dB".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Drawn dimmer, such as a render that is not in use, as the data model
+    /// guide's camera list shows it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dim: bool,
+    /// Drawn with the red outline: out of date, as the data model guide has
+    /// it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub outlined: bool,
 }
 
 /// The outliner. Dragging a row among its siblings sends `reorder` with

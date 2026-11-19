@@ -284,6 +284,8 @@ impl Session {
         let take_sound = tab.gallery.take_sound;
         let target = |own: u64| json!({ "sound": own });
         let layer_row = |id: u64, icon: &str, name: &str, visible: bool| LayerRow {
+            dim: false,
+            outlined: false,
             id,
             parent: None,
             depth: 0,
