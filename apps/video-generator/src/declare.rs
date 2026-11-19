@@ -291,7 +291,8 @@ fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str) -> V
     deliver.enabled = session.can_deliver(tab, path);
     let mut rows = vec![
         row("Next round from this", Action::with_arg("take_next_round", target.clone())),
-        row("Ask the assistant to use this take", Action::with_arg("take_ask", target.clone())),
+        // Beside the takes in use, replacing none, so it asks nothing first.
+        row("Use this take", Action::with_arg("take_use", target.clone())),
         retime,
         upscale,
         edit,

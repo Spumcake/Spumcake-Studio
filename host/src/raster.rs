@@ -332,7 +332,7 @@ impl Pointer {
         self.paint(ui, display, rect);
         if let (Some(film), Some(strip)) = (&display.view.film, strip) {
             let mut actions = Vec::new();
-            self.film.show(ui, film, strip, locked, dismissing, &mut actions);
+            self.film.show(ui, &display.view.tab, film, strip, locked, dismissing, &mut actions);
             out.extend(actions.into_iter().map(Out::Action));
         }
         moved

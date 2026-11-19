@@ -2647,7 +2647,6 @@ impl HostWindow {
                         error: self.board.failed.get(&cell.id).map(String::as_str),
                         model: model.as_deref(),
                         cost: view.cost.as_deref(),
-                        not_canon: &view.not_canon,
                         root: root.as_deref(),
                         previews: Some(&self.previews.shown),
                         ..Default::default()

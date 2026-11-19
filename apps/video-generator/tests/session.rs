@@ -711,7 +711,7 @@ fn takes_fill_the_strip_by_round_and_are_never_kept() {
     assert!(matches!(film.items[2].pending, Some(protocol::FilmPending::Running { since: Some(1_793_146_000) })));
     assert!(is(middle(&film.items[0].thumbnail), dawn, DAWN_FRAMES, 0), "the thumbnail is not the take's first frame");
     let menu: Vec<&str> = film.items[0].menu.iter().map(|row| row.label.as_str()).collect();
-    assert_eq!(menu, ["Next round from this", "Ask the assistant to use this take", "Retime…", "Upscale…", "Edit", "Deliver…", "Open report"]);
+    assert_eq!(menu, ["Next round from this", "Use this take", "Retime…", "Upscale…", "Edit", "Deliver…", "Open report"]);
     // No round names its artifact here, so Deliver… is off.
     assert!(!film.items[0].menu[5].enabled);
 
@@ -2050,6 +2050,50 @@ fn a_draft_says_the_file_its_take_was_opened_from() {
     program.send(HostMessage::Open { path: Some(kept) });
     let (_, again) = draft_output(&program, "the draft after a restart", |_, output| !output.is_empty());
     assert_eq!(again, opened, "after a restart, the draft does not say its file");
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Catches a take that cannot be put in use, or a use that says nothing
+/// when it fails: Use this take sends `use_take` with the tab, the cell's
+/// item as `takes` names it, and the take's path; the host's `take_used`
+/// with an error shows that sentence as a failed notice, and one with none
+/// says nothing, as the seal comes with the next `takes`.
+#[test]
+fn use_this_take_asks_the_host_to_use_it() {
+    let (dir, mut program, cell) = requests("use-take");
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take_file("takes/Dawn.mp4", false)])]);
+    film_of(&program, "the round", |film| !film.groups.is_empty());
+    program.command("take_use", json!({ "take": "takes/Dawn.mp4" }));
+    let (tab, item, path) = program.wait("use_take", |message| match message {
+        AppMessage::UseTake { tab, cell, path } => Some((tab.clone(), cell.clone(), path.clone())),
+        _ => None,
+    });
+    assert_eq!((tab.as_str(), path.as_str()), ("1", "takes/Dawn.mp4"));
+    assert_eq!(item, protocol::ItemRef { path: "work/Untitled Video.vgx".into(), item: Some(cell.clone()) });
+
+    program.send(HostMessage::TakeUsed { tab: "1".into(), path: "takes/Dawn.mp4".into(), artifact: None, error: Some("The take could not be put in use.".into()) });
+    let notice = program.wait("the failure", |message| match message {
+        AppMessage::Notices { notices, .. } => notices.first().cloned(),
+        _ => None,
+    });
+    assert_eq!((notice.text.as_str(), notice.state), ("The take could not be put in use.", protocol::NoticeState::Failed));
+    // A success takes the refusal away, and after that says nothing.
+    let said = |program: &mut Program| {
+        program.send(HostMessage::TakeUsed { tab: "1".into(), path: "takes/Dawn.mp4".into(), artifact: Some("shot 12: final".into()), error: None });
+        program.send(HostMessage::Ping);
+        let mut seen = Vec::new();
+        program.wait("pong", |message| {
+            if let AppMessage::Notices { notices, .. } = message {
+                seen.push(notices.clone());
+            }
+            matches!(message, AppMessage::Pong).then_some(())
+        });
+        seen
+    };
+    let first = said(&mut program);
+    assert!(first.len() == 1 && first[0].is_empty(), "the refusal was not taken away: {first:?}");
+    assert!(said(&mut program).is_empty(), "a take put in use said something");
     drop(program);
     let _ = std::fs::remove_dir_all(&dir);
 }

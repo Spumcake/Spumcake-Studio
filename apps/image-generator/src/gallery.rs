@@ -77,10 +77,6 @@ pub struct Gallery {
     /// its first run, kept in its file, and the one the Prompt page shows.
     pub cells: Vec<Cell>,
     pub cell: Option<String>,
-    /// The artifact, "<element>: <role>", each cell's step publishes, by
-    /// the cell's id, as the host says it, while the program runs: the
-    /// chain's, never kept in the file.
-    pub artifacts: std::collections::BTreeMap<String, String>,
 }
 
 impl Gallery {
@@ -96,7 +92,6 @@ impl Gallery {
             source: None,
             cells: Vec::new(),
             cell: None,
-            artifacts: std::collections::BTreeMap::new(),
         };
         for (name, doc) in images {
             let frame = gallery.frame_of(&name, doc);

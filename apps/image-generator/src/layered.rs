@@ -509,7 +509,8 @@ impl LayeredImage {
         image
     }
 
-    /// An image with one white "Background" layer.
+    /// An image with one white "Background" layer, for tests.
+    #[cfg(test)]
     pub fn blank(width: u32, height: u32) -> Self {
         let mut image = Self::empty(width, height);
         let id = image.take_id();
