@@ -338,14 +338,48 @@ pub enum RoundState {
     Cancelled,
 }
 
-/// One take a round made: its file, relative to the project, and whether
-/// `canon.sql` names it as canon.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One take a round made, a reference asset in the data model guide's
+/// words: its file, relative to the project, and whether `canon.sql` names
+/// it as canon, meaning it is in use and carries the seal.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TakeFile {
     pub path: String,
     pub media_type: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub canon: bool,
+    /// Its iterations after the take itself, oldest first; the last is its
+    /// canonical iteration, which the tile shows. Empty when it has only
+    /// itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterations: Vec<Iteration>,
+    /// Out of date: something it was made from changed, and it was not
+    /// ignored. Drawn as the red outline.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub outlined: bool,
+    /// Nothing records what it was made from, so it cannot be checked:
+    /// marked Unverified, with no outline.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unverified: bool,
+    /// Its own step's canon artifact, "<element>: <role>", while it is in
+    /// use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
+}
+
+/// The reason Studio's Ignore keeps an out-of-date artifact with, through
+/// `pipeline.py keep`, so Claude Code reads the same state.
+pub const IGNORED_REASON: &str = "Ignored in Studio";
+
+/// One iteration of a take: its file, relative to the project, when it was
+/// published, in seconds since the epoch, when it was, and whether it was a
+/// fix of the dependency chain rather than a Save in a workspace.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Iteration {
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fix: bool,
 }
 
 /// One version of a canon artifact, as `history` lists them: its file,

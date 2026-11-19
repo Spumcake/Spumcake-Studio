@@ -975,7 +975,7 @@ fn with_takes(label: &str) -> PathBuf {
 }
 
 fn take(path: &str, canon: bool) -> protocol::TakeFile {
-    protocol::TakeFile { path: path.into(), media_type: "image/png".into(), canon, iterations: Vec::new(), outlined: false, unverified: false, artifact: None }
+    protocol::TakeFile { path: path.into(), media_type: "image/png".into(), canon, ..Default::default() }
 }
 
 fn round(request: &str, number: u32, takes: Vec<protocol::TakeFile>) -> protocol::Round {

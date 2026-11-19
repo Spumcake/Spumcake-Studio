@@ -71,6 +71,7 @@ pub(crate) enum Stored {
         listening: f64,
         exported: Option<crate::export::Exported>,
         assembly: Option<crate::assembly::Read>,
+        boards: Vec<crate::assembly::RoughBoard>,
     },
 }
 
@@ -103,13 +104,14 @@ impl Stored {
     pub(crate) fn into_record(self, ids: &mut Allocator, palette: &[ToolColor]) -> Record {
         match self {
             Stored::Drawing(snapshot) => Record::from_snapshot(snapshot, ids, palette),
-            Stored::Film { id, name, film, drawings, cameras, onion, listening, exported, assembly } => {
+            Stored::Film { id, name, film, drawings, cameras, onion, listening, exported, assembly, boards } => {
                 let mut record = Record::from_film(id, name, film, drawings, ids, palette);
                 record.set_cameras(cameras);
                 record.set_onion(onion);
                 record.set_listening(listening);
                 record.set_exported(exported);
                 record.set_assembly(assembly);
+                record.set_loose_boards(boards);
                 record.set_dirty(false);
                 record
             }
@@ -166,6 +168,7 @@ fn stored_from_value(value: &Value) -> Option<Stored> {
                 listening: object.get("listening_volume").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.0, 1.0),
                 exported: object.get("exports").and_then(|exports| exports.get("animatic")).and_then(crate::export::Exported::from_value),
                 assembly: object.get("assembly").and_then(crate::assembly::Read::from_value),
+                boards: object.get("boards").and_then(serde_json::Value::as_array).map(|boards| boards.iter().filter_map(crate::assembly::RoughBoard::from_value).collect()).unwrap_or_default(),
             })
         }
         _ => None,
@@ -198,6 +201,7 @@ pub(crate) fn storyboard_value(storyboard: &Record, name: &str) -> Value {
         "listening_volume": storyboard.listening(),
         "exports": { "animatic": storyboard.exported().map(crate::export::Exported::to_value) },
         "assembly": storyboard.assembly().map(crate::assembly::Read::to_value),
+        "boards": storyboard.loose_boards().iter().map(crate::assembly::RoughBoard::to_value).collect::<Vec<_>>(),
     })
 }
 

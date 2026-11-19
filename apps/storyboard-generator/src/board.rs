@@ -188,16 +188,16 @@ pub struct Boards {
 }
 
 impl Boards {
-    pub fn fingerprint(&mut self, looker: &mut Looker, record: &Record, clip: &Clip, which: Which) -> Option<String> {
+    /// The fingerprint of the frame's pixels as the shot shows them: its
+    /// image key's image under the ink.
+    pub fn fingerprint(&mut self, looker: &mut Looker, record: &Record, clip: &Clip, which: Which, project: Option<&Path>) -> Option<String> {
         let film = record.film();
         let frame = frame_of(clip, which);
         let description = description(record, film, clip, frame);
         if let Some(found) = self.fingerprints.get(&description) {
             return Some(found.clone());
         }
-        let [x, y, width, height] = crate::sheet::field_in(film, clip);
-        let (pixels, w, h) =
-            looker.pixels(marks(record, clip, frame), [x, y], [x + width, y + height], FINGERPRINT_SIDE, PAPER)?;
+        let (pixels, w, h) = frame_pixels(looker, record, clip, frame, FINGERPRINT_SIDE, project)?;
         let mut bytes = format!("{w}x{h}").into_bytes();
         bytes.extend(pixels);
         let fingerprint = protocol::fingerprint(&bytes);
@@ -259,7 +259,7 @@ impl Boards {
         }
         for clip in &record.film().clips {
             for which in [Which::First, Which::Last] {
-                let Some(fingerprint) = self.fingerprint(looker, record, clip, which) else {
+                let Some(fingerprint) = self.fingerprint(looker, record, clip, which, project) else {
                     continue;
                 };
                 items.push(Item {
@@ -291,41 +291,39 @@ pub fn render(
         return Err("That clip is no longer in the storyboard.".to_string());
     };
     let fingerprint = boards
-        .fingerprint(looker, record, clip, which)
+        .fingerprint(looker, record, clip, which, Some(project))
         .ok_or_else(|| "The frame could not be drawn.".to_string())?;
     let relative = format!("{}/renders/storyboard-generator/{}-{fingerprint}.png", protocol::PROJECT_DIR, item_id(clip.id, which));
     let path = project.join(&relative);
     if !path.is_file() {
-        let [x, y, width, height] = crate::sheet::field_in(film, clip);
         let frame = frame_of(clip, which);
-        let image = looker
-            .plain_image(marks(record, clip, frame), [x, y], [x + width, y + height], RENDER_SIDE, PAPER)
-            .ok_or_else(|| "The frame could not be drawn.".to_string())?;
+        let (pixels, width, height) =
+            frame_pixels(looker, record, clip, frame, RENDER_SIDE, Some(project)).ok_or_else(|| "The frame could not be drawn.".to_string())?;
+        // As RGB, as the project's own images are.
+        let rgb: Vec<u8> = pixels.chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+        let image = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| "The frame could not be drawn.".to_string())?;
         if let Some(folder) = path.parent() {
             std::fs::create_dir_all(folder).map_err(|error| crate::store::reason(&error))?;
         }
-        std::fs::write(&path, image.png).map_err(|error| crate::store::reason(&error))?;
+        image.save(&path).map_err(|error| error.to_string())?;
     }
     Ok((relative, fingerprint))
 }
 
 /// A clip's first frame as a small raw image for its timeline thumbnail,
 /// written once per fingerprint in a scratch folder of this program's.
-pub fn thumbnail(boards: &mut Boards, looker: &mut Looker, record: &Record, clip: &Clip) -> Option<protocol::Thumbnail> {
-    let fingerprint = boards.fingerprint(looker, record, clip, Which::First)?;
+pub fn thumbnail(boards: &mut Boards, looker: &mut Looker, record: &Record, clip: &Clip, project: Option<&Path>) -> Option<protocol::Thumbnail> {
+    let fingerprint = boards.fingerprint(looker, record, clip, Which::First, project)?;
     let folder = scratch_folder();
     let path = folder.join(format!("{fingerprint}.rgba"));
     let size = folder.join(format!("{fingerprint}.size"));
-    let film = record.film();
-    let [x, y, width, height] = crate::sheet::field_in(film, clip);
     let (w, h) = match std::fs::read_to_string(&size).ok().and_then(|text| {
         let (w, h) = text.split_once('x')?;
         Some((w.parse().ok()?, h.parse().ok()?))
     }) {
         Some(found) if path.is_file() => found,
         _ => {
-            let (pixels, w, h) =
-                looker.pixels(marks(record, clip, 0), [x, y], [x + width, y + height], THUMBNAIL_SIDE, PAPER)?;
+            let (pixels, w, h) = frame_pixels(looker, record, clip, 0, THUMBNAIL_SIDE, project)?;
             std::fs::create_dir_all(&folder).ok()?;
             std::fs::write(&path, pixels).ok()?;
             std::fs::write(&size, format!("{w}x{h}")).ok()?;
@@ -338,6 +336,18 @@ pub fn thumbnail(boards: &mut Boards, looker: &mut Looker, record: &Record, clip
         height: h,
         revision: u64::from_str_radix(&fingerprint, 16).unwrap_or(0),
     })
+}
+
+/// A clip's frame as pixels at its field: the image its image key shows,
+/// fitted, under every layer's ink, as playback and the animatic show it.
+fn frame_pixels(looker: &mut Looker, record: &Record, clip: &Clip, frame: u32, side: u32, project: Option<&Path>) -> Option<(Vec<u8>, u32, u32)> {
+    let [x, y, width, height] = crate::sheet::field_in(record.film(), clip);
+    let (min, max) = ([x, y], [x + width, y + height]);
+    let base = crate::images::image_at(clip, frame).and_then(|key| {
+        let (w, h, _) = crate::look::size_for(min, max, side);
+        crate::images::fitted(project, key, (w, h))
+    });
+    looker.pixels_on(marks(record, clip, frame), min, max, side, PAPER, base.as_deref())
 }
 
 fn scratch_folder() -> PathBuf {

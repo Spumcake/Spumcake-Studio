@@ -15,8 +15,10 @@ const WORKSPACES: &[(&str, &str, bool)] = &[
     ("video-generator", "Video Generator", false),
 ];
 
-/// Words the guide retires, as a word or part of an identifier.
-const RETIRED_WORDS: &[&str] = &["notebook", "book", "sketch", "picture", "asset"];
+/// Words the guide retires, as a word or part of an identifier. "Asset"
+/// came back on 2026-11-18, when the owner approved the data model guide's
+/// reference asset.
+const RETIRED_WORDS: &[&str] = &["notebook", "book", "sketch", "picture"];
 
 /// Names the guide retires, matched with spaces, hyphens, and underscores
 /// left out, so "image-editor", "ImageEditor", and "mission_control" count.

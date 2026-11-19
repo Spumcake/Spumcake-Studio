@@ -73,10 +73,20 @@ pub(crate) fn show(ui: &mut egui::Ui, layers: &Layers, paged: bool, sent: &mut V
             } else {
                 toggled_here
             };
+        let top = ui.cursor().top();
         if images {
             image_row(ui, node, flags, open, &mut toggle, &mut dragging, sent);
         } else {
             object_row(ui, node, flags, open, &mut toggle, &mut dragging, sent);
+        }
+        // A row not in use is drawn dimmer, and one out of date with the red
+        // outline, as the data model guide's views show them.
+        let row = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+        if node.dim {
+            ui.painter().rect_filled(row, 0.0, NOT_IN_USE);
+        }
+        if node.outlined {
+            ui.painter().rect_stroke(row.shrink(1.0), 4.0, Stroke::new(2.0, OUT_OF_DATE), egui::StrokeKind::Inside);
         }
         if dragging.is_some()
             && let Some(rect) = ui.data(|data| data.get_temp::<Rect>(row_rect_id(ui, node.id)))
@@ -367,6 +377,10 @@ const ROW_RULE: Color32 = Color32::from_rgb(238, 240, 243);
 /// A chosen row with an image, pale blue as the mockup's Background Photo.
 const PICKED: Color32 = Color32::from_rgb(226, 236, 252);
 const PICKED_EDGE: Color32 = Color32::from_rgb(37, 99, 235);
+/// Laid over a row that is not in use, so it reads dimmer.
+const NOT_IN_USE: Color32 = Color32::from_rgba_premultiplied(115, 115, 115, 115);
+/// The red outline of what is out of date, the filmstrip's failed red.
+const OUT_OF_DATE: Color32 = Color32::from_rgb(220, 38, 38);
 /// What a detail line adds to a row's height: a plain row's, and a row
 /// with an image's.
 const DETAIL_H: f32 = 16.0;

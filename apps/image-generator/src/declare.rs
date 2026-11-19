@@ -776,6 +776,8 @@ pub fn shows_notes_row(doc: &Doc) -> bool {
 /// takes every note away.
 fn notes_row(doc: &Doc) -> LayerRow {
     LayerRow {
+        dim: false,
+        outlined: false,
         id: NOTES_ROW,
         parent: None,
         depth: 0,
@@ -854,6 +856,8 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
         let mut delete = row("Delete mask", Action::with_arg("delete_mask", target.clone()));
         delete.divider = true;
         rows.push(LayerRow {
+            dim: false,
+            outlined: false,
             id: mask.id,
             parent,
             depth,
@@ -897,6 +901,8 @@ fn layer_rows(session: &Session, node: &Node, parent: Option<u64>, depth: u32, r
         Kind::Pixels => ("media-image", link_mark(node)),
     };
     rows.push(LayerRow {
+        dim: false,
+        outlined: false,
         id,
         parent,
         depth,

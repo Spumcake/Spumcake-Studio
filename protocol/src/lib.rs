@@ -279,6 +279,39 @@ pub enum AppMessage {
         #[serde(default)]
         file: String,
     },
+    /// The take menu's Use this take: put the take at `path`, one of that
+    /// cell's, in use beside those already in use, as its own step's
+    /// artifact, as the data model guide has it. The answer is `take_used`,
+    /// then a fresh `takes`.
+    UseTake {
+        tab: String,
+        cell: ItemRef,
+        #[serde(default)]
+        path: String,
+    },
+    /// Save in a workspace: `source`, the file the workspace wrote in the
+    /// project, is the next iteration of the take at `path`, the take the
+    /// asset started from. The host warns first when the asset is in use and
+    /// something uses it, files `source` from the asset's latest iteration,
+    /// and publishes it as the next version when the asset is in use. The
+    /// answer is `iteration_saved`, then a fresh `takes`.
+    SaveIteration {
+        tab: String,
+        cell: ItemRef,
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        source: String,
+    },
+    /// The take menu's Ignore: clear the take's outline, kept with Skills'
+    /// `pipeline.py keep` and the reason `IGNORED_REASON`. The answer is
+    /// `take_ignored`, then a fresh `takes`.
+    IgnoreTake {
+        tab: String,
+        cell: ItemRef,
+        #[serde(default)]
+        path: String,
+    },
     /// Asks the host to read the project's canon with `pipeline.py sql
     /// <living pipeline> <query> --read-only`. The
     /// answer is `canon_rows`, under the same `id`.
@@ -695,6 +728,38 @@ pub enum HostMessage {
         #[serde(default)]
         versions: Vec<CanonVersion>,
     },
+    /// The answer to `use_take`: the canon artifact the take is now, or,
+    /// when the runner refused, the refusal's sentence in `error`.
+    TakeUsed {
+        tab: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `save_iteration`: the file filed as the iteration, or,
+    /// when the runner refused or the user cancelled the warning, a sentence
+    /// in `error`.
+    IterationSaved {
+        tab: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `ignore_take`, with a sentence in `error` when it could
+    /// not be kept.
+    TakeIgnored {
+        tab: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// The answer to `read_canon`: each line the query printed. A line
     /// holding a JSON object or list, as SQLite's `json_object` makes, is
     /// that JSON; any other line is the whole line as a string, never split,
@@ -964,6 +1029,9 @@ impl Declaration {
             | AppMessage::Publish { .. }
             | AppMessage::CanonHistory { .. }
             | AppMessage::Revert { .. }
+            | AppMessage::UseTake { .. }
+            | AppMessage::SaveIteration { .. }
+            | AppMessage::IgnoreTake { .. }
             | AppMessage::ReadCanon { .. }
             | AppMessage::EditStep { .. }
             | AppMessage::EditElement { .. }
@@ -1702,7 +1770,21 @@ mod tests {
                     state: RoundState::Done,
                     started: Some(1_793_146_000),
                     count: None,
-                    takes: vec![TakeFile { path: "library/keeper-14-1.png".into(), media_type: "image/png".into(), canon: true }],
+                    takes: vec![
+                        TakeFile {
+                            path: "library/keeper-14-1.png".into(),
+                            media_type: "image/png".into(),
+                            canon: true,
+                            iterations: vec![
+                                Iteration { file: "library/keeper-14-1-edit.png".into(), published: Some(1_793_146_600), fix: false },
+                                Iteration { file: "library/keeper-14-1-fix.png".into(), published: Some(1_793_150_000), fix: true },
+                            ],
+                            outlined: true,
+                            unverified: false,
+                            artifact: Some("the keeper: portrait".into()),
+                        },
+                        TakeFile { path: "library/keeper-14-2.png".into(), media_type: "image/png".into(), unverified: true, ..Default::default() },
+                    ],
                     error: None,
                     report: Some("requests/r-14.md".into()),
                     artifact: Some("the keeper: portrait".into()),
@@ -1930,6 +2012,28 @@ mod tests {
             version: Some(4),
             error: None,
         });
+        let keeper = ItemRef { path: "work/Keeper.ipx".into(), item: Some("c1".into()) };
+        round_trip_app(AppMessage::UseTake { tab: "1".into(), cell: keeper.clone(), path: "library/keeper-14-2.png".into() });
+        round_trip_app(AppMessage::SaveIteration {
+            tab: "1".into(),
+            cell: keeper.clone(),
+            path: "library/keeper-14-2.png".into(),
+            source: "work/keeper-14-2-edit.png".into(),
+        });
+        round_trip_app(AppMessage::IgnoreTake { tab: "1".into(), cell: keeper, path: "library/keeper-14-2.png".into() });
+        round_trip_host(HostMessage::TakeUsed {
+            tab: "1".into(),
+            path: "library/keeper-14-2.png".into(),
+            artifact: Some("the keeper: model sheet, 2".into()),
+            error: None,
+        });
+        round_trip_host(HostMessage::IterationSaved {
+            tab: "1".into(),
+            path: "library/keeper-14-2.png".into(),
+            file: None,
+            error: Some("Cancelled: two cells use it.".into()),
+        });
+        round_trip_host(HostMessage::TakeIgnored { tab: "1".into(), path: "library/keeper-14-2.png".into(), error: None });
         round_trip_host(HostMessage::Published {
             tab: "1".into(),
             artifact: "the door: glow".into(),

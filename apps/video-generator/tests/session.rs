@@ -626,7 +626,7 @@ fn a_view_gesture_zooms_about_its_point() {
 // and a take's menu.
 
 fn take_file(path: &str, canon: bool) -> protocol::TakeFile {
-    protocol::TakeFile { path: path.into(), media_type: "video/mp4".into(), canon, iterations: Vec::new(), outlined: false, unverified: false, artifact: None }
+    protocol::TakeFile { path: path.into(), media_type: "video/mp4".into(), canon, ..Default::default() }
 }
 
 fn round(request: &str, number: u32, takes: Vec<protocol::TakeFile>) -> protocol::Round {
