@@ -144,6 +144,18 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             takes.push((String::new(), file.clone(), None));
         }
     }
+    // And so is a filed resource no report made and canon does not name,
+    // such as an earlier export: an asset outside any cell. A file nothing
+    // records stays out.
+    let records = std::fs::read_to_string(folder.join("prompts/resources/records.jsonl")).unwrap_or_default();
+    let mut filed: Vec<String> = records.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).filter_map(|record| record.get("file").and_then(Value::as_str).map(String::from)).filter(|file| is_reference(file) && !iterated.contains(file.as_str())).collect();
+    filed.sort();
+    filed.dedup();
+    for file in filed {
+        if seen.insert(file.clone()) {
+            takes.push((String::new(), file, None));
+        }
+    }
     let listed = |key: &str| -> HashSet<String> { touches.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str).map(String::from)).collect() };
     let (out_of_date, unverified) = (listed("out_of_date"), listed("unverified"));
     let step_of_artifact: HashMap<&String, &(String, String)> = canon.step_artifacts.iter().map(|(step, artifact)| (artifact, step)).collect();
@@ -232,6 +244,13 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
+        // An earlier export, filed but neither made by a request nor canon,
+        // and a stray file nothing records.
+        let mut records = std::fs::read_to_string(folder.join("prompts/resources/records.jsonl")).unwrap();
+        records.push('\n');
+        records.push_str(&json!({ "at": "2026-11-19T12:00:00Z", "file": "prompts/resources/animatic-export-1.mp4", "inputs": [] }).to_string());
+        std::fs::write(folder.join("prompts/resources/records.jsonl"), records).unwrap();
+        std::fs::write(folder.join("prompts/resources/stray.png"), b"stray").unwrap();
         let mut canon = Canon::default();
         for (step, artifact, order) in [("keyframe, the bell", "Last order: keyframe, the bell", 3), ("keyframe, the bell (2)", "Last order: keyframe, the bell (2)", 3)] {
             let key = (String::from("the animatic"), step.to_string());
@@ -243,7 +262,7 @@ mod tests {
         let touches = json!({ "out_of_date": [{ "artifact": "Last order: keyframe, the bell", "why": ["x"] }, { "artifact": "Last order: keyframe, the bell (2)", "why": ["x"] }], "unverified": [] });
         let found = assets(&folder, &canon, &touches);
         let firsts: Vec<&str> = found.iter().map(|asset| asset.first.as_str()).collect();
-        assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/layout.png"], "an iteration became an asset, or a document was taken for one");
+        assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/layout.png", "prompts/resources/animatic-export-1.mp4"], "an iteration became an asset, a document or a stray file was taken for one, or a filed export was left out");
         let bell = &found[0];
         let files: Vec<&str> = bell.iterations.iter().map(|iteration| iteration.file.as_str()).collect();
         assert_eq!(files, ["prompts/resources/bell-edit.png", "library/bell-3.png"]);
@@ -256,6 +275,7 @@ mod tests {
         assert_eq!(alternative.artifact.as_deref(), Some("Last order: keyframe, the bell (2)"));
         assert_eq!(alternative.cell, Some((String::from("the animatic"), 3)), "the second asset lost its cell");
         assert!(found[2].in_use && found[2].cell.is_none(), "a published resource no step makes was given a cell");
+        assert!(!found[3].in_use && found[3].cell.is_none(), "a filed export was put in a cell, or in use");
         let _ = std::fs::remove_dir_all(&folder);
     }
 }
