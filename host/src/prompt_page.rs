@@ -381,7 +381,7 @@ fn slim(record: Value) -> Value {
 pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs: &[String], canon: &Canon, reports: &mut Reports) -> Vec<Round> {
     let mut found: Vec<(u64, Round)> = Vec::new();
     // A step's cell is every step at its place in the chain, one per asset
-    // in use, such as "final shot" and "final shot, 2"; a step with no place
+    // in use, such as "final shot" and "final shot (2)"; a step with no place
     // known is its cell alone.
     let order = step.and_then(|step| canon.step_orders.get(&(step.chain.clone(), step.step.clone())));
     let cell_steps: Vec<String> = match (step, order) {
@@ -953,8 +953,8 @@ impl PromptPage {
     }
 
     /// Generate again on a step's cell: a new step at the cell's place,
-    /// `"<step>, N"`, holding the cell's prompt, references, and settings as
-    /// they stand, with its own artifact, `"<element>: <role>, N"`, as
+    /// `"<step> (N)"`, holding the cell's prompt, references, and settings as
+    /// they stand, with its own artifact, `"<element>: <role> (N)"`, as
     /// Skills' project-pipeline names a second alternative. Returns the new
     /// step, which the runner then makes a take of with `rerun --step`.
     pub(crate) fn generate_again(&mut self, folder: &Path, scripts: &Path, setup: &[(String, String)], step: &StepRef, input: &[CellPart], settings: Option<&Value>) -> Result<StepRef, String> {
@@ -964,9 +964,9 @@ impl PromptPage {
         let order = read.get("ord").and_then(Value::as_i64).ok_or("The step has no place in its chain.")?;
         let base = alternative_of(&step.step).0;
         let taken = |name: &str| canon.step_orders.contains_key(&(step.chain.clone(), name.to_string()));
-        let n = (2..).find(|n| !taken(&format!("{base}, {n}"))).unwrap_or(2);
-        let name = format!("{base}, {n}");
-        let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).map(|artifact| format!("{}, {n}", alternative_of(artifact).0));
+        let n = (2..).find(|n| !taken(&alternative_name(base, *n))).unwrap_or(2);
+        let name = alternative_name(base, n);
+        let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).map(|artifact| alternative_name(alternative_of(artifact).0, n));
         let (template, refs, endpoint) = step_edits(&read, &canon, input, settings);
         let text = |key: &str| read.get(key).and_then(Value::as_str).unwrap_or("").to_string();
         let template = template.unwrap_or_else(|| text("template"));
@@ -991,15 +991,20 @@ impl PromptPage {
 }
 
 /// A step's or an artifact's name without its alternative's number, and
-/// the number: `"final shot, 2"` is `("final shot", Some(2))`.
+/// the number, as Skills' project-pipeline names an alternative:
+/// `"keyframe, wiping (2)"` is `("keyframe, wiping", Some(2))`.
 pub(crate) fn alternative_of(name: &str) -> (&str, Option<u32>) {
-    match name.rsplit_once(", ") {
-        Some((base, number)) if !base.is_empty() => match number.parse::<u32>() {
-            Ok(number) => (base, Some(number)),
-            Err(_) => (name, None),
-        },
+    let Some((base, number)) = name.strip_suffix(')').and_then(|rest| rest.rsplit_once(" (")) else { return (name, None) };
+    match number.parse::<u32>() {
+        Ok(number) if !base.is_empty() => (base, Some(number)),
         _ => (name, None),
     }
+}
+
+/// The name of an alternative, the first's with its number in brackets:
+/// `"keyframe, wiping (2)"`, its artifact `"the diner: keyframe, wiping (2)"`.
+pub(crate) fn alternative_name(base: &str, number: u32) -> String {
+    format!("{base} ({number})")
 }
 
 #[cfg(test)]
@@ -1185,7 +1190,7 @@ mod tests {
         let edit = protocol::Iteration { file: "prompts/resources/bell-edit.png".into(), published: Some(1), fix: false };
         let assets = [
             crate::assets::Asset { first: "library/bell.png".into(), iterations: vec![edit.clone()], artifact: Some("Last order: keyframe, the bell".into()), in_use: true, outlined: true, ..Default::default() },
-            crate::assets::Asset { first: "library/bell-alt.png".into(), artifact: Some("Last order: keyframe, the bell, 2".into()), ..Default::default() },
+            crate::assets::Asset { first: "library/bell-alt.png".into(), artifact: Some("Last order: keyframe, the bell (2)".into()), ..Default::default() },
         ];
         fill_takes(&mut found, &assets);
         let (bell, alternative) = (&found[0].takes[0], &found[0].takes[1]);
@@ -1194,14 +1199,17 @@ mod tests {
         assert!(!alternative.canon && !alternative.outlined && alternative.artifact.is_none(), "a take not in use was shown in use: {alternative:?}");
     }
 
-    /// Catches Generate again naming a third alternative "<step>, 2, 2", or
-    /// cutting a name whose last words are not a number.
+    /// Catches Generate again naming a third alternative "<step> (2) (2)",
+    /// cutting a name whose last words are not a number, or naming one as
+    /// Skills reads a keyframe's moment, "keyframe, wiping, 2".
     #[test]
     fn an_alternative_is_named_from_its_first() {
-        assert_eq!(alternative_of("final shot, 2"), ("final shot", Some(2)));
+        assert_eq!(alternative_of("keyframe, wiping (2)"), ("keyframe, wiping", Some(2)));
         assert_eq!(alternative_of("final shot"), ("final shot", None));
         assert_eq!(alternative_of("final frame, waiting"), ("final frame, waiting", None));
-        assert_eq!(alternative_of("Last order: final shot, 3"), ("Last order: final shot", Some(3)));
+        assert_eq!(alternative_of("final shot, 2"), ("final shot, 2", None));
+        assert_eq!(alternative_of("Last order: final shot (3)"), ("Last order: final shot", Some(3)));
+        assert_eq!(alternative_name("keyframe, wiping", 2), "keyframe, wiping (2)");
     }
 
     /// Catches a cell with two assets in use, two steps at one place, as
@@ -1218,11 +1226,11 @@ mod tests {
             std::fs::write(folder.join(format!("requests/{id}.html")), format!("<script type=\"application/json\" id=\"request\">{record}</script>")).unwrap();
         };
         report("first", "2026-11-14T12:00:00Z", Some("final shot"), "create-final-animation");
-        report("second", "2026-11-14T13:00:00Z", Some("final shot, 2"), "create-final-animation");
+        report("second", "2026-11-14T13:00:00Z", Some("final shot (2)"), "create-final-animation");
         report("trial", "2026-11-14T14:00:00Z", None, "create-final-animation");
         report("frame", "2026-11-14T11:00:00Z", Some("final frame"), "generate-keyframe");
         let mut canon = Canon::default();
-        for (name, order, skill, artifact) in [("final shot", 5, "create-final-animation", "Last order: final shot"), ("final shot, 2", 5, "create-final-animation", "Last order: final shot, 2"), ("final frame", 3, "generate-keyframe", "Last order: final frame")] {
+        for (name, order, skill, artifact) in [("final shot", 5, "create-final-animation", "Last order: final shot"), ("final shot (2)", 5, "create-final-animation", "Last order: final shot (2)"), ("final frame", 3, "generate-keyframe", "Last order: final frame")] {
             let key = (String::from("the final shot"), name.to_string());
             canon.step_orders.insert(key.clone(), order);
             canon.step_skills.insert(key.clone(), skill.to_string());
@@ -1232,7 +1240,7 @@ mod tests {
         let found = rounds(&folder, "final", Some(&step), &[], &canon, &mut Reports::default());
         let ids: Vec<&str> = found.iter().map(|round| round.request.as_str()).collect();
         assert_eq!(ids, ["first", "second", "trial"], "the cell's two steps and its chain's trial, and not another place's step");
-        assert_eq!(found[1].artifact.as_deref(), Some("Last order: final shot, 2"), "a round lost its own step's artifact");
+        assert_eq!(found[1].artifact.as_deref(), Some("Last order: final shot (2)"), "a round lost its own step's artifact");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
