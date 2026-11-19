@@ -516,12 +516,21 @@ fn listed_tokens(data: &Path, service: &str, model: &str) -> Option<Value> {
 }
 
 /// Whether a plan to a model priced by its tokens waits on the user's
-/// prices: its cost is unknown, and none are set for it.
+/// prices: its cost is unknown, and its prices are not all set.
 pub(crate) fn needs_prices(data: &Path, plan: &Value) -> bool {
     let unknown = plan.get("estimate").and_then(Value::as_str).is_none_or(|estimate| estimate.starts_with("unknown"));
     let service = plan.pointer("/endpoint/kind").and_then(Value::as_str).and_then(|kind| kind.split('-').next()).unwrap_or("");
     let model = plan.pointer("/endpoint/model").and_then(Value::as_str).unwrap_or("");
-    unknown && service == "openai" && plan.get("stand_in").and_then(Value::as_bool) != Some(true) && !user_token_prices(data).iter().any(|(known, priced, _)| known == service && priced == model)
+    // Set means every price a request to it uses: text in, image in, and
+    // image out.
+    let set = user_token_prices(data).iter().any(|(known, priced, per)| known == service && priced == model && ["input_text", "input_image", "output_image"].iter().all(|key| per.get(*key).is_some()));
+    unknown && service == "openai" && plan.get("stand_in").and_then(Value::as_bool) != Some(true) && !set
+}
+
+/// An image's area from its size, "1536x864".
+fn area(size: &str) -> Option<f64> {
+    let (width, height) = size.split_once('x')?;
+    Some(width.trim().parse::<f64>().ok()? * height.trim().parse::<f64>().ok()?).filter(|area| *area > 0.0)
 }
 
 /// For a plan to a model priced by its tokens, an estimate from the user's
@@ -570,7 +579,27 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
         let key = [made.0.as_str().unwrap_or(""), made.1.as_str().unwrap_or("")].join(" ");
         Some(listed.as_ref()?.get("per_image_out")?.get(key.trim())?.as_f64()? * made.2 as f64)
     };
-    let out = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out)?;
+    // An image of a size or quality never counted: an image's tokens grow
+    // with its area, so it is counted from the nearest size counted, of its
+    // quality when there is one, as the project recorded it or the
+    // skill's models.json lists it.
+    let scaled_out = || {
+        let wanted = area(made.0.as_str()?)?;
+        let mut counted: Vec<(f64, f64, bool)> = earlier.iter().filter_map(|used| Some((area(used.made.0.as_str()?)?, used.out / used.made.2.max(1) as f64, used.made.1 == made.1))).collect();
+        for (key, tokens) in listed.as_ref().and_then(|listed| listed.get("per_image_out")).and_then(Value::as_object).into_iter().flatten() {
+            let (size, quality) = key.split_once(' ').unwrap_or((key.as_str(), ""));
+            if let (Some(at), Some(tokens)) = (area(size), tokens.as_f64()) {
+                counted.push((at, tokens, made.1.as_str() == Some(quality)));
+            }
+        }
+        let same: Vec<(f64, f64, bool)> = counted.iter().copied().filter(|(_, _, same)| *same).collect();
+        let pool = if same.is_empty() { counted } else { same };
+        let distance = |at: f64| (at / wanted).ln().abs();
+        let nearest = pool.iter().map(|(at, _, _)| *at).min_by(|a, b| distance(*a).total_cmp(&distance(*b)))?;
+        let tokens = median(pool.iter().filter(|(at, _, _)| *at == nearest).map(|(_, tokens, _)| *tokens).collect())?;
+        Some(tokens * wanted / nearest * made.2 as f64)
+    };
+    let out = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out).or_else(scaled_out)?;
     let mut cost = 0.0;
     for (tokens, key) in [(text, "input_text"), (image, "input_image"), (out, "output_image")] {
         if tokens > 0.0 {
@@ -642,9 +671,12 @@ mod tests {
         fill_from_token_prices(&data, &folder, &mut filled);
         assert_eq!(filled["estimate"], json!(format!("about $0.09 · {FROM_YOUR_PRICES}")));
         assert_eq!(note_for(&data, &filled), None, "the card said an estimate from the user's prices came from elsewhere");
+        // A size never made is counted from the nearest size made, at its
+        // quality, by area: 1100 tokens at 1536x864 make about 3477 at
+        // 2048x2048.
         let mut larger = plan.clone();
         larger["endpoint"]["settings"]["size"] = json!("2048x2048");
-        assert_eq!(from_token_prices(&data, &folder, &larger), None, "an image of a size never made was estimated");
+        assert_eq!(from_token_prices(&data, &folder, &larger), Some(format!("about $0.19 · {FROM_YOUR_PRICES}")), "an image of a size never made was left unknown");
         assert_eq!(known(&data)["openai"][model]["per_million_tokens"]["output_image"], json!(40.0), "the setup file lost the user's prices");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -685,6 +717,18 @@ mod tests {
         let mut filled = plan.clone();
         fill_from_token_prices(&data, &folder, &mut filled);
         assert_eq!(filled["estimate"], json!(format!("about $0.054 · {FROM_YOUR_PRICES}")), "a project with no requests yet was not estimated");
+        // A film at another aspect ratio, and at a quality never listed, is
+        // counted from the nearest size listed: 1078 tokens at 1536x864 make
+        // about 1437 at 2048x864.
+        let mut wide = plan.clone();
+        wide["endpoint"]["settings"] = json!({ "size": "2048x864", "quality": "high" });
+        assert_eq!(from_token_prices(&data, &folder, &wide), Some(format!("about $0.064 · {FROM_YOUR_PRICES}")), "a film of another shape was left unknown");
+        wide["endpoint"]["settings"]["quality"] = json!("medium");
+        assert!(from_token_prices(&data, &folder, &wide).is_some(), "a quality never listed was left unknown");
+        // Prices only partly set still point to Settings.
+        settings["token_prices"] = json!([{ "endpoint": "images", "model": model, "output_image": 30.0 }]);
+        std::fs::write(data.join("settings.json"), settings.to_string()).unwrap();
+        assert!(needs_prices(&data, &plan), "a card with prices partly set did not point to Settings");
         let _ = std::fs::remove_dir_all(&root);
     }
 
