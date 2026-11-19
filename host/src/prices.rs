@@ -612,10 +612,10 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
         Some(sized(true).or_else(|| sized(false))?.1 * made.2 as f64)
     };
     let exact = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out);
-    let unsized = made.0.as_str().is_none_or(|size| area(size).is_none());
+    let chosen_size = made.0.as_str().is_none_or(|size| area(size).is_none());
     let (out, upper) = match exact {
         Some(out) => (out, false),
-        None if unsized => (largest_out()?, true),
+        None if chosen_size => (largest_out()?, true),
         None => (scaled_out()?, false),
     };
     let mut cost = 0.0;
