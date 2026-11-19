@@ -113,7 +113,8 @@ fn user_token_prices(data: &Path) -> Vec<(String, String, Value)> {
 /// is not today's listed price, the spec's or step's own price.
 pub(crate) fn note_for(data: &Path, plan: &Value) -> Option<String> {
     let estimate = plan.get("estimate").and_then(Value::as_str)?;
-    if !estimate.starts_with("about $") || estimate.contains("earlier request") {
+    // An estimate from the project's bills or the user's prices says so itself.
+    if !estimate.starts_with("about $") || estimate.contains("earlier request") || estimate.contains(FROM_YOUR_PRICES) {
         return None;
     }
     let spec_own = || Some(String::from("comes from the request's own endpoint, not today's price list"));
@@ -560,7 +561,8 @@ mod tests {
     /// Catches a model priced by its tokens left at "Cost unknown" once the
     /// user has set its prices, an estimate that ignores the prompt or the
     /// images it sends, one made from another size's images or a
-    /// stand-in's counts, and the user's prices missing from the setup file.
+    /// stand-in's counts, the user's prices missing from the setup file, and
+    /// a note on the card saying the price came from somewhere else.
     #[test]
     fn a_token_priced_model_is_estimated_from_the_users_prices() {
         let root = std::env::temp_dir().join(format!("prices-tokens-{}", std::process::id()));
@@ -600,6 +602,7 @@ mod tests {
         let mut filled = plan.clone();
         fill_from_token_prices(&data, &folder, &mut filled);
         assert_eq!(filled["estimate"], json!(format!("about $0.09 · {FROM_YOUR_PRICES}")));
+        assert_eq!(note_for(&data, &filled), None, "the card said an estimate from the user's prices came from elsewhere");
         let mut larger = plan.clone();
         larger["endpoint"]["settings"]["size"] = json!("2048x2048");
         assert_eq!(from_token_prices(&data, &folder, &larger), None, "an image of a size never made was estimated");
