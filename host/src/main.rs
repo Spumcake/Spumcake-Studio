@@ -1,4 +1,5 @@
 mod apps;
+mod assets;
 mod ask;
 mod canvas;
 mod cells;
