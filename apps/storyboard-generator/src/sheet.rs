@@ -236,11 +236,29 @@ impl Paper {
 /// filled in from the storyboard, with `key` (such as "A③") at the field's
 /// top left when the frame shows one.
 pub fn paper(film: &Film, clip: &Clip, key: Option<&str>) -> Value {
+    paper_over(film, clip, key, false)
+}
+
+/// The paper, and, with `open_field`, white only around the field, so the
+/// image key the stage shows under it in the field is seen.
+fn paper_over(film: &Film, clip: &Clip, key: Option<&str>, open_field: bool) -> Value {
     let [_, _, width, height] = field(film);
     let unit = height / 1080.0;
     let mut paper = Paper { nodes: Vec::new(), next: 0, unit };
     let (min, max) = paper_bounds(film);
-    paper.rect(min, max, Some(FAINT), Some(PAPER), false);
+    if open_field {
+        for (from, to) in [
+            ([min[0], min[1]], [max[0], 0.0]),
+            ([min[0], height], [max[0], max[1]]),
+            ([min[0], 0.0], [0.0, height]),
+            ([width, 0.0], [max[0], height]),
+        ] {
+            paper.rect(from, to, None, Some(PAPER), false);
+        }
+        paper.rect(min, max, Some(FAINT), None, false);
+    } else {
+        paper.rect(min, max, Some(FAINT), Some(PAPER), false);
+    }
     // Peg holes: a round hole between two long slots.
     let peg_y = min[1] + 50.0 * unit;
     paper.circle([width / 2.0, peg_y], 18.0 * unit, FAINT);
@@ -341,7 +359,9 @@ pub fn stage(record: &Record, tab: String) -> Stage {
                 let key = layer.key_at(view.frame)?;
                 (!layer.folder).then(|| format!("{}{}", clip.letter(layer.id), circled(layer.key_number(key.id))))
             });
-            underlays.push(moved(paper(film, clip, key.as_deref()), 1.0, false, None, clip.origin));
+            // An image key the stage shows in the field lies under the paper.
+            let keyed = crate::images::image_at(clip, view.frame).is_some();
+            underlays.push(moved(paper_over(film, clip, key.as_deref(), keyed), 1.0, false, None, clip.origin));
             if let Some(layer) = active_layer {
                 active.visible = clip.shows(layer);
                 active.opacity = layer.opacity as f32;
@@ -378,7 +398,9 @@ pub fn stage(record: &Record, tab: String) -> Stage {
                         underlays.push(moved(drawing, opacity, false, None, [-clip.origin[0], -clip.origin[1]]));
                     }
                 }
-                underlays.insert(0, plain(blank_field(film), 1.0, false, None));
+                // An image key the stage shows in the field lies under it.
+                let keyed = film.shots_visible && crate::images::image_at(clip, frame).is_some();
+                underlays.insert(0, plain(blank_field(film, keyed), 1.0, false, None));
             }
             None => fill = Some(if film.clips.is_empty() { PAPER } else { [0, 0, 0] }),
         },
@@ -399,10 +421,10 @@ pub fn stage(record: &Record, tab: String) -> Stage {
 const HIDDEN_TRACK: f64 = 0.3;
 
 /// The white of the field, under a clip's drawings at the film's level.
-fn blank_field(film: &Film) -> Value {
+fn blank_field(film: &Film, open: bool) -> Value {
     let [_, _, width, height] = field(film);
     let mut paper = Paper { nodes: Vec::new(), next: 0, unit: height / 1080.0 };
-    paper.rect([0.0, 0.0], [width, height], Some(INK), Some(PAPER), false);
+    paper.rect([0.0, 0.0], [width, height], Some(INK), (!open).then_some(PAPER), false);
     paper.drawing("Field")
 }
 

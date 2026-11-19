@@ -135,6 +135,12 @@ impl Session {
         self.file_intent = Some(crate::session::FileIntent::ImportSound);
     }
 
+    /// Whether a sound's file is canon already, under some artifact, so it
+    /// has nothing to publish.
+    pub fn is_canon(&self, file: &str) -> bool {
+        self.canon_files.contains_key(file)
+    }
+
     /// Whether a sound is from outside the project, so it is filed into the
     /// project before it is placed.
     pub fn outside_project(&self, path: &Path) -> bool {
@@ -342,6 +348,9 @@ impl Session {
             return Err("No project is open.".to_string());
         }
         let (_, clip) = self.film().sound(sound).ok_or("no such sound")?;
+        if let Some(artifact) = self.canon_files.get(&clip.file) {
+            return Err(format!("that sound is already canon, as {artifact}"));
+        }
         if Path::new(&clip.file).is_absolute() {
             return Err("that sound is outside the project, so it is filed first, as Import sound… does".to_string());
         }

@@ -149,6 +149,23 @@ pub struct RoughBoard {
     pub stamp: String,
 }
 
+impl RoughBoard {
+    pub fn to_value(&self) -> Value {
+        json!({ "clip": self.clip, "frame": self.frame, "file": self.file, "stamp": self.stamp })
+    }
+
+    pub fn from_value(board: &Value) -> Option<Self> {
+        Some(RoughBoard {
+            clip: board.get("clip")?.as_u64()?,
+            frame: board.get("frame")?.as_u64()? as u32,
+            file: board.get("file")?.as_str()?.to_string(),
+            // A board kept with no stamp matches no hold, so it is
+            // published again before it is used.
+            stamp: board.get("stamp").and_then(Value::as_str).unwrap_or_default().to_string(),
+        })
+    }
+}
+
 impl Read {
     /// `other`'s file and timing, keeping this one's step and rough boards,
     /// as undo and redo of a Follow do.
@@ -175,7 +192,7 @@ impl Read {
             "clips": self.clips,
             "bed": self.bed,
             "voices": self.voices,
-            "boards": self.boards.iter().map(|board| json!({ "clip": board.clip, "frame": board.frame, "file": board.file, "stamp": board.stamp })).collect::<Vec<_>>(),
+            "boards": self.boards.iter().map(RoughBoard::to_value).collect::<Vec<_>>(),
             "step": self.step.as_ref().map(|(chain, name)| json!({ "chain": chain, "name": name })),
         })
     }
@@ -184,14 +201,7 @@ impl Read {
         let ids = |key: &str| -> Option<Vec<u64>> { value.get(key)?.as_array()?.iter().map(Value::as_u64).collect() };
         let mut boards = Vec::new();
         for board in value.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
-            boards.push(RoughBoard {
-                clip: board.get("clip")?.as_u64()?,
-                frame: board.get("frame")?.as_u64()? as u32,
-                file: board.get("file")?.as_str()?.to_string(),
-                // A board kept with no stamp matches no hold, so it is
-                // published again before it is used.
-                stamp: board.get("stamp").and_then(Value::as_str).unwrap_or_default().to_string(),
-            });
+            boards.push(RoughBoard::from_value(&board)?);
         }
         Some(Read {
             path: value.get("path")?.as_str()?.to_string(),

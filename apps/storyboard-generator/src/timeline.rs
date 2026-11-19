@@ -137,6 +137,7 @@ fn declare_film(session: &Session, boards: &mut Boards, looker: &mut Looker, tab
         button("skip-next", "Step forward (.)", "step_forward", true, false),
         ToolItem::Label { text: timecode(view.film_frame), strong: true },
         ToolItem::Label { text: format!("/ {}", timecode(length)), strong: false },
+        volume_icon(),
         volume_slider(session),
     ];
     let items = film
@@ -157,7 +158,7 @@ fn declare_film(session: &Session, boards: &mut Boards, looker: &mut Looker, tab
                 label: clip.name.clone(),
                 icon: None,
                 selected,
-                thumbnail: board::thumbnail(boards, looker, record, clip),
+                thumbnail: board::thumbnail(boards, looker, record, clip, session.project()),
                 waveform: Vec::new(),
                 progress: None,
                 end_mark: None,
@@ -231,11 +232,18 @@ fn play_button(session: &Session, enabled: bool) -> ToolItem {
     }
 }
 
-/// How loud the film plays here: never in the export.
+/// The speaker before the volume slider, as film-transport shows it.
+fn volume_icon() -> ToolItem {
+    ToolItem::Button { icon: "sound-high".to_string(), tip: "Volume".to_string(), enabled: true, selected: false, action: None, menu: Vec::new() }
+}
+
+/// How loud the film plays here: never in the export. The speaker before it
+/// names it, so it has no caption, and it is wide enough that its knob never
+/// meets its value.
 fn volume_slider(session: &Session) -> ToolItem {
     ToolItem::Slider {
-        caption: "Volume".to_string(),
-        width: 80.0,
+        caption: String::new(),
+        width: 160.0,
         value: (session.listening() * 100.0).round() as i32,
         min: 0,
         max: 100,
@@ -350,7 +358,11 @@ fn sound_row(session: &Session, track: &SoundTrack, picked: &[u64]) -> protocol:
                 menu: vec![
                     // Offered as canon, so the animatic can name it: a sound in
                     // the project, never one placed with no project.
-                    entry("Publish sound", action_with("publish_sound", json!(clip.id)), session.project().is_some() && !std::path::Path::new(&clip.file).is_absolute()),
+                    entry(
+                        "Publish sound",
+                        action_with("publish_sound", json!(clip.id)),
+                        session.project().is_some() && !std::path::Path::new(&clip.file).is_absolute() && !session.is_canon(&clip.file),
+                    ),
                     entry("Delete", action_with("delete_sound", json!(clip.id)), !track.locked),
                 ],
                 open: None,
