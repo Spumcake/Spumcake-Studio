@@ -609,6 +609,8 @@ impl Session {
                 let has_page = self.object_page_available(node.id);
                 let id = node.id.get();
                 LayerRow {
+                    dim: false,
+                    outlined: false,
                     id,
                     parent: node.parent.map(NodeId::get),
                     depth: node.depth,

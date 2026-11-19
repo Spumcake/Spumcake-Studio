@@ -671,6 +671,8 @@ fn row(
     value: Option<String>,
 ) -> LayerRow {
     LayerRow {
+        dim: false,
+        outlined: false,
         id,
         parent,
         depth: u32::from(parent.is_some()),
