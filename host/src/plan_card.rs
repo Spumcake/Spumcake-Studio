@@ -86,6 +86,12 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
                 plans.iter().filter_map(|plan| plan.get("estimate").and_then(Value::as_str)).map(cost_words).collect::<Vec<_>>().join(", ")
             };
             let mut lines = vec![Line::Title(format!("{count} {noun} · {cost}"))];
+            // A fix of the dependency chain names what it leaves out of date.
+            if let Asking::Plans { fix: Some(fix), .. } = asking
+                && !fix.not_fixed().is_empty()
+            {
+                lines.push(Line::Muted(crate::runner::not_fixed_line(fix.not_fixed())));
+            }
             // What a listed price leaves out, such as charges per token.
             for note in plans.iter().filter_map(|plan| plan.get("price_note").and_then(Value::as_str)) {
                 lines.push(Line::Muted(format!("The price {note}.")));

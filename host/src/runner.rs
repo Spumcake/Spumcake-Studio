@@ -395,6 +395,21 @@ pub(crate) struct Fix {
     scripts: PathBuf,
     pipeline: String,
     steps: Vec<FixStep>,
+    /// What is out of date but made by no step, such as a mix filed by
+    /// hand: named on the card as not fixed here.
+    not_fixed: Vec<String>,
+}
+
+impl Fix {
+    /// What is out of date that this fix leaves, made by no step.
+    pub(crate) fn not_fixed(&self) -> &[String] {
+        &self.not_fixed
+    }
+}
+
+/// The card's line naming what is out of date but made by no step.
+pub(crate) fn not_fixed_line(artifacts: &[String]) -> String {
+    format!("Made by no step, so not fixed here: {}.", artifacts.join(", "))
 }
 
 #[derive(Clone, Debug)]
@@ -423,23 +438,54 @@ fn skills_run(argv: &[String], cwd: &Path, vars: &[(String, String)]) -> Result<
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// The steps to fix, in chain order: each step whose artifact Skills finds
-/// out of date and was not ignored, as `touches --json` lists them.
-fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<Vec<(String, String, String)>, String> {
+/// The steps to fix: each step whose artifact Skills finds out of date and
+/// was not ignored, as `touches --json` lists them, in the order of what
+/// each is made from, so a step runs after every fix it refers to, and in
+/// chain order where that leaves a choice; and what is out of date but made
+/// by no step.
+fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<(Vec<(String, String, String)>, Vec<String>), String> {
     let touches: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "pipeline.py", &["touches", pipeline, "--json"]), cwd, vars)?).map_err(|error| format!("What is out of date could not be read: {error}"))?;
     let stale: Vec<&str> = touches.get("out_of_date").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str)).collect();
-    let query = "SELECT json_array(c.ord, s.ord, s.chain, s.name, s.artifact) FROM step s JOIN chain c ON c.name = s.chain WHERE s.artifact IS NOT NULL AND s.artifact != ''";
-    let mut steps: Vec<(i64, i64, String, String, String)> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, query, "--read-only"]), cwd, vars)?
+    let query = "SELECT json_array(c.ord, s.ord, s.chain, s.name, s.artifact, s.refs) FROM step s JOIN chain c ON c.name = s.chain WHERE s.artifact IS NOT NULL AND s.artifact != ''";
+    let mut steps: Vec<FixOrder> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, query, "--read-only"]), cwd, vars)?
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| {
             let text = |index: usize| row.get(index).and_then(Value::as_str).map(String::from);
-            Some((row.get(0)?.as_i64().unwrap_or(99), row.get(1)?.as_i64().unwrap_or(99), text(2)?, text(3)?, text(4)?))
+            let refs: Vec<Value> = text(5).and_then(|refs| serde_json::from_str(&refs).ok()).unwrap_or_default();
+            let uses = refs.iter().filter_map(|reference| reference.get("artifact").and_then(Value::as_str).map(String::from)).collect();
+            Some(FixOrder { place: (row.get(0)?.as_i64().unwrap_or(99), row.get(1)?.as_i64().unwrap_or(99)), chain: text(2)?, step: text(3)?, artifact: text(4)?, uses })
         })
-        .filter(|(_, _, _, _, artifact)| stale.contains(&artifact.as_str()))
         .collect();
-    steps.sort();
-    Ok(steps.into_iter().map(|(_, _, chain, step, artifact)| (chain, step, artifact)).collect())
+    let made_by_a_step: Vec<String> = steps.iter().map(|step| step.artifact.clone()).collect();
+    steps.retain(|step| stale.contains(&step.artifact.as_str()));
+    let not_fixed = stale.iter().filter(|artifact| !made_by_a_step.iter().any(|made| made == *artifact)).map(|artifact| artifact.to_string()).collect();
+    Ok((fix_order(steps), not_fixed))
+}
+
+/// A step to fix, with its place and the artifacts its references name.
+#[derive(Clone, Debug, PartialEq)]
+struct FixOrder {
+    place: (i64, i64),
+    chain: String,
+    step: String,
+    artifact: String,
+    uses: Vec<String>,
+}
+
+/// The steps in the order of what each is made from: a step comes after
+/// every other step whose artifact it refers to, and the earliest in chain
+/// order goes first where that leaves a choice. A loop, which no chain
+/// should hold, is broken in chain order.
+fn fix_order(mut steps: Vec<FixOrder>) -> Vec<(String, String, String)> {
+    steps.sort_by(|a, b| a.place.cmp(&b.place));
+    let mut ordered: Vec<FixOrder> = Vec::new();
+    while !steps.is_empty() {
+        let waits = |step: &FixOrder, left: &[FixOrder]| left.iter().any(|other| other.artifact != step.artifact && step.uses.contains(&other.artifact));
+        let next = steps.iter().position(|step| !waits(step, &steps)).unwrap_or(0);
+        ordered.push(steps.remove(next));
+    }
+    ordered.into_iter().map(|step| (step.chain, step.step, step.artifact)).collect()
 }
 
 /// Marks each reference of a plan that an earlier fix in the same plan
@@ -908,9 +954,12 @@ impl Runner {
                 }
                 let (cwd, vars, call_name, tool_name) = (folder.to_path_buf(), env.vars.clone(), call.to_string(), tool.to_string());
                 return self.plan_later(call, move || {
-                    let found = steps_to_fix(&scripts, &cwd, &vars, &pipeline)?;
-                    if found.is_empty() {
+                    let (found, not_fixed) = steps_to_fix(&scripts, &cwd, &vars, &pipeline)?;
+                    if found.is_empty() && not_fixed.is_empty() {
                         return Err(String::from("Nothing is out of date, so there is nothing to fix."));
+                    }
+                    if found.is_empty() {
+                        return Err(not_fixed_line(&not_fixed));
                     }
                     let (mut plans, mut steps, mut fixed) = (Vec::new(), Vec::new(), Vec::new());
                     for (chain, step, artifact) in found {
@@ -924,7 +973,7 @@ impl Runner {
                         steps.push(FixStep { chain, step, artifact: artifact.clone(), hash });
                         fixed.push(artifact);
                     }
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps }) })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed }) })
                 });
             }
             _ => return Begun::Answered(failed(call, "No such tool.")),
@@ -1033,7 +1082,7 @@ impl Runner {
     fn fix_chain(&mut self, call: &str, fix: Fix, approved: Vec<Value>, stand_in: bool) {
         let (answered, cwd, vars) = (call.to_string(), self.cwd.clone(), self.env.clone());
         self.spawn(call, move |stop| {
-            let Fix { scripts, pipeline, steps } = fix;
+            let Fix { scripts, pipeline, steps, not_fixed } = fix;
             let mut published: HashMap<String, String> = HashMap::new();
             let mut done: Vec<Value> = Vec::new();
             let mut stopped: Option<String> = None;
@@ -1101,6 +1150,9 @@ impl Runner {
                 done.push(json!({ "artifact": step.artifact, "chain": step.chain, "step": step.step, "file": take }));
             }
             let mut output = json!({ "fixed": done });
+            if !not_fixed.is_empty() {
+                output["made_by_no_step"] = json!(not_fixed);
+            }
             if let Some(reason) = &stopped {
                 let left: Vec<&str> = steps.iter().skip(published.len()).map(|step| step.artifact.as_str()).collect();
                 output["stopped"] = json!(reason);
@@ -1461,6 +1513,18 @@ mod tests {
         }
     }
 
+    /// Catches a step fixed before a step whose artifact it refers to, as
+    /// Last order's "far-end layout, door half open" refers to the door
+    /// open layout a later step makes, and chain order lost where nothing
+    /// else decides.
+    #[test]
+    fn a_fix_runs_each_step_after_what_it_is_made_from() {
+        let step = |place: (i64, i64), name: &str, uses: &[&str]| FixOrder { place, chain: String::from("the animatic"), step: name.to_string(), artifact: format!("the diner: {name}"), uses: uses.iter().map(|used| format!("the diner: {used}")).collect() };
+        let order = fix_order(vec![step((1, 10), "door half open", &["door open"]), step((1, 11), "door open", &["layout"]), step((1, 12), "the bell", &["door half open"]), step((1, 2), "other", &[])]);
+        let names: Vec<&str> = order.iter().map(|(_, step, _)| step.as_str()).collect();
+        assert_eq!(names, ["other", "door open", "door half open", "the bell"]);
+    }
+
     /// Catches a fix's later step run on a plan that changed in more than
     /// the file an earlier fix made, or one whose reference is not that
     /// fix's file, and a step marked when it uses nothing being fixed.
@@ -1737,6 +1801,8 @@ mod tests {
         harness("pipeline.py", &["step", "001", "the diner", "sheet", "--order", "1", "--skill", "generate-model-sheet", "--endpoint", endpoint, "--template", "A sheet.", "--artifact", "the diner: sheet"]);
         harness("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: sheet", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
         harness("pipeline.py", &["step", "001", "the diner", "shot", "--order", "3", "--skill", "create-final-animation", "--endpoint", endpoint, "--template", "The shot.", "--refs", r#"[{"artifact": "the diner: keyframe", "role": "image 1"}]"#, "--artifact", "the diner: shot"]);
+        // A step early in the chain made from a later one's artifact.
+        harness("pipeline.py", &["step", "001", "the diner", "poster", "--order", "2", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The poster.", "--refs", r#"[{"artifact": "the diner: shot", "role": "image 1"}]"#, "--artifact", "the diner: poster"]);
         // Each step made and published as the method does by hand.
         let make = |step: &str, artifact: &str, from: Option<&str>| {
             let made: Value = serde_json::from_str(harness("pipeline.py", &["rerun", "001", "--step", "the diner", step, "--stand-in", "--json"]).lines().last().unwrap()).unwrap();
@@ -1751,7 +1817,13 @@ mod tests {
         };
         make("sheet", "the diner: sheet", None);
         make("keyframe", "the diner: keyframe", Some("the diner: sheet"));
-        make("shot", "the diner: shot", Some("the diner: keyframe"));
+        let shot = make("shot", "the diner: shot", Some("the diner: keyframe"));
+        make("poster", "the diner: poster", Some("the diner: shot"));
+        // A mix filed by hand from the shot: made by no step.
+        std::fs::create_dir_all(folder.join("agent")).unwrap();
+        std::fs::write(folder.join("agent/mix.png"), b"mix").unwrap();
+        let mix = harness("request.py", &["resource", "agent/mix.png", "--name", "mix", "--from", &shot]).lines().last().unwrap().trim().to_string();
+        harness("pipeline.py", &["publish", "001", "the diner: mix", "--file", &mix, "--chain", "the diner", "--from", "the diner: shot", "input"]);
         // The sheet made again, so what was made from it is out of date.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         make("sheet", "the diner: sheet", None);
@@ -1764,7 +1836,8 @@ mod tests {
         wait_until_asked(&mut runner);
         let Some(Asking::Plans { plans, fix: Some(fix), .. }) = runner.asking() else { panic!("the fix showed no card") };
         let steps: Vec<&str> = fix.steps.iter().map(|step| step.step.as_str()).collect();
-        assert_eq!(steps, ["keyframe", "shot"], "the card did not hold exactly what is out of date, in chain order");
+        assert_eq!(steps, ["keyframe", "shot", "poster"], "the card did not hold exactly what is out of date, each after what it is made from");
+        assert_eq!(fix.not_fixed(), ["the diner: mix"], "what no step makes was dropped without a word");
         assert_eq!(plans[1]["references"][0][FIXED_BY], "the diner: keyframe", "the shot's reference to the keyframe's fix was not marked");
         assert!(runner.answer(true).is_none());
         let start = std::time::Instant::now();
@@ -1777,9 +1850,10 @@ mod tests {
         };
         assert!(answer.ok, "the fix stopped: {:?}", answer.output);
         let touches: Value = serde_json::from_str(&harness("pipeline.py", &["touches", "001", "--json"])).unwrap();
-        assert_eq!(touches["out_of_date"], json!([]), "the chain is still out of date after its fix");
+        let left: Vec<&str> = touches["out_of_date"].as_array().unwrap().iter().filter_map(|entry| entry["artifact"].as_str()).collect();
+        assert_eq!(left, ["the diner: mix"], "the chain is still out of date after its fix, past what no step makes");
         let log = std::fs::read_to_string(folder.join("pipeline/001/runs.jsonl")).unwrap();
-        assert_eq!(log.lines().filter(|line| line.contains("\"fixes\"")).count(), 2, "the fixes were not published as fixes");
+        assert_eq!(log.lines().filter(|line| line.contains("\"fixes\"")).count(), 3, "the fixes were not published as fixes");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
