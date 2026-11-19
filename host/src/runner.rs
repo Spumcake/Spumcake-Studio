@@ -458,11 +458,32 @@ fn mark_fixed(plan: &mut Value, fixed: &[String]) {
 /// the approved one in all but the references marked `FIXED_BY`, each of
 /// which now names the file its fix published. Otherwise, what differs.
 fn same_but_fixed(approved: &Value, now: &Value, published: &HashMap<String, String>) -> Result<(), String> {
-    let left_out = ["hash", "estimate", "price_note", "price_hint", "references", "inputs"];
+    let left_out = ["hash", "estimate", "price_note", "price_hint", "references", "inputs", "canon"];
     let rest = |plan: &Value| -> Value { plan.as_object().map(|fields| Value::Object(fields.iter().filter(|(key, _)| !left_out.contains(&key.as_str())).map(|(key, value)| (key.clone(), value.clone())).collect())).unwrap_or(Value::Null) };
     if rest(approved) != rest(now) {
         let differs = approved.as_object().into_iter().flatten().filter(|(key, value)| !left_out.contains(&key.as_str()) && now.get(key.as_str()) != Some(*value)).map(|(key, _)| key.clone()).collect::<Vec<_>>();
         return Err(format!("its {} changed", if differs.is_empty() { String::from("plan") } else { differs.join(", ") }));
+    }
+    // The canon it read, each as `{name, value, read_at, from}`: when it was
+    // read always differs, and a fixed artifact's value is its fix's file.
+    let read = |plan: &Value| -> Vec<Value> { plan.get("canon").and_then(Value::as_array).cloned().unwrap_or_default() };
+    let (was, is) = (read(approved), read(now));
+    if was.len() != is.len() {
+        return Err(String::from("the canon it reads changed"));
+    }
+    for (was, is) in was.iter().zip(&is) {
+        let text = |entry: &Value, key: &str| entry.get(key).cloned().unwrap_or(Value::Null);
+        let name = was.get("name").and_then(Value::as_str).unwrap_or("");
+        if text(was, "name") != text(is, "name") || text(was, "from") != text(is, "from") {
+            return Err(String::from("the canon it reads changed"));
+        }
+        let value_ok = match published.get(name) {
+            Some(file) => is.get("value").and_then(Value::as_str) == Some(file.as_str()),
+            None => text(was, "value") == text(is, "value"),
+        };
+        if !value_ok {
+            return Err(format!("its canon {name} changed"));
+        }
     }
     for list in ["references", "inputs"] {
         let (was, is) = (approved.get(list).and_then(Value::as_array).cloned().unwrap_or_default(), now.get(list).and_then(Value::as_array).cloned().unwrap_or_default());
@@ -1466,6 +1487,14 @@ mod tests {
         now["references"][1]["sha256"] = json!("b");
         now["references"][0]["file"] = json!("library/someone-else.png");
         assert!(same_but_fixed(&approved, &now, &published).is_err(), "a reference that is not the fix's file ran");
+        now["references"][0]["file"] = json!("library/layout-2.png");
+        // The canon it read: read again at another time, the fixed artifact
+        // now its fix's file; anything else changed is refused.
+        approved["canon"] = json!([{ "name": "the diner: layout", "value": "library/layout.png", "read_at": "t1", "from": "pipeline/001/canon.sql" }, { "name": "the cook: sheet", "value": "library/sheet.png", "read_at": "t1", "from": "pipeline/001/canon.sql" }]);
+        now["canon"] = json!([{ "name": "the diner: layout", "value": "library/layout-2.png", "read_at": "t2", "from": "pipeline/001/canon.sql" }, { "name": "the cook: sheet", "value": "library/sheet.png", "read_at": "t2", "from": "pipeline/001/canon.sql" }]);
+        assert_eq!(same_but_fixed(&approved, &now, &published), Ok(()), "canon read again, or read with its fix, was refused");
+        now["canon"][1]["value"] = json!("library/sheet-2.png");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "canon nothing fixed changed and ran");
     }
 
     /// Catches a command that spends run as a plain command: the contract's
@@ -1678,6 +1707,79 @@ mod tests {
         let stopped = runner.stop();
         assert_eq!(stopped.len(), 1);
         assert!(runner.jobs.is_empty() && runner.detached.is_empty(), "a script step was left running after Stop");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a fix of the dependency chain drifting from Skills' own
+    /// scripts: a step out of date left off its one card, or one put there
+    /// that was not; a reference an earlier fix replaces left unmarked;
+    /// the steps run out of chain order, or a later one refused once the
+    /// earlier fix changed its reference; and a fix not published as its
+    /// artifact's next version, so the chain is still out of date after.
+    #[test]
+    fn the_dependency_chain_is_fixed_on_one_card_with_the_real_scripts() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("runner-fix-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let harness = |script: &str, args: &[&str]| -> String {
+            let out = Command::new("python3").arg(scripts.join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        harness("pipeline.py", &["new", "001"]);
+        harness("pipeline.py", &["element", "001", "the diner", "--kind", "place"]);
+        harness("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);
+        let endpoint = r#"{"kind": "fal", "model": "stand-in"}"#;
+        harness("pipeline.py", &["step", "001", "the diner", "sheet", "--order", "1", "--skill", "generate-model-sheet", "--endpoint", endpoint, "--template", "A sheet.", "--artifact", "the diner: sheet"]);
+        harness("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: sheet", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
+        harness("pipeline.py", &["step", "001", "the diner", "shot", "--order", "3", "--skill", "create-final-animation", "--endpoint", endpoint, "--template", "The shot.", "--refs", r#"[{"artifact": "the diner: keyframe", "role": "image 1"}]"#, "--artifact", "the diner: shot"]);
+        // Each step made and published as the method does by hand.
+        let make = |step: &str, artifact: &str, from: Option<&str>| {
+            let made: Value = serde_json::from_str(harness("pipeline.py", &["rerun", "001", "--step", "the diner", step, "--stand-in", "--json"]).lines().last().unwrap()).unwrap();
+            let take = made["files"][0].as_str().unwrap().to_string();
+            let request = Path::new(made["report"].as_str().unwrap()).file_stem().unwrap().to_string_lossy().to_string();
+            let mut args = vec!["publish", "001", artifact, "--file", take.as_str(), "--chain", "the diner", "--request", request.as_str()];
+            if let Some(from) = from {
+                args.extend(["--from", from, "image 1"]);
+            }
+            harness("pipeline.py", &args);
+            take
+        };
+        make("sheet", "the diner: sheet", None);
+        make("keyframe", "the diner: keyframe", Some("the diner: sheet"));
+        make("shot", "the diner: shot", Some("the diner: keyframe"));
+        // The sheet made again, so what was made from it is out of date.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        make("sheet", "the diner: sheet", None);
+        let mut runner = Runner::default();
+        runner.assume_prerequisites(&folder);
+        let env = ScriptEnv { scripts: Some(scripts.clone()), ..ScriptEnv::default() };
+        if let Begun::Answered(result) = runner.begin(&folder, env, "c1", "t", FIX_CHAIN, &json!({ "pipeline": "001", "stand_in": true })) {
+            panic!("answered at once: {:?}", result.output);
+        }
+        wait_until_asked(&mut runner);
+        let Some(Asking::Plans { plans, fix: Some(fix), .. }) = runner.asking() else { panic!("the fix showed no card") };
+        let steps: Vec<&str> = fix.steps.iter().map(|step| step.step.as_str()).collect();
+        assert_eq!(steps, ["keyframe", "shot"], "the card did not hold exactly what is out of date, in chain order");
+        assert_eq!(plans[1]["references"][0][FIXED_BY], "the diner: keyframe", "the shot's reference to the keyframe's fix was not marked");
+        assert!(runner.answer(true).is_none());
+        let start = std::time::Instant::now();
+        let answer = loop {
+            if let Some(answer) = runner.poll().0.pop() {
+                break answer;
+            }
+            assert!(start.elapsed().as_secs() < 120, "the fix never ended");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(answer.ok, "the fix stopped: {:?}", answer.output);
+        let touches: Value = serde_json::from_str(&harness("pipeline.py", &["touches", "001", "--json"])).unwrap();
+        assert_eq!(touches["out_of_date"], json!([]), "the chain is still out of date after its fix");
+        let log = std::fs::read_to_string(folder.join("pipeline/001/runs.jsonl")).unwrap();
+        assert_eq!(log.lines().filter(|line| line.contains("\"fixes\"")).count(), 2, "the fixes were not published as fixes");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
