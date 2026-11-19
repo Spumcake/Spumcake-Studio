@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod filing;
-mod publish;
+mod in_use;
 mod requests;
-use publish::notices;
+use in_use::notices;
 use requests::{forget_files, layer_png};
 
 /// How many files of rows sent while a stroke is drawn are kept for each
@@ -227,13 +227,6 @@ pub struct Image {
     pub rounds: Rounds,
     /// What the host was last told of its cells.
     cells_sent: Option<(Vec<Cell>, Option<String>)>,
-    /// Publishing, while the program runs and never in the file: the
-    /// takes beneath the last edit refused, which "Ask the assistant"
-    /// names; the image a `publish` was sent for; and each image
-    /// published, by its number, and the canon file it became.
-    refused: Vec<String>,
-    publishing: Option<u64>,
-    published: std::collections::HashMap<u64, String>,
 }
 
 impl Image {
@@ -317,6 +310,9 @@ pub struct Session {
     pub project: Option<PathBuf>,
     /// The files written for drafts, being filed.
     filings: Vec<filing::Filing>,
+    /// The tabs whose notice is a refused Use this take, which a later
+    /// success takes away.
+    refused: std::collections::HashSet<String>,
     /// Where images and thumbnails for the host are written, and whether
     /// it is a folder of this session's own in memory, which stays when a
     /// project is named.
@@ -378,6 +374,7 @@ impl Session {
             curve_point: None,
             project: None,
             filings: Vec::new(),
+            refused: std::collections::HashSet::new(),
             in_memory: memory.is_some(),
             display_failed: false,
             cache: memory.unwrap_or_else(scratch_folder),
@@ -687,18 +684,10 @@ impl Session {
                 }
             }
             HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
-            HostMessage::CellBecameStep { tab, cell, step, artifact } => {
-                self.cell_became_step(&tab, &cell, &step, &mut out);
-                if let Some(artifact) = artifact {
-                    self.keep_artifact(&cell, artifact, &mut out);
-                }
-            }
-            // A refusal's error is the host's card's to show, and publishes
-            // nothing, whatever file it names.
-            HostMessage::Published { tab, file, version, error, .. } => {
-                let file = if error.is_some() { String::new() } else { file };
-                self.published(&tab, file, version, &mut out);
-            }
+            HostMessage::CellBecameStep { tab, cell, step, .. } => self.cell_became_step(&tab, &cell, &step, &mut out),
+            // Use this take answered: an error is said; the seal comes with
+            // the next `takes`.
+            HostMessage::TakeUsed { tab, error, .. } => self.take_used(&tab, error, &mut out),
             // A draft's file filed.
             HostMessage::Filed { id, file, error } => {
                 // A layer written out: only a refusal is said.
@@ -888,9 +877,6 @@ impl Session {
             thumbs_owed: false,
             rounds: Rounds::default(),
             cells_sent: None,
-            refused: Vec::new(),
-            publishing: None,
-            published: std::collections::HashMap::new(),
         });
         self.active = self.images.len() - 1;
         if self.tools.tool == ToolKind::Crop {
@@ -1072,13 +1058,16 @@ impl Session {
                 }
             }
             // A take's menu.
-            "take_next_round" | "take_ask" | "take_edit" | "take_report" => {
+            "take_next_round" | "take_use" | "take_edit" | "take_report" => {
                 let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
                     return;
                 };
                 match id {
                     "take_next_round" => self.next_round(&path, out),
-                    "take_ask" => self.ask_about(&path, out),
+                    "take_use" => {
+                        self.use_take(&path, out);
+                        return;
+                    }
                     "take_report" => {
                         self.open_report(&path, out);
                         return;
@@ -1091,36 +1080,14 @@ impl Session {
                     self.write_out(node, out);
                 }
             }
-            // Publishing: Publish, its refusal's Ask the assistant, a
-            // notice closed, the canon seal, and the Open and Revert to this
-            // of the host's history card, which `history` fills.
-            "publish" => self.publish(out),
-            "publish_ask" => {
-                self.ask_about_inputs(out);
-                return;
-            }
-            "canon_history" => {
-                self.canon_history(out);
-                return;
-            }
-            "history_open" | "history_revert" => {
-                let Some(file) = arg.get("file").and_then(Value::as_str).map(str::to_string) else {
-                    return;
-                };
-                if id == "history_open" {
-                    self.edit_take(&file, out);
-                } else {
-                    self.revert(&file, out);
-                    return;
-                }
-            }
             "film_new" => {
                 self.film(|gallery| gallery.add(&protocol::untitled(ITEM), new_doc(), None));
             }
-            // The written-out notice's close mark.
+            // A notice's close mark.
             "notice_close" => {
-                if let Some(image) = self.active_image() {
-                    out.push(notices(&image.id, None));
+                if let Some(tab) = self.active_image().map(|image| image.id.clone()) {
+                    self.refused.remove(&tab);
+                    out.push(notices(&tab, None));
                 }
             }
             "film_open" => {

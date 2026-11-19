@@ -11,8 +11,6 @@
 //!   draft, and goes through the plan card, as the assistant's requests do.
 //! - The cost line comes from `request.py plan`, offline, asked once the
 //!   cell has stood still for a moment.
-//! - A reference is "Not canon" unless its file is a published artifact's,
-//!   read from `canon.sql`: a read, not a judgement of what is out of date.
 //! - A cell's rounds are read from `requests/` and the pending records, and
 //!   sent to its workspace with `takes`.
 
@@ -181,11 +179,6 @@ fn references(cell: &Cell) -> Vec<(String, Option<String>, Option<String>)> {
         .collect()
 }
 
-/// The references, by index, whose file is not a published artifact's.
-pub(crate) fn not_canon(cell: &Cell, canon: &Canon) -> Vec<usize> {
-    references(cell).iter().enumerate().filter(|(_, (path, _, _))| !canon.published.contains(path)).map(|(index, _)| index).collect()
-}
-
 /// The user's endpoint for a model whose cell names none, as a workspace
 /// cannot know the user's endpoints: the one whose kind is the service the
 /// model's workflow skill names for it in its `models.json`.
@@ -339,9 +332,10 @@ pub(crate) fn write_template(folder: &Path, template: &str) -> Result<String, St
 /// The cost line under the card, from a plan's estimate and the service.
 pub(crate) fn cost_line(plan: &Value, service: &str) -> String {
     let estimate = plan.get("estimate").and_then(Value::as_str).unwrap_or("");
-    let shown = match estimate.strip_prefix("about ") {
-        Some(rest) => format!("About {rest}"),
-        None => String::from("Cost unknown"),
+    let shown = match (estimate.strip_prefix("about "), estimate.strip_prefix("up to about ")) {
+        (Some(rest), _) => format!("About {rest}"),
+        (_, Some(rest)) => format!("Up to about {rest}"),
+        _ => String::from("Cost unknown"),
     };
     if service.is_empty() { shown } else { format!("{shown} · {service}") }
 }
@@ -781,7 +775,6 @@ pub(crate) struct CardView {
     /// For a step, the cell filled from the step's read; None for a draft,
     /// which shows as declared.
     pub cell: Option<Cell>,
-    pub not_canon: Vec<usize>,
     pub cost: Option<String>,
 }
 
@@ -851,9 +844,8 @@ impl PromptPage {
             Some(step) => self.step(folder, scripts, setup, step).map(|read| step_cell(declared, &read, &self.canon)),
             None => None,
         };
-        let canon = self.canon(folder, scripts, setup);
+        self.refresh(folder, scripts, setup);
         let cell = shown.clone().unwrap_or_else(|| declared.clone());
-        let not_canon = not_canon(&cell, &canon);
         // The cost is worked out from the spec the run would send.
         let spec = match &declared.step {
             Some(_) => None,
@@ -886,7 +878,7 @@ impl PromptPage {
             crate::prices::fill_from_history(&folder, &mut plan);
             Some(cost_line(&plan, &service))
         });
-        CardView { cell: shown, not_canon, cost }
+        CardView { cell: shown, cost }
     }
 
     /// The spec a cell runs as now, its step read afresh.
@@ -1336,19 +1328,6 @@ mod tests {
     fn a_records_time_reads_as_seconds() {
         assert_eq!(epoch("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(epoch("2026-11-16T12:00:00Z"), Some(1_794_830_400));
-    }
-
-    /// Catches a reference called canon whose file is not published.
-    #[test]
-    fn a_reference_is_canon_only_when_published() {
-        let cell = draft(vec![
-            CellPart::Text { text: String::from("p") },
-            CellPart::Path { path: String::from("library/a.png"), media_type: String::from("image/png"), role: None, field: None },
-            CellPart::Path { path: String::from("library/b.png"), media_type: String::from("image/png"), role: None, field: None },
-        ]);
-        let mut canon = Canon::default();
-        canon.published.insert(String::from("library/a.png"));
-        assert_eq!(not_canon(&cell, &canon), [1]);
     }
 
     #[test]

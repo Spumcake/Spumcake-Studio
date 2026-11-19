@@ -244,6 +244,9 @@ pub struct Session {
     cache: PathBuf,
     in_memory: bool,
     viewport: [f64; 2],
+    /// The tabs whose notice is a refused Use this take, which a later
+    /// success takes away.
+    refused: std::collections::HashSet<String>,
     file: Option<(String, Purpose)>,
     next_file: u64,
     /// Every image and thumbnail written gets the next revision, starting
@@ -309,6 +312,7 @@ impl Session {
             in_memory: memory.is_some(),
             cache: memory.unwrap_or_else(scratch_folder),
             viewport: FIRST_VIEWPORT,
+            refused: std::collections::HashSet::new(),
             file: None,
             next_file: 1,
             next_revision: seed,
@@ -558,6 +562,17 @@ impl Session {
             HostMessage::SelectCell { tab, cell } => self.select_cell(&tab, cell, &mut out),
             HostMessage::CellBecameStep { tab, cell, step, artifact } => self.cell_became_step(&tab, &cell, &step, artifact, &mut out),
             HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
+            // Use this take answered: an error is said at the bottom left;
+            // the seal comes with the next `takes`.
+            // A refusal is said, and taken away by a later success.
+            HostMessage::TakeUsed { tab, error, .. } => {
+                if let Some(error) = error.filter(|error| !error.is_empty()) {
+                    self.refused.insert(tab.clone());
+                    out.push(deliver::notices(&tab, Some((error, protocol::NoticeState::Failed))));
+                } else if self.refused.remove(&tab) {
+                    out.push(deliver::notices(&tab, None));
+                }
+            }
             HostMessage::Preview { id, path, media_type } => {
                 let root = self.project.clone().unwrap_or_default();
                 out.push(crate::preview::preview(id, &path, &media_type, &root, &self.cache, &mut self.next_revision));
@@ -1099,13 +1114,14 @@ impl Session {
             }
             // A notice's close.
             "notice_close" => {
-                if let Some(tab) = self.active_tab() {
-                    out.push(deliver::notices(&tab.id, None));
+                if let Some(tab) = self.active_tab().map(|tab| tab.id.clone()) {
+                    self.refused.remove(&tab);
+                    out.push(deliver::notices(&tab, None));
                 }
                 return;
             }
             // A take's menu.
-            "take_next_round" | "take_ask" | "take_edit" | "take_report" => {
+            "take_next_round" | "take_use" | "take_edit" | "take_report" => {
                 let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
                     return;
                 };
@@ -1114,8 +1130,8 @@ impl Session {
                         self.next_round(&path, out);
                         return;
                     }
-                    "take_ask" => {
-                        self.ask_about(&path, out);
+                    "take_use" => {
+                        self.use_take(&path, out);
                         return;
                     }
                     "take_report" => {

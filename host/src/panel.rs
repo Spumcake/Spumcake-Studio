@@ -1415,8 +1415,6 @@ pub(crate) struct CardState<'a> {
     pub model: Option<&'a str>,
     /// The gray cost line, such as "About $0.24 · OpenRouter".
     pub cost: Option<&'a str>,
-    /// The references, by index, that are not canon.
-    pub not_canon: &'a [usize],
     /// Small images of references, by `reference_key`, as `previewed`
     /// answered.
     pub previews: Option<&'a HashMap<String, ReferencePreview>>,
@@ -1499,8 +1497,6 @@ const ECHO_PASSES: u64 = 60;
 const KIND_FILL: Color32 = Color32::from_rgb(243, 244, 246);
 const WAITS: Color32 = Color32::from_rgb(170, 174, 180);
 const FAILED_RED: Color32 = Color32::from_rgb(220, 38, 38);
-const NOT_CANON_FILL: Color32 = Color32::from_rgb(254, 243, 199);
-const NOT_CANON_TEXT: Color32 = Color32::from_rgb(180, 83, 9);
 const LANDING: Color32 = Color32::from_rgb(37, 99, 235);
 const BADGE_FILL: Color32 = Color32::from_rgba_premultiplied(17, 18, 20, 190);
 
@@ -1882,7 +1878,7 @@ fn references(
             widgets::soft_shadow(&layer, floating, S.of(8.0));
             layer.rect_filled(floating, S.of(8.0), Color32::WHITE);
             let number = entries.iter().position(|entry| *entry == Entry::Reference(from)).unwrap_or(from) + 1;
-            paint_reference(&layer, ui, floating, number, from, parts[from], state);
+            paint_reference(&layer, ui, floating, number, parts[from], state);
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             if !ui.input(|input| input.pointer.primary_down()) {
                 if to != from {
@@ -1928,8 +1924,8 @@ fn dashed_box(painter: &Painter, rect: Rect) {
     painter.extend(egui::Shape::dashed_line(&corners, Stroke::new(1.0, widgets::RAIL), 4.0, 3.0));
 }
 
-/// A reference's row: its handle, number, image, role, file, and the
-/// "Not canon" tag when it is not, with its menu at the right.
+/// A reference's row: its handle, number, image, role, and file, with its
+/// menu at the right.
 #[allow(clippy::too_many_arguments)]
 fn reference_row(
     ui: &mut egui::Ui,
@@ -1955,7 +1951,7 @@ fn reference_row(
     if hovered || menu_open {
         painter.rect_filled(row.expand2(vec2(S.of(4.0), 0.0)), S.of(6.0), widgets::SELECTED);
     }
-    let text = paint_reference(&painter, ui, row, number, reference, part, state);
+    let text = paint_reference(&painter, ui, row, number, part, state);
 
     // The role opens a menu of the declared roles and "Name what it's for…";
     // the latter names it in place.
@@ -2081,15 +2077,14 @@ struct ReferenceText {
 }
 
 /// A reference's row, without its pointer: the handle, the number, the
-/// image with its badge, the role, the file in gray, and the "Not canon"
-/// tag. Drawn in place and, while dragged, under the pointer.
+/// image with its badge, the role, and the file in gray. Drawn in place
+/// and, while dragged, under the pointer.
 #[allow(clippy::too_many_arguments)]
 fn paint_reference(
     painter: &Painter,
     ui: &egui::Ui,
     row: Rect,
     number: usize,
-    reference: usize,
     part: &CellPart,
     state: &CardState,
 ) -> ReferenceText {
@@ -2108,45 +2103,21 @@ fn paint_reference(
     let file = part_file(part);
     let role = part_role(part);
     let (main, second) = if role.is_empty() { (file.as_str(), "") } else { (role, file.as_str()) };
-    let mut tag_w = 0.0;
-    let tag = state.not_canon.contains(&reference).then(|| painter.layout_no_wrap("Not canon".to_string(), card_small(), NOT_CANON_TEXT));
-    if let Some(tag) = &tag {
-        tag_w = tag.size().x + S.of(12.0) + S.of(8.0);
-    }
-    // With a file line under the role, the "Not canon" tag goes on that
-    // line, so the role keeps the row's width; otherwise it follows the
-    // role.
-    let tag_inline = second.is_empty();
     let role_y = if second.is_empty() { row.center().y } else { row.center().y - S.of(9.0) };
-    let role_room = if tag_inline { right - left - tag_w - S.of(18.0) } else { right - left };
     let mut job = egui::text::LayoutJob::simple_singleline(main.to_string(), widgets::body(S), TEXT);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(role_room.max(1.0));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((right - left).max(1.0));
     let galley = painter.layout_job(job);
     let role_end = left + galley.size().x;
     painter.galley(pos2(left, role_y - galley.size().y / 2.0), galley, TEXT);
-    let pill = |at_x: f32, y: f32, tag: std::sync::Arc<egui::Galley>| {
-        let pill = Rect::from_min_size(pos2(at_x, y - tag.size().y / 2.0 - S.of(2.0)), tag.size() + vec2(S.of(12.0), S.of(4.0)));
-        painter.rect_filled(pill, pill.height() / 2.0, NOT_CANON_FILL);
-        painter.galley(pill.center() - tag.size() / 2.0, tag, NOT_CANON_TEXT);
-    };
-    if tag_inline && let Some(tag) = tag.clone() {
-        pill(role_end + S.of(8.0), role_y, tag);
-    }
     if !second.is_empty() {
         let file_y = row.center().y + S.of(10.0);
-        let room = if tag.is_some() { right - left - tag_w } else { right - left };
         let mut job = egui::text::LayoutJob::simple_singleline(second.to_string(), card_small(), MUTED);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(1.0));
+        job.wrap = egui::text::TextWrapping::truncate_at_width((right - left).max(1.0));
         let galley = painter.layout_job(job);
-        let file_end = left + galley.size().x;
         painter.galley(pos2(left, file_y - galley.size().y / 2.0), galley, MUTED);
-        if let Some(tag) = tag {
-            pill(file_end + S.of(8.0), file_y, tag);
-        }
     }
-    let role_right = if tag_inline { right - tag_w } else { right };
     ReferenceText {
-        role: Rect::from_min_max(pos2(left, role_y - S.of(10.0)), pos2(role_right, role_y + S.of(10.0))),
+        role: Rect::from_min_max(pos2(left, role_y - S.of(10.0)), pos2(right, role_y + S.of(10.0))),
         role_end,
     }
 }

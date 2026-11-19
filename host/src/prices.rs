@@ -498,20 +498,28 @@ pub(crate) const SET_PRICES: &str = "Set its prices in Settings, under its endpo
 
 /// A model's token counts as its skill's `models.json` gives them, the
 /// service's own: `tokens: {per_image_in, per_image_out: {"<size>
-/// <quality>": n}}`, read from the skill folders the data folder's
-/// settings list. None when no skill gives them.
+/// <quality>": n}}`, with the entry's `sizes` the service may choose,
+/// read from the skill folders the data folder's settings list. None when
+/// no skill gives them.
 fn listed_tokens(data: &Path, service: &str, model: &str) -> Option<Value> {
     let settings: crate::workspace::Settings = std::fs::read_to_string(data.join("settings.json")).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
-    let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders));
+    // The folders Settings names come before the checkout Studio finds.
+    let folders = crate::skills_checkout::skill_folders(&settings.skill_folders);
+    let skills: Vec<crate::skills_setup::Skill> = folders.iter().flat_map(|folder| crate::skills_setup::listed_skills(std::slice::from_ref(folder))).collect();
     skills.iter().find_map(|skill| {
         let listed: Value = std::fs::read_to_string(skill.folder.join("models.json")).ok().and_then(|text| serde_json::from_str(&text).ok())?;
         listed
             .as_array()?
             .iter()
-            .find(|entry| entry.get("service").and_then(Value::as_str) == Some(service) && entry.get("model").and_then(Value::as_str) == Some(model))?
-            .get("tokens")
-            .filter(|tokens| tokens.is_object())
-            .cloned()
+            .find(|entry| entry.get("service").and_then(Value::as_str) == Some(service) && entry.get("model").and_then(Value::as_str) == Some(model))
+            .and_then(|entry| {
+                // The sizes the service may choose, beside the counts.
+                let mut tokens = entry.get("tokens").filter(|tokens| tokens.is_object())?.clone();
+                if let Some(sizes) = entry.get("sizes").filter(|sizes| sizes.is_array()) {
+                    tokens["sizes"] = sizes.clone();
+                }
+                Some(tokens)
+            })
     })
 }
 
@@ -583,8 +591,7 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
     // with its area, so it is counted from the nearest size counted, of its
     // quality when there is one, as the project recorded it or the
     // skill's models.json lists it.
-    let scaled_out = || {
-        let wanted = area(made.0.as_str()?)?;
+    let scaled_to = |wanted: f64| {
         let mut counted: Vec<(f64, f64, bool)> = earlier.iter().filter_map(|used| Some((area(used.made.0.as_str()?)?, used.out / used.made.2.max(1) as f64, used.made.1 == made.1))).collect();
         for (key, tokens) in listed.as_ref().and_then(|listed| listed.get("per_image_out")).and_then(Value::as_object).into_iter().flatten() {
             let (size, quality) = key.split_once(' ').unwrap_or((key.as_str(), ""));
@@ -599,14 +606,40 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
         let tokens = median(pool.iter().filter(|(at, _, _)| *at == nearest).map(|(_, tokens, _)| *tokens).collect())?;
         Some(tokens * wanted / nearest * made.2 as f64)
     };
-    let out = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out).or_else(scaled_out)?;
+    let scaled_out = || scaled_to(area(made.0.as_str()?)?);
+    // An image whose size the service chooses, "auto", is counted at the
+    // largest size the model's models.json lists, of its quality when there
+    // is one, so the card shows an upper bound; the project's own requests
+    // at "auto" refine it once one has run.
+    // With the sizes the service may choose for it, listed as models.json's
+    // `sizes`, the bound is the largest of them; else the largest counted.
+    let choosable = || listed.as_ref()?.get("sizes")?.as_array()?.iter().filter_map(|size| area(size.as_str()?)).max_by(f64::total_cmp);
+    let largest_out = || {
+        if let Some(largest) = choosable() {
+            return scaled_to(largest);
+        }
+        let tokens = listed.as_ref()?.get("per_image_out")?.as_object()?;
+        let sized = |same: bool| tokens.iter().filter_map(|(key, tokens)| {
+            let (size, quality) = key.split_once(' ').unwrap_or((key.as_str(), ""));
+            (!same || made.1.as_str() == Some(quality)).then(|| Some((area(size)?, tokens.as_f64()?))).flatten()
+        }).max_by(|a, b| a.0.total_cmp(&b.0));
+        Some(sized(true).or_else(|| sized(false))?.1 * made.2 as f64)
+    };
+    let exact = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out);
+    let chosen_size = made.0.as_str().is_none_or(|size| area(size).is_none());
+    let (out, upper) = match exact {
+        Some(out) => (out, false),
+        None if chosen_size => (largest_out()?, true),
+        None => (scaled_out()?, false),
+    };
     let mut cost = 0.0;
     for (tokens, key) in [(text, "input_text"), (image, "input_image"), (out, "output_image")] {
         if tokens > 0.0 {
             cost += tokens * price(key)? / 1e6;
         }
     }
-    (cost > 0.0).then(|| format!("about {} · {FROM_YOUR_PRICES}", money(cost)))
+    let bound = if upper { "up to about" } else { "about" };
+    (cost > 0.0).then(|| format!("{bound} {} · {FROM_YOUR_PRICES}", money(cost)))
 }
 
 /// A plan's estimate, from the user's token prices when no list gives its
@@ -725,6 +758,15 @@ mod tests {
         assert_eq!(from_token_prices(&data, &folder, &wide), Some(format!("about $0.064 · {FROM_YOUR_PRICES}")), "a film of another shape was left unknown");
         wide["endpoint"]["settings"]["quality"] = json!("medium");
         assert!(from_token_prices(&data, &folder, &wide).is_some(), "a quality never listed was left unknown");
+        // A size the service chooses is counted at the largest size listed,
+        // 1536x864 high's 1078 tokens, and shown as an upper bound.
+        let mut chosen = plan.clone();
+        chosen["endpoint"]["settings"] = json!({ "size": "auto", "quality": "high" });
+        assert_eq!(from_token_prices(&data, &folder, &chosen), Some(format!("up to about $0.054 · {FROM_YOUR_PRICES}")), "a size the service chooses was left unknown");
+        // With the sizes the service may choose listed, the bound is the
+        // largest of them, 1536x1024, scaled from 1536x864's count.
+        std::fs::write(skill.join("models.json"), json!([{ "service": "openai", "model": model, "sizes": ["1024x1024", "1536x1024", "1024x1536"], "tokens": { "per_image_in": 1296, "per_image_out": { "1536x864 high": 1078, "1344x768 high": 983 } } }]).to_string()).unwrap();
+        assert_eq!(from_token_prices(&data, &folder, &chosen), Some(format!("up to about $0.06 · {FROM_YOUR_PRICES}")), "the bound was not the largest size the service may choose");
         // Prices only partly set still point to Settings.
         settings["token_prices"] = json!([{ "endpoint": "images", "model": model, "output_image": 30.0 }]);
         std::fs::write(data.join("settings.json"), settings.to_string()).unwrap();
