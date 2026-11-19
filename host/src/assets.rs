@@ -124,7 +124,26 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             }
         }
     }
+    // A script step's take, such as a pre-vis render, is filed with a
+    // `run` event naming its step: its step's own, as a request's take is.
+    let mut ran: HashSet<String> = HashSet::new();
+    for pipeline in std::fs::read_dir(folder.join("pipeline")).into_iter().flatten().flatten() {
+        for event in std::fs::read_to_string(pipeline.path().join("runs.jsonl")).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
+            if event.get("event").and_then(Value::as_str) != Some("run") {
+                continue;
+            }
+            let text = |key: &str| event.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()).map(String::from);
+            let step = text("chain").zip(text("step"));
+            for file in event.get("files").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                ran.insert(file.to_string());
+                if !iterated.contains(file) && is_reference(file) {
+                    takes.push((text("at").unwrap_or_default(), file.to_string(), step.clone()));
+                }
+            }
+        }
+    }
     takes.sort();
+    takes.dedup_by(|later, earlier| later.1 == earlier.1);
     // A published file no report made, such as a filed resource, is an
     // asset too.
     let mut seen: HashSet<String> = takes.iter().map(|(_, file, _)| file.clone()).collect();
@@ -144,11 +163,18 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             takes.push((String::new(), file.clone(), None));
         }
     }
-    // And so is a filed resource no report made and canon does not name,
-    // such as an earlier export: an asset outside any cell. A file nothing
-    // records stays out.
+    // And so is a file filed with nothing it was made from, an import or an
+    // export, that no report or step made and canon does not name: an asset
+    // outside any cell. A file filed from others, such as a mix of its shot,
+    // is that one's finishing, and a file nothing records stays out.
     let records = std::fs::read_to_string(folder.join("prompts/resources/records.jsonl")).unwrap_or_default();
-    let mut filed: Vec<String> = records.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).filter_map(|record| record.get("file").and_then(Value::as_str).map(String::from)).filter(|file| is_reference(file) && !iterated.contains(file.as_str())).collect();
+    let mut filed: Vec<String> = records
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record.get("inputs").and_then(Value::as_array).is_none_or(Vec::is_empty))
+        .filter_map(|record| record.get("file").and_then(Value::as_str).map(String::from))
+        .filter(|file| is_reference(file) && !iterated.contains(file.as_str()) && !ran.contains(file))
+        .collect();
     filed.sort();
     filed.dedup();
     for file in filed {
@@ -249,10 +275,19 @@ mod tests {
         let mut records = std::fs::read_to_string(folder.join("prompts/resources/records.jsonl")).unwrap();
         records.push('\n');
         records.push_str(&json!({ "at": "2026-11-19T12:00:00Z", "file": "prompts/resources/animatic-export-1.mp4", "inputs": [] }).to_string());
+        // A pre-vis render a script step filed, and a mix filed from a take.
+        for (file, input) in [("prompts/resources/previs-render.png", "prompts/resources/layout.png"), ("prompts/resources/shot-mixed.mp4", "library/bell.png")] {
+            records.push('\n');
+            records.push_str(&json!({ "at": "2026-11-19T12:30:00Z", "file": file, "inputs": [{ "file": input, "sha256": "x" }] }).to_string());
+        }
+        let mut log = std::fs::read_to_string(folder.join("pipeline/002/runs.jsonl")).unwrap();
+        log.push('\n');
+        log.push_str(&json!({ "event": "run", "at": "2026-11-19T12:30:00Z", "chain": "the animatic", "step": "pre-vis, the bell", "files": ["prompts/resources/previs-render.png"] }).to_string());
+        std::fs::write(folder.join("pipeline/002/runs.jsonl"), log).unwrap();
         std::fs::write(folder.join("prompts/resources/records.jsonl"), records).unwrap();
         std::fs::write(folder.join("prompts/resources/stray.png"), b"stray").unwrap();
         let mut canon = Canon::default();
-        for (step, artifact, order) in [("keyframe, the bell", "Last order: keyframe, the bell", 3), ("keyframe, the bell (2)", "Last order: keyframe, the bell (2)", 3)] {
+        for (step, artifact, order) in [("keyframe, the bell", "Last order: keyframe, the bell", 3), ("keyframe, the bell (2)", "Last order: keyframe, the bell (2)", 3), ("pre-vis, the bell", "Last order: pre-vis, the bell", 2)] {
             let key = (String::from("the animatic"), step.to_string());
             canon.step_artifacts.insert(key.clone(), artifact.to_string());
             canon.step_orders.insert(key, order);
@@ -262,7 +297,8 @@ mod tests {
         let touches = json!({ "out_of_date": [{ "artifact": "Last order: keyframe, the bell", "why": ["x"] }, { "artifact": "Last order: keyframe, the bell (2)", "why": ["x"] }], "unverified": [] });
         let found = assets(&folder, &canon, &touches);
         let firsts: Vec<&str> = found.iter().map(|asset| asset.first.as_str()).collect();
-        assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/layout.png", "prompts/resources/animatic-export-1.mp4"], "an iteration became an asset, a document or a stray file was taken for one, or a filed export was left out");
+        assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/previs-render.png", "prompts/resources/layout.png", "prompts/resources/animatic-export-1.mp4"], "an iteration became an asset, a document, a stray file, or a mix was taken for one, or a filed export or a script step's take was left out");
+        assert_eq!(found[2].cell, Some((String::from("the animatic"), 2)), "a script step's take was left outside its step's cell");
         let bell = &found[0];
         let files: Vec<&str> = bell.iterations.iter().map(|iteration| iteration.file.as_str()).collect();
         assert_eq!(files, ["prompts/resources/bell-edit.png", "library/bell-3.png"]);
@@ -274,8 +310,8 @@ mod tests {
         assert!(!alternative.in_use && !alternative.outlined, "an asset not in use was outlined: {alternative:?}");
         assert_eq!(alternative.artifact.as_deref(), Some("Last order: keyframe, the bell (2)"));
         assert_eq!(alternative.cell, Some((String::from("the animatic"), 3)), "the second asset lost its cell");
-        assert!(found[2].in_use && found[2].cell.is_none(), "a published resource no step makes was given a cell");
-        assert!(!found[3].in_use && found[3].cell.is_none(), "a filed export was put in a cell, or in use");
+        assert!(found[3].in_use && found[3].cell.is_none(), "a published resource no step makes was given a cell");
+        assert!(!found[4].in_use && found[4].cell.is_none(), "a filed export was put in a cell, or in use");
         let _ = std::fs::remove_dir_all(&folder);
     }
 }
