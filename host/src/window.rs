@@ -869,6 +869,7 @@ impl eframe::App for HostWindow {
             }
         }
         self.show_publishing(&ctx);
+        self.show_iteration_warning(&ctx);
         self.draw_model_menu(&ctx);
         if bar_pressed {
             self.toggle_workspace();

@@ -31,6 +31,7 @@ use super::publishing::{Asked, Card, Delivery};
 use super::publishing::Asker;
 use crate::publish_card::PublishCardView;
 use crate::runner::ScriptEnv;
+use eframe::egui;
 use protocol::{CanonVersion, HostMessage};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -52,11 +53,52 @@ enum Done {
     Published(Asked, Result<(String, Option<u32>), String>),
 }
 
+/// A Save waiting on the warning `ig-dependency-warning` shows: the take,
+/// the file saved, and the warning's words.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IterationAsk {
+    app: usize,
+    tab: String,
+    cell: String,
+    path: String,
+    source: String,
+    /// "Take 3 is in use as a dependency, …".
+    pub warning: String,
+    /// "2 takes in Shot 12 and Shot 13 were made from it."
+    pub made_from: String,
+}
+
+/// What a take ask came to.
+enum TakeDone {
+    Used { app: usize, tab: String, cell: String, path: String, result: Result<String, String> },
+    Saved { app: usize, tab: String, cell: String, path: String, result: Result<Option<String>, String> },
+    Ignored { app: usize, tab: String, cell: String, path: String, result: Result<(), String> },
+    /// The asset is in use and other work was made from it.
+    Warn(IterationAsk),
+}
+
+/// The warning's title, as `ig-dependency-warning` shows it.
+const SAVE_ITERATION_TITLE: &str = "Save a new iteration?";
+const SAVE_ITERATION: &str = "Save iteration";
+/// A take Use cannot put in use, since no recipe's step makes it.
+const IN_NO_RECIPE: &str = "This take is in no recipe yet, so it cannot be put in use.";
+/// A step that names no artifact to publish a take as.
+const NO_ARTIFACT: &str = "Its step names no artifact to put the take in use as.";
+/// A take that is no asset's, so it has nothing to iterate or ignore.
+const NO_ASSET: &str = "This take is not one of the project's assets.";
+
 /// The publishing job running, if any, and the delivery the Deliver card
 /// shows.
 #[derive(Default)]
 pub(crate) struct Runs {
     working: Option<Receiver<Done>>,
+    /// What workspaces asked of their takes, each with its workspace, the
+    /// cell's id, and the cell's step, waiting their turn.
+    take_queue: std::collections::VecDeque<(usize, String, String, Option<protocol::StepRef>, String, crate::process::TakeAsk)>,
+    /// The take ask running, if any.
+    taking: Option<Receiver<TakeDone>>,
+    /// A Save on an asset other work was made from, waiting on the warning.
+    pub iteration_warning: Option<IterationAsk>,
     /// Checked, and waiting for the user's answer on the Deliver card.
     pub deliver_card: Option<Delivery>,
     /// Confirmed on the Deliver card, to carry out.
@@ -537,6 +579,153 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
     Ok((file, Some(version)))
 }
 
+/// The take's number in its round, as the filmstrip counts it: its place
+/// among its report's outputs.
+fn take_number(place: &Place, path: &str) -> Option<usize> {
+    let shown: Value = serde_json::from_str(&place.script("request.py", &["show", path]).ok()?).ok()?;
+    let outputs = shown.get("outputs").and_then(Value::as_array)?;
+    outputs.iter().position(|output| output.as_str() == Some(path)).map(|index| index + 1)
+}
+
+/// The project's assets, read through Skills' own scripts.
+fn assets_of(place: &Place) -> Result<Vec<crate::assets::Asset>, String> {
+    crate::assets::read_assets(&place.scripts, &place.folder, &place.vars, &place.pipeline)
+}
+
+/// The asset whose take, or one of whose iterations, is at `path`.
+fn asset_at(assets: Vec<crate::assets::Asset>, path: &str) -> Result<crate::assets::Asset, String> {
+    assets.into_iter().find(|asset| asset.files().any(|file| file == path)).ok_or_else(|| String::from(NO_ASSET))
+}
+
+/// Ignore: the take's artifact kept as it is, with Skills' own `keep`, so
+/// Claude Code reads it as kept too.
+fn ignore_take(place: &Place, path: &str) -> Result<(), String> {
+    let asset = asset_at(assets_of(place)?, path)?;
+    let Some(artifact) = asset.artifact.filter(|_| asset.in_use) else { return Ok(()) };
+    place.script("pipeline.py", &["keep", &place.pipeline, &artifact, "--reason", protocol::IGNORED_REASON]).map(|_| ())
+}
+
+/// Use this take: the take at `path` published as its own step's
+/// artifact, beside the cell's assets already in use. A take whose step's
+/// artifact holds another take already gets a step of its own at the same
+/// place, the next alternative, as Generate again makes one. Returns the
+/// artifact.
+fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::StepRef>, path: &str) -> Result<String, String> {
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+    // The step its report names, or else the cell's.
+    let named = request_of(place, path)
+        .and_then(|request| place.script("request.py", &["show", &request]).ok())
+        .and_then(|shown| serde_json::from_str::<Value>(&shown).ok())
+        .and_then(|record| Some(protocol::StepRef { chain: record.get("chain")?.as_str()?.to_string(), step: record.get("step")?.as_str()?.to_string() }));
+    let step = named.or(cell_step).ok_or_else(|| String::from(IN_NO_RECIPE))?;
+    let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned().ok_or_else(|| String::from(NO_ARTIFACT))?;
+    let holds = canon.files.get(&artifact).filter(|file| canon.published.contains(*file));
+    if holds.is_some_and(|file| file == path) {
+        return Ok(artifact);
+    }
+    let artifact = match holds {
+        None => artifact,
+        Some(_) => alternative_step(place, &canon, &step, &artifact)?,
+    };
+    let asked = Asked::Publish { asker: super::publishing::Asker::Workspace { app, tab: tab.to_string() }, artifact: artifact.clone(), source: path.to_string(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+    let view = prepare(place, &asked)?;
+    carry(place, &Card { asked, view }, false)?;
+    Ok(artifact)
+}
+
+/// A new step at `step`'s place, the next alternative, `"<step>, N"`,
+/// with its prompt, references, and settings as they stand and its own
+/// artifact, `"<element>: <role>, N"`. Returns the artifact.
+fn alternative_step(place: &Place, canon: &crate::prompt_page::Canon, step: &protocol::StepRef, artifact: &str) -> Result<String, String> {
+    let read: Value = serde_json::from_str(&place.script("pipeline.py", &["step", &place.pipeline, &step.chain, &step.step, "--show"])?).map_err(|error| format!("The step could not be read: {error}"))?;
+    let text = |key: &str| read.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let order = read.get("ord").and_then(Value::as_i64).ok_or("The step has no place in its chain.")?.to_string();
+    let base = crate::prompt_page::alternative_of(&step.step).0.to_string();
+    let n = (2..).find(|n| !canon.step_orders.contains_key(&(step.chain.clone(), format!("{base}, {n}")))).unwrap_or(2);
+    let (name, artifact) = (format!("{base}, {n}"), format!("{}, {n}", crate::prompt_page::alternative_of(artifact).0));
+    let template = text("template");
+    let template = if template.starts_with('@') { format!("@{}", crate::prompt_page::write_template(&place.folder, &template)?) } else { template };
+    let (skill, endpoint, refs) = (text("skill"), text("endpoint"), text("refs"));
+    let mut args: Vec<&str> = vec!["step", &place.pipeline, &step.chain, &name, "--order", &order, "--artifact", &artifact];
+    for (flag, value) in [("--skill", &skill), ("--endpoint", &endpoint), ("--template", &template), ("--refs", &refs)] {
+        if !value.is_empty() {
+            args.extend([flag, value.as_str()]);
+        }
+    }
+    place.script("pipeline.py", &args)?;
+    Ok(artifact)
+}
+
+/// Whether a Save on the asset at `path` waits on the warning: the asset is
+/// in use and other work in use was made from it. Returns the warning's
+/// words when it does.
+fn iteration_warning(place: &Place, path: &str) -> Result<Option<(String, String)>, String> {
+    let assets = assets_of(place)?;
+    let asset = asset_at(assets.clone(), path)?;
+    let Some(artifact) = asset.artifact.clone().filter(|_| asset.in_use) else { return Ok(None) };
+    let reached: Value = serde_json::from_str(&place.script("pipeline.py", &["touches", &place.pipeline, "--artifact", &artifact, "--json"])?).map_err(|error| format!("What uses it could not be read: {error}"))?;
+    let reached: Vec<&str> = reached.get("artifacts").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).filter(|reached| *reached != artifact).collect();
+    let made: Vec<&crate::assets::Asset> = assets.iter().filter(|other| other.in_use && other.artifact.as_deref().is_some_and(|other| reached.contains(&other))).collect();
+    if made.is_empty() {
+        return Ok(None);
+    }
+    // Each cell by its step's name, as the recipe shows it.
+    let mut cells: Vec<String> = Vec::new();
+    for other in &made {
+        let name = other.artifact.as_deref().and_then(|artifact| artifact.split_once(": ").map(|(_, role)| crate::prompt_page::alternative_of(role).0.to_string())).unwrap_or_default();
+        if !name.is_empty() && !cells.contains(&name) {
+            cells.push(name);
+        }
+    }
+    let take = take_number(place, &asset.first).map_or_else(|| String::from("This take"), |number| format!("Take {number}"));
+    let warning = format!("{take} is in use as a dependency, and new iterations would break canonical consistency.");
+    let cells = match cells.as_slice() {
+        [] => String::from("other cells"),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let made_from = if made.len() == 1 { format!("1 take in {cells} was made from it.") } else { format!("{} takes in {cells} were made from it.", made.len()) };
+    Ok(Some((warning, made_from)))
+}
+
+/// Save in a workspace: `source` filed as the next iteration of the asset at
+/// `path`, from its latest iteration and with what that iteration was made
+/// from, and, while the asset is in use, published as its artifact's next
+/// version, naming the artifact itself, so Skills records it as an edit.
+/// Studio commits nothing. Returns the file filed.
+fn save_iteration(place: &Place, path: &str, source: &str) -> Result<Option<String>, String> {
+    let asset = asset_at(assets_of(place)?, path)?;
+    let latest = asset.canonical().to_string();
+    let in_use = asset.artifact.clone().filter(|_| asset.in_use);
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+    // What the latest iteration was made from, so the new one keeps it.
+    let sources: Vec<(String, String)> = in_use.as_ref().and_then(|artifact| version_sources(place, artifact, &latest)).unwrap_or_default().into_iter().filter(|(name, _)| canon.files.contains_key(name)).collect();
+    let stem = Path::new(source).file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_else(|| String::from("iteration"));
+    let mut printed = Err(String::new());
+    for n in 1..10 {
+        let name = if n == 1 { stem.clone() } else { format!("{stem}-{n}") };
+        let mut args: Vec<&str> = vec!["resource", source, "--name", name.as_str(), "--iterates", latest.as_str()];
+        for (name, _) in &sources {
+            args.extend(["--from", canon.files[name].as_str()]);
+        }
+        printed = place.script("request.py", &args);
+        if !printed.as_ref().is_err_and(|error| error.contains("refusing to overwrite")) {
+            break;
+        }
+    }
+    let printed = printed.map_err(|error| format!("The iteration could not be filed: {error}"))?;
+    let filed = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or("The iteration was filed, but its new name was not given.")?;
+    if let Some(artifact) = &in_use {
+        let chain = chain_of(place, artifact)?.unwrap_or_default();
+        let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact.as_str(), "--file", filed.as_str(), "--chain", chain.as_str(), "--from", artifact.as_str(), "iteration"];
+        for (name, role) in &sources {
+            args.extend(["--from", name.as_str(), role.as_str()]);
+        }
+        place.script("pipeline.py", &args)?;
+    }
+    Ok(Some(filed))
+}
+
 impl HostWindow {
     /// Where publishing runs: the open project's folder, scripts,
     /// and living pipeline.
@@ -601,8 +790,130 @@ impl HostWindow {
 
     /// Called each frame: a job's answer when it ends, and the next job when
     /// none runs and no card waits for the user.
+    /// Takes each workspace's asks of its takes into the queue, each with
+    /// its cell's step, and runs the next when none is running.
+    fn run_take_asks(&mut self) {
+        let mut asked = Vec::new();
+        for (app, started) in self.apps.iter_mut().enumerate() {
+            asked.extend(started.running.declared.take_asks.drain(..).map(|ask| (app, ask)));
+        }
+        for (app, (tab, cell, path, ask)) in asked {
+            let id = cell.item.clone().unwrap_or_default();
+            let step = self.panel_cell(app, &tab, &id).and_then(|cell| cell.step);
+            self.publish_runs.take_queue.push_back((app, tab, id, step, path, ask));
+        }
+        if let Some(taking) = &self.publish_runs.taking {
+            match taking.try_recv() {
+                Ok(done) => {
+                    self.publish_runs.taking = None;
+                    self.take_done(done);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.publish_runs.taking = None,
+            }
+        }
+        if self.publish_runs.iteration_warning.is_some() {
+            return;
+        }
+        let Some((app, tab, cell, step, path, ask)) = self.publish_runs.take_queue.pop_front() else { return };
+        let Some(place) = self.publish_place() else {
+            let error = Some(String::from("This project has no pipeline yet."));
+            self.send(app, match ask {
+                crate::process::TakeAsk::Use => HostMessage::TakeUsed { tab, path, artifact: None, error },
+                crate::process::TakeAsk::SaveIteration { .. } => HostMessage::IterationSaved { tab, path, file: None, error },
+                crate::process::TakeAsk::Ignore => HostMessage::TakeIgnored { tab, path, error },
+            });
+            return;
+        };
+        self.start_take(place, app, tab, cell, step, path, ask, false);
+    }
+
+    /// Runs one take ask on its own thread. A Save already past its warning
+    /// is `warned`.
+    #[allow(clippy::too_many_arguments)]
+    fn start_take(&mut self, place: Place, app: usize, tab: String, cell: String, step: Option<protocol::StepRef>, path: String, ask: crate::process::TakeAsk, warned: bool) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let done = match ask {
+                crate::process::TakeAsk::Use => {
+                    let result = use_take(&place, app, &tab, step, &path);
+                    TakeDone::Used { app, tab, cell, path, result }
+                }
+                crate::process::TakeAsk::Ignore => {
+                    let result = ignore_take(&place, &path);
+                    TakeDone::Ignored { app, tab, cell, path, result }
+                }
+                crate::process::TakeAsk::SaveIteration { source } => match (warned, iteration_warning(&place, &path)) {
+                    (false, Ok(Some((warning, made_from)))) => TakeDone::Warn(IterationAsk { app, tab, cell, path, source, warning, made_from }),
+                    (false, Err(error)) => TakeDone::Saved { app, tab, cell, path, result: Err(error) },
+                    _ => {
+                        let result = save_iteration(&place, &path, &source);
+                        TakeDone::Saved { app, tab, cell, path, result }
+                    }
+                },
+            };
+            let _ = sender.send(done);
+            ctx.request_repaint();
+        });
+        self.publish_runs.taking = Some(receiver);
+    }
+
+    /// A take ask's answer to its workspace, then the cell's takes as they
+    /// now stand.
+    fn take_done(&mut self, done: TakeDone) {
+        let cell = match done {
+            TakeDone::Used { app, tab, cell, path, result } => {
+                let (artifact, error) = match result {
+                    Ok(artifact) => (Some(artifact), None),
+                    Err(error) => (None, Some(error)),
+                };
+                self.send(app, HostMessage::TakeUsed { tab, path, artifact, error });
+                cell
+            }
+            TakeDone::Saved { app, tab, cell, path, result } => {
+                let (file, error) = match result {
+                    Ok(file) => (file, None),
+                    Err(error) => (None, Some(error)),
+                };
+                self.send(app, HostMessage::IterationSaved { tab, path, file, error });
+                cell
+            }
+            TakeDone::Ignored { app, tab, cell, path, result } => {
+                self.send(app, HostMessage::TakeIgnored { tab, path, error: result.err() });
+                cell
+            }
+            TakeDone::Warn(ask) => {
+                self.publish_runs.iteration_warning = Some(ask);
+                return;
+            }
+        };
+        self.send_rounds(&cell);
+    }
+
+    /// The warning before a Save on an asset other work was made from, as
+    /// `ig-dependency-warning` shows it: Save iteration goes ahead, Cancel
+    /// answers with no file and no error.
+    pub(super) fn show_iteration_warning(&mut self, ctx: &egui::Context) {
+        let Some(ask) = self.publish_runs.iteration_warning.clone() else { return };
+        let Some(answer) = crate::plan_card::ask(ctx, SAVE_ITERATION_TITLE, &[ask.warning.clone(), ask.made_from.clone()], SAVE_ITERATION) else { return };
+        self.publish_runs.iteration_warning = None;
+        if !answer {
+            self.send(ask.app, HostMessage::IterationSaved { tab: ask.tab, path: ask.path, file: None, error: None });
+            return;
+        }
+        match self.publish_place() {
+            Some(place) => {
+                let IterationAsk { app, tab, cell, path, source, .. } = ask;
+                self.start_take(place, app, tab, cell, None, path, crate::process::TakeAsk::SaveIteration { source }, true);
+            }
+            None => self.send(ask.app, HostMessage::IterationSaved { tab: ask.tab, path: ask.path, file: None, error: Some(String::from("This project has no pipeline yet.")) }),
+        }
+    }
+
     pub(super) fn run_publishing(&mut self) {
         self.take_step_runs();
+        self.run_take_asks();
         if let Some(working) = &self.publish_runs.working {
             match working.try_recv() {
                 Ok(done) => {

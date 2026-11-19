@@ -194,6 +194,19 @@ pub(crate) fn reference_paths(asking: &Asking) -> Vec<String> {
 /// that is not an image, by its path.
 pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&str) -> String, previews: &HashMap<String, ReferencePreview>) -> Option<bool> {
     let (lines, send) = lines(asking, model_name);
+    card(ctx, &lines, &send, previews)
+}
+
+/// A question on the same card, as `ig-dependency-warning` shows one: its
+/// title, its lines in gray, then Cancel and a dark `yes`. Some(true) on
+/// `yes`, Some(false) on Cancel or Escape.
+pub(crate) fn ask(ctx: &egui::Context, title: &str, said: &[String], yes: &str) -> Option<bool> {
+    let lines: Vec<Line> = std::iter::once(Line::Title(title.to_string())).chain(said.iter().map(|line| Line::Muted(line.clone()))).collect();
+    card(ctx, &lines, yes, &HashMap::new())
+}
+
+fn card(ctx: &egui::Context, lines: &[Line], send: &str, previews: &HashMap<String, ReferencePreview>) -> Option<bool> {
+    let send = send.to_string();
     let screen = ctx.content_rect();
     let mut answer = None;
     egui::Area::new(egui::Id::new("plan-card-overlay")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
@@ -208,7 +221,7 @@ pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&st
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let max_height = (screen.height() - 220.0).max(200.0);
             egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
-                for line in &lines {
+                for line in lines {
                     paint_line(ui, line, inner, previews);
                 }
             });

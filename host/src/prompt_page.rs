@@ -327,7 +327,7 @@ pub(crate) fn write_spec(folder: &Path, cell: &str, spec: &Value) -> Result<Stri
 /// Writes a step's template into Studio's scratch files, for a template
 /// `pipeline.py` would otherwise read as a file's name. Returns its path,
 /// relative to the project.
-fn write_template(folder: &Path, template: &str) -> Result<String, String> {
+pub(crate) fn write_template(folder: &Path, template: &str) -> Result<String, String> {
     let dir = folder.join(protocol::PROJECT_DIR).join("cache").join("templates");
     std::fs::create_dir_all(&dir).map_err(|error| format!("Could not make {}: {error}", dir.display()))?;
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|elapsed| elapsed.as_millis()).unwrap_or(0);
@@ -999,7 +999,7 @@ impl PromptPage {
 
 /// A step's or an artifact's name without its alternative's number, and
 /// the number: `"final shot, 2"` is `("final shot", Some(2))`.
-fn alternative_of(name: &str) -> (&str, Option<u32>) {
+pub(crate) fn alternative_of(name: &str) -> (&str, Option<u32>) {
     match name.rsplit_once(", ") {
         Some((base, number)) if !base.is_empty() => match number.parse::<u32>() {
             Ok(number) => (base, Some(number)),
