@@ -85,6 +85,17 @@ pub struct FileRequest {
     pub filter: Option<FileFilter>,
 }
 
+/// What a workspace asked of one take of a cell.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TakeAsk {
+    /// Use this take: put it in use beside those already in use.
+    Use,
+    /// Save: `source` is the take's next iteration.
+    SaveIteration { source: String },
+    /// Ignore: clear its outline.
+    Ignore,
+}
+
 /// Everything declared after the greeting.
 #[derive(Default)]
 pub struct Declared {
@@ -170,6 +181,10 @@ pub struct Declared {
     /// Earlier versions it asked to publish again through the publish card:
     /// the tab, the artifact, and the file.
     pub reverts: VecDeque<(String, String, String)>,
+    /// What it asked of a take of a cell, as the data model guide has it:
+    /// the tab, the cell, the take's path, and the ask. Chat Assistant Work's
+    /// runner answers them.
+    pub take_asks: VecDeque<(String, protocol::ItemRef, String, TakeAsk)>,
     /// Cells the toolbar asked the host to run.
     pub run_cells: VecDeque<(String, String)>,
     /// Cells the toolbar asked the host to stop.
@@ -673,6 +688,9 @@ impl Running {
             AppMessage::Publish { tab, artifact, source, from, with } => declared.publishes.push_back((tab, artifact, source, from, with)),
             AppMessage::CanonHistory { tab, artifact } => declared.canon_histories.push_back((tab, artifact)),
             AppMessage::Revert { tab, artifact, file } => declared.reverts.push_back((tab, artifact, file)),
+            AppMessage::UseTake { tab, cell, path } => declared.take_asks.push_back((tab, cell, path, TakeAsk::Use)),
+            AppMessage::SaveIteration { tab, cell, path, source } => declared.take_asks.push_back((tab, cell, path, TakeAsk::SaveIteration { source })),
+            AppMessage::IgnoreTake { tab, cell, path } => declared.take_asks.push_back((tab, cell, path, TakeAsk::Ignore)),
             AppMessage::ReadCanon { id, query } => declared.canon_reads.push_back((id, query)),
             AppMessage::EditStep { id, tab, step, script, refs, order, skill, artifact, endpoint } => {
                 declared.step_edits.push_back((id, tab, step, crate::window::StepFields { script, refs, order, skill, artifact, endpoint }))

@@ -409,6 +409,9 @@ impl Server {
             | HostMessage::View3dCamera { .. }
             | HostMessage::View3dPicked { .. } | HostMessage::History { .. } | HostMessage::TransportTime { .. } | HostMessage::Delivered { .. }
             | HostMessage::TouchesRead { .. }
+            | HostMessage::TakeUsed { .. }
+            | HostMessage::IterationSaved { .. }
+            | HostMessage::TakeIgnored { .. }
             | HostMessage::Published { .. } => {}
             HostMessage::CanonRows { id, rows, error } => self.session.canon_rows(&id, &rows, error.as_deref()),
             HostMessage::Filed { id, file, error } => self.session.filed(&id, &file, error.as_deref()),
