@@ -1379,6 +1379,9 @@ mod tests {
         let made = use_take(&place, 0, "1", None, &fourth).expect("a take whose step was edited since was refused");
         let template = skills("pipeline.py", &["sql", "001", &format!("SELECT template FROM step WHERE artifact='{made}'"), "--read-only"]);
         assert_eq!(template.trim(), "The diner.", "the alternative step holds the step as edited, not as the take was made");
+        let touches: Value = serde_json::from_str(&skills("pipeline.py", &["touches", "001", "--json"])).unwrap();
+        let outlined: Vec<&str> = touches["out_of_date"].as_array().unwrap().iter().filter_map(|entry| entry["artifact"].as_str()).collect();
+        assert!(!outlined.contains(&made.as_str()), "the alternative step reads as out of date: {touches}");
         // A take made from an image changed since is refused in plain words,
         // and leaves no step behind.
         let fifth = take(&[first.clone(), second.clone(), third.clone(), fourth.clone()]);

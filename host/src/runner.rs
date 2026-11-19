@@ -404,8 +404,10 @@ pub(crate) struct Fix {
     /// The steps whose request is still at its endpoint: collected, never
     /// made again.
     collected: Vec<String>,
-    /// The steps whose request is still at its endpoint, made before a fix
-    /// it uses: left until it is collected, with what is made from them.
+    /// The steps whose request is still at its endpoint but was sent as the
+    /// step no longer is, or from what this fix replaces: made again, on
+    /// the card with their cost, since collecting it would bring back a
+    /// take still out of date.
     left_pending: Vec<String>,
 }
 
@@ -429,7 +431,7 @@ impl Fix {
             lines.push(format!("Still at its endpoint, so collected, not made again: {}.", self.collected.join(", ")));
         }
         if !self.left_pending.is_empty() {
-            lines.push(format!("Still at its endpoint from before the fixes it uses, so left until it is collected: {}.", self.left_pending.join(", ")));
+            lines.push(format!("Still at its endpoint from before it went out of date, so made again: {}.", self.left_pending.join(", ")));
         }
         lines
     }
@@ -461,7 +463,7 @@ struct FixStep {
 /// Each step's request still at its endpoint, by its chain and step, from
 /// the pending records in `requests/`: paid for, and collected, never sent
 /// again. One that failed or was cancelled is not.
-fn pending_requests(cwd: &Path) -> HashMap<(String, String), String> {
+fn pending_requests(cwd: &Path) -> HashMap<(String, String), (String, Value)> {
     let mut found = HashMap::new();
     for entry in std::fs::read_dir(cwd.join("requests")).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -472,7 +474,7 @@ fn pending_requests(cwd: &Path) -> HashMap<(String, String), String> {
         }
         let text = |key: &str| pending.pointer(&format!("/spec/{key}")).and_then(Value::as_str).map(String::from);
         if let (Some(chain), Some(step)) = (text("chain"), text("step")) {
-            found.insert((chain, step), id.to_string());
+            found.insert((chain, step), (id.to_string(), pending.get("spec").cloned().unwrap_or(Value::Null)));
         }
     }
     found
@@ -632,6 +634,14 @@ fn same_but_fixed(approved: &Value, now: &Value, published: &HashMap<String, Str
         }
     }
     Ok(())
+}
+
+/// Whether a request still at its endpoint was sent as its step's plan is
+/// now: the same prompt, and the same files referred to in order, so its
+/// take, once collected, is the step's own.
+fn sent_as_planned(spec: &Value, plan: &Value) -> bool {
+    let files = |value: &Value| -> Vec<Value> { value.get("references").and_then(Value::as_array).into_iter().flatten().map(|reference| reference.get("file").cloned().unwrap_or(Value::Null)).collect() };
+    spec.get("prompt") == plan.get("prompt") && files(spec) == files(plan)
 }
 
 /// A request still at its endpoint, collected with `request.py collect`,
@@ -1069,40 +1079,31 @@ impl Runner {
                     }
                     let (mut plans, mut steps, mut fixed) = (Vec::new(), Vec::new(), Vec::new());
                     let pending = pending_requests(&cwd);
-                    let (mut collected, mut left_pending, mut left) = (Vec::new(), Vec::new(), Vec::<String>::new());
+                    let (mut collected, mut left_pending) = (Vec::new(), Vec::new());
                     for (chain, step, artifact, uses) in found {
-                        // Made from a step left until its request is collected:
-                        // left with it.
-                        if uses.iter().any(|used| left.contains(used)) {
-                            left_pending.push(step);
-                            left.push(artifact);
-                            continue;
-                        }
-                        // A request still at its endpoint is collected, never
-                        // made again; unless it was made before a fix it uses.
-                        if let Some(id) = pending.get(&(chain.clone(), step.clone())) {
-                            if uses.iter().any(|used| fixed.contains(used)) {
-                                left_pending.push(step);
-                                left.push(artifact);
-                            } else {
-                                collected.push(step.clone());
-                                steps.push(FixStep { chain, step, artifact: artifact.clone(), hash: String::new(), collect: Some(id.clone()), plan: None });
-                                fixed.push(artifact);
-                            }
-                            continue;
-                        }
                         let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &chain, &step, "--plan", "--json"]);
                         if stand_in {
                             argv.push(String::from("--stand-in"));
                         }
                         let (mut plan, hash) = planned(&argv, &cwd, &vars, stand_in)?;
+                        // A request still at its endpoint is collected, never
+                        // made again, when it was sent as the step is now and
+                        // from nothing this fix replaces; else it would bring
+                        // back a take still out of date, so the step is made
+                        // again, on the card with its cost.
+                        if let Some((id, spec)) = pending.get(&(chain.clone(), step.clone())) {
+                            if !uses.iter().any(|used| fixed.contains(used)) && sent_as_planned(spec, &plan) {
+                                collected.push(step.clone());
+                                steps.push(FixStep { chain, step, artifact: artifact.clone(), hash: String::new(), collect: Some(id.clone()), plan: None });
+                                fixed.push(artifact);
+                                continue;
+                            }
+                            left_pending.push(step.clone());
+                        }
                         mark_fixed(&mut plan, &fixed);
                         plans.push(plan);
                         steps.push(FixStep { chain, step, artifact: artifact.clone(), hash, collect: None, plan: Some(plans.len() - 1) });
                         fixed.push(artifact);
-                    }
-                    if steps.is_empty() {
-                        return Err(format!("Still at its endpoint from before the fixes it uses, so left until it is collected: {}.", left_pending.join(", ")));
                     }
                     Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed, waiting, collected, left_pending }) })
                 });
@@ -1302,7 +1303,7 @@ impl Runner {
                 output["made_from_what_no_step_makes"] = json!(waiting);
             }
             if !left_pending.is_empty() {
-                output["left_until_collected"] = json!(left_pending);
+                output["made_again_though_still_at_its_endpoint"] = json!(left_pending);
             }
             if let Some(reason) = &stopped {
                 let left: Vec<&str> = steps.iter().skip(published.len()).map(|step| step.artifact.as_str()).collect();
@@ -1683,10 +1684,16 @@ mod tests {
         pending("retime-1", "retime", json!({ "failed": "fal: error" }));
         pending("upscale-1", "upscale", json!({ "cancelled": true }));
         let found = pending_requests(&folder);
-        assert_eq!(found.get(&(String::from("the final shot"), String::from("final shot"))).map(String::as_str), Some("shot-1"));
+        assert_eq!(found.get(&(String::from("the final shot"), String::from("final shot"))).map(|(id, _)| id.as_str()), Some("shot-1"));
         assert_eq!(found.len(), 1, "a failed or cancelled request was taken for one still waiting: {found:?}");
         let fix = Fix { scripts: PathBuf::new(), pipeline: String::from("002"), steps: Vec::new(), not_fixed: Vec::new(), waiting: Vec::new(), collected: vec![String::from("final shot")], left_pending: vec![String::from("retime")] };
-        assert_eq!(fix.pending_lines(), ["Still at its endpoint, so collected, not made again: final shot.", "Still at its endpoint from before the fixes it uses, so left until it is collected: retime."]);
+        assert_eq!(fix.pending_lines(), ["Still at its endpoint, so collected, not made again: final shot.", "Still at its endpoint from before it went out of date, so made again: retime."]);
+        // A request is collected only when it was sent as its step is now.
+        let spec = json!({ "prompt": "The shot.", "references": [{ "file": "library/layout.png" }] });
+        let plan = json!({ "prompt": "The shot.", "references": [{ "order": 1, "file": "library/layout.png", "sha256": "a" }] });
+        assert!(sent_as_planned(&spec, &plan));
+        let republished = json!({ "prompt": "The shot.", "references": [{ "order": 1, "file": "library/layout-2.png", "sha256": "b" }] });
+        assert!(!sent_as_planned(&spec, &republished), "a request sent from a layout published again since was to be collected");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
