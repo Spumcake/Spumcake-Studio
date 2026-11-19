@@ -869,6 +869,7 @@ impl eframe::App for HostWindow {
             }
         }
         self.show_publishing(&ctx);
+        self.show_iteration_warning(&ctx);
         self.draw_model_menu(&ctx);
         if bar_pressed {
             self.toggle_workspace();
@@ -2715,16 +2716,6 @@ impl HostWindow {
                     group,
                 } => {
                     if app == route::HOST_ID {
-                        // A take put into the chain goes through the publish
-                        // card, as a workspace's publish does.
-                        if crate::skills_setup::is_project_tool(&tool)
-                            && protocol::split_tool_key(&tool).is_some_and(|(_, _, name)| name == crate::skills_setup::PUBLISH_TAKE)
-                        {
-                            if let Some(answer) = self.publish_take(call, &input) {
-                                self.assistant.send(Command::Result(answer));
-                            }
-                            continue;
-                        }
                         let folder = self.project.as_ref().map(|project| project.folder.clone());
                         let (settings, keys, data) = (&self.settings, &mut self.keys, self.data.clone());
                         let env = |skills: &[crate::skills_setup::Skill]| {

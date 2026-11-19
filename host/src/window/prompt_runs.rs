@@ -242,7 +242,7 @@ impl HostWindow {
         theirs
     }
 
-    fn send_rounds(&mut self, id: &str) {
+    pub(super) fn send_rounds(&mut self, id: &str) {
         let Some((folder, env)) = self.project_scripts() else { return };
         let Some(scripts) = env.scripts.clone() else { return };
         let Some((app, tab)) = self.cell_home(id) else { return };

@@ -86,6 +86,20 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
                 plans.iter().filter_map(|plan| plan.get("estimate").and_then(Value::as_str)).map(cost_words).collect::<Vec<_>>().join(", ")
             };
             let mut lines = vec![Line::Title(format!("{count} {noun} · {cost}"))];
+            // A fix of the dependency chain names what it leaves out of date.
+            if let Asking::Plans { fix: Some(fix), .. } = asking
+                && !fix.not_fixed().is_empty()
+            {
+                lines.push(Line::Muted(crate::runner::not_fixed_line(fix.not_fixed())));
+            }
+            if let Asking::Plans { fix: Some(fix), .. } = asking
+                && !fix.waiting().is_empty()
+            {
+                lines.push(Line::Muted(crate::runner::waiting_line(fix.waiting())));
+            }
+            if let Asking::Plans { fix: Some(fix), .. } = asking {
+                lines.extend(fix.pending_lines().into_iter().map(Line::Muted));
+            }
             // What a listed price leaves out, such as charges per token.
             for note in plans.iter().filter_map(|plan| plan.get("price_note").and_then(Value::as_str)) {
                 lines.push(Line::Muted(format!("The price {note}.")));
@@ -139,7 +153,12 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
                     for (index, reference) in references.iter().enumerate() {
                         let text = |key: &str| reference.get(key).and_then(Value::as_str).unwrap_or("").to_string();
                         let path = if text("path").is_empty() { text("file") } else { text("path") };
-                        lines.push(Line::Reference { number: index + 1, path, label: text("role") });
+                        // A reference an earlier fix in the same plan replaces.
+                        let label = match reference.get(crate::runner::FIXED_BY).and_then(Value::as_str) {
+                            Some(artifact) => format!("{} · made by the fix of {artifact}", text("role")),
+                            None => text("role"),
+                        };
+                        lines.push(Line::Reference { number: index + 1, path, label });
                     }
                 }
             }
@@ -198,6 +217,19 @@ pub(crate) fn reference_paths(asking: &Asking) -> Vec<String> {
 /// that is not an image, by its path.
 pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&str) -> String, previews: &HashMap<String, ReferencePreview>) -> Option<bool> {
     let (lines, send) = lines(asking, model_name);
+    card(ctx, &lines, &send, previews)
+}
+
+/// A question on the same card, as `ig-dependency-warning` shows one: its
+/// title, its lines in gray, then Cancel and a dark `yes`. Some(true) on
+/// `yes`, Some(false) on Cancel or Escape.
+pub(crate) fn ask(ctx: &egui::Context, title: &str, said: &[String], yes: &str) -> Option<bool> {
+    let lines: Vec<Line> = std::iter::once(Line::Title(title.to_string())).chain(said.iter().map(|line| Line::Muted(line.clone()))).collect();
+    card(ctx, &lines, yes, &HashMap::new())
+}
+
+fn card(ctx: &egui::Context, lines: &[Line], send: &str, previews: &HashMap<String, ReferencePreview>) -> Option<bool> {
+    let send = send.to_string();
     let screen = ctx.content_rect();
     let mut answer = None;
     egui::Area::new(egui::Id::new("plan-card-overlay")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
@@ -212,7 +244,7 @@ pub(crate) fn show(ctx: &egui::Context, asking: &Asking, model_name: &dyn Fn(&st
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let max_height = (screen.height() - 220.0).max(200.0);
             egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
-                for line in &lines {
+                for line in lines {
                     paint_line(ui, line, inner, previews);
                 }
             });

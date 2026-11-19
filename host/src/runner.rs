@@ -20,6 +20,7 @@
 use crate::workspace::{EndpointKind, Settings};
 use protocol::{Tool, ToolResult};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -28,6 +29,9 @@ use std::sync::{Arc, Mutex};
 pub(crate) const RUN_COMMAND: &str = "run_command";
 pub(crate) const SEND_REQUEST: &str = "send_request";
 pub(crate) const RERUN_STEP: &str = "rerun_step";
+/// The assistant's fix of the dependency chain, as the data model guide
+/// has it: every out-of-date step made again on one plan card.
+pub(crate) const FIX_CHAIN: &str = "fix_dependency_chain";
 pub(crate) const WEB_SEARCH: &str = "web_search";
 pub(crate) const FETCH_PAGE: &str = "fetch_page";
 pub(crate) const DOWNLOAD_FILE: &str = "download_file";
@@ -83,7 +87,7 @@ pub(crate) fn tools() -> Vec<Tool> {
         },
         Tool {
             name: RERUN_STEP.into(),
-            description: "Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first.".into(),
+            description: "Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step.".into(),
             input: json!({
                 "type": "object",
                 "properties": {
@@ -92,6 +96,20 @@ pub(crate) fn tools() -> Vec<Tool> {
                     "step": { "type": "string", "description": "With chain, the one step to make a take of, out of date or not." },
                     "fact": { "type": "string", "description": "A changed fact, as \"<element>: <fact>\", to rerun what it reaches." },
                     "artifact": { "type": "string", "description": "A changed artifact, as \"<element>: <role>\", to rerun what it reaches." },
+                    "stand_in": { "type": "boolean", "description": "Run it on the stand-in, which spends nothing." }
+                },
+                "required": ["pipeline"],
+                "additionalProperties": false
+            }),
+            implements: Vec::new(),
+        },
+        Tool {
+            name: FIX_CHAIN.into(),
+            description: "Fix the dependency chain: make again every step whose artifact is out of date and not ignored, in chain order, all on one plan card the user approves before anything is spent. A reference an earlier fix will replace is marked on the card. Each result is published at once as its artifact's next version, a fix, so it is a new iteration of the same asset. A later step runs only when its plan, made again after the fixes before it, differs from the approved one in nothing but those files; anything else stops the fix there and says why, and a new fix plans the rest.".into(),
+            input: json!({
+                "type": "object",
+                "properties": {
+                    "pipeline": { "type": "string", "description": "The pipeline's number, such as 002." },
                     "stand_in": { "type": "boolean", "description": "Run it on the stand-in, which spends nothing." }
                 },
                 "required": ["pipeline"],
@@ -289,8 +307,8 @@ pub(crate) fn spends(argv: &[String]) -> bool {
     })
 }
 
-/// Whether a command publishes into canon, which only the publish card
-/// does. A command given to a shell is read as the words it runs.
+/// Whether a command publishes into canon, which only the cells do. A
+/// command given to a shell is read as the words it runs.
 pub(crate) fn publishes(argv: &[String]) -> bool {
     let words: Vec<String> = argv.iter().flat_map(|arg| arg.split_whitespace().map(|word| word.trim_matches(['"', '\'', ';']).to_string())).collect();
     words.windows(2).any(|pair| pair[0].ends_with("pipeline.py") && pair[1] == "publish")
@@ -354,7 +372,7 @@ pub(crate) enum Asking {
     Command { call: String, tool: String, argv: Vec<String>, why: String },
     /// One or more requests, each with its plan, each run with its own
     /// `--expect`.
-    Plans { call: String, tool: String, plans: Vec<Value>, runs: Vec<Vec<String>>, stand_in: bool },
+    Plans { call: String, tool: String, plans: Vec<Value>, runs: Vec<Vec<String>>, stand_in: bool, fix: Option<Fix> },
     /// A research request's searches, each a query and whether it searches
     /// images, asked for together with their cost.
     Searches { call: String, tool: String, searches: Vec<(String, bool)>, why: String },
@@ -368,6 +386,291 @@ impl Asking {
             Asking::Command { call, tool, .. } | Asking::Plans { call, tool, .. } | Asking::Searches { call, tool, .. } | Asking::Download { call, tool, .. } => (call, tool),
         }
     }
+}
+
+/// A fix of the dependency chain the user is asked to approve: each step
+/// to make again, in chain order, with the hash of its plan as shown.
+#[derive(Clone, Debug)]
+pub(crate) struct Fix {
+    scripts: PathBuf,
+    pipeline: String,
+    steps: Vec<FixStep>,
+    /// What is out of date but made by no step, such as a mix filed by
+    /// hand: named on the card as not fixed here.
+    not_fixed: Vec<String>,
+    /// What a step makes from those, or from what is made from them: left
+    /// off the card, since remaking it would leave it out of date, and named.
+    waiting: Vec<String>,
+    /// The steps whose request is still at its endpoint: collected, never
+    /// made again.
+    collected: Vec<String>,
+    /// The steps whose request is still at its endpoint but was sent as the
+    /// step no longer is, or from what this fix replaces: made again, on
+    /// the card with their cost, since collecting it would bring back a
+    /// take still out of date.
+    left_pending: Vec<String>,
+}
+
+impl Fix {
+    /// What is out of date that this fix leaves, made by no step.
+    pub(crate) fn not_fixed(&self) -> &[String] {
+        &self.not_fixed
+    }
+
+    /// What is out of date that this fix leaves, made from what no step
+    /// makes.
+    pub(crate) fn waiting(&self) -> &[String] {
+        &self.waiting
+    }
+
+    /// The card's lines for the steps whose request is still at its
+    /// endpoint.
+    pub(crate) fn pending_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if !self.collected.is_empty() {
+            lines.push(format!("Still at its endpoint, so collected, not made again: {}.", self.collected.join(", ")));
+        }
+        if !self.left_pending.is_empty() {
+            lines.push(format!("Still at its endpoint from before it went out of date, so made again: {}.", self.left_pending.join(", ")));
+        }
+        lines
+    }
+}
+
+/// The card's line naming what is out of date but made by no step.
+pub(crate) fn not_fixed_line(artifacts: &[String]) -> String {
+    format!("Made by no step, so not fixed here: {}.", artifacts.join(", "))
+}
+
+/// The card's line naming what is made from those, and so left too.
+pub(crate) fn waiting_line(artifacts: &[String]) -> String {
+    format!("Made from what no step makes, so also left: {}.", artifacts.join(", "))
+}
+
+#[derive(Clone, Debug)]
+struct FixStep {
+    chain: String,
+    step: String,
+    artifact: String,
+    hash: String,
+    /// The request still at its endpoint to collect instead of making it
+    /// again.
+    collect: Option<String>,
+    /// Its plan's place among the card's plans, when it is made again.
+    plan: Option<usize>,
+}
+
+/// Each step's request still at its endpoint, by its chain and step, from
+/// the pending records in `requests/`: paid for, and collected, never sent
+/// again. One that failed or was cancelled is not.
+fn pending_requests(cwd: &Path) -> HashMap<(String, String), (String, Value)> {
+    let mut found = HashMap::new();
+    for entry in std::fs::read_dir(cwd.join("requests")).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".pending.json") else { continue };
+        let Some(pending) = std::fs::read_to_string(entry.path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()) else { continue };
+        if pending.get("failed").is_some_and(|failed| !failed.is_null()) || pending.get("cancelled").is_some_and(|cancelled| !cancelled.is_null() && cancelled != false) {
+            continue;
+        }
+        let text = |key: &str| pending.pointer(&format!("/spec/{key}")).and_then(Value::as_str).map(String::from);
+        if let (Some(chain), Some(step)) = (text("chain"), text("step")) {
+            found.insert((chain, step), (id.to_string(), pending.get("spec").cloned().unwrap_or(Value::Null)));
+        }
+    }
+    found
+}
+
+/// The mark on a reference an earlier fix in the same plan replaces.
+pub(crate) const FIXED_BY: &str = "fixed_by";
+
+/// A Skills script's command, as `resolve` makes it.
+fn skills_argv(scripts: &Path, script: &str, args: &[&str]) -> Vec<String> {
+    [String::from("python3"), scripts.join(script).display().to_string()].into_iter().chain(args.iter().map(|arg| arg.to_string())).collect()
+}
+
+/// What a Skills script printed, run in the project with its setup; an
+/// error with what it said when it failed.
+fn skills_run(argv: &[String], cwd: &Path, vars: &[(String, String)]) -> Result<String, String> {
+    let out = Command::new(&argv[0]).args(&argv[1..]).current_dir(cwd).envs(vars.iter().map(|(name, value)| (name.as_str(), value.as_str()))).output().map_err(|error| format!("Could not run {}: {error}", argv[1]))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// The steps to fix: each step whose artifact Skills finds out of date and
+/// was not ignored, as `touches --json` lists them, in the order of what
+/// each is made from, so a step runs after every fix it refers to, and in
+/// chain order where that leaves a choice; and what is out of date but made
+/// by no step.
+fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<(Vec<(String, String, String, Vec<String>)>, Vec<String>, Vec<String>), String> {
+    let touches: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "pipeline.py", &["touches", pipeline, "--json"]), cwd, vars)?).map_err(|error| format!("What is out of date could not be read: {error}"))?;
+    let stale: Vec<&str> = touches.get("out_of_date").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str)).collect();
+    let query = "SELECT json_array(c.ord, s.ord, s.chain, s.name, s.artifact, s.refs) FROM step s JOIN chain c ON c.name = s.chain WHERE s.artifact IS NOT NULL AND s.artifact != ''";
+    let mut steps: Vec<FixOrder> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, query, "--read-only"]), cwd, vars)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| {
+            let text = |index: usize| row.get(index).and_then(Value::as_str).map(String::from);
+            let refs: Vec<Value> = text(5).and_then(|refs| serde_json::from_str(&refs).ok()).unwrap_or_default();
+            let uses = refs.iter().filter_map(|reference| reference.get("artifact").and_then(Value::as_str).map(String::from)).collect();
+            Some(FixOrder { place: (row.get(0)?.as_i64().unwrap_or(99), row.get(1)?.as_i64().unwrap_or(99)), chain: text(2)?, step: text(3)?, artifact: text(4)?, uses })
+        })
+        .collect();
+    let made_by_a_step: Vec<String> = steps.iter().map(|step| step.artifact.clone()).collect();
+    steps.retain(|step| stale.contains(&step.artifact.as_str()));
+    let not_fixed: Vec<String> = stale.iter().filter(|artifact| !made_by_a_step.iter().any(|made| made == *artifact)).map(|artifact| artifact.to_string()).collect();
+    let (steps, waiting) = leave_waiting(steps, &not_fixed);
+    Ok((fix_order(steps), not_fixed, waiting))
+}
+
+/// The steps a fix can make whole, and the artifacts of those it leaves: a
+/// step made from what no step makes, or from what is made from that, would
+/// be paid for and still be out of date, so it waits.
+fn leave_waiting(mut steps: Vec<FixOrder>, not_fixed: &[String]) -> (Vec<FixOrder>, Vec<String>) {
+    let mut blocked: Vec<String> = not_fixed.to_vec();
+    let mut waiting = Vec::new();
+    loop {
+        let Some(index) = steps.iter().position(|step| step.uses.iter().any(|used| blocked.contains(used))) else { break };
+        let step = steps.remove(index);
+        blocked.push(step.artifact.clone());
+        waiting.push(step.artifact);
+    }
+    (steps, waiting)
+}
+
+/// A step to fix, with its place and the artifacts its references name.
+#[derive(Clone, Debug, PartialEq)]
+struct FixOrder {
+    place: (i64, i64),
+    chain: String,
+    step: String,
+    artifact: String,
+    uses: Vec<String>,
+}
+
+/// The steps in the order of what each is made from: a step comes after
+/// every other step whose artifact it refers to, and the earliest in chain
+/// order goes first where that leaves a choice. A loop, which no chain
+/// should hold, is broken in chain order.
+fn fix_order(mut steps: Vec<FixOrder>) -> Vec<(String, String, String, Vec<String>)> {
+    steps.sort_by(|a, b| a.place.cmp(&b.place));
+    let mut ordered: Vec<FixOrder> = Vec::new();
+    while !steps.is_empty() {
+        let waits = |step: &FixOrder, left: &[FixOrder]| left.iter().any(|other| other.artifact != step.artifact && step.uses.contains(&other.artifact));
+        let next = steps.iter().position(|step| !waits(step, &steps)).unwrap_or(0);
+        ordered.push(steps.remove(next));
+    }
+    ordered.into_iter().map(|step| (step.chain, step.step, step.artifact, step.uses)).collect()
+}
+
+/// Marks each reference of a plan that an earlier fix in the same plan
+/// replaces, by the artifact it names, with `FIXED_BY`.
+fn mark_fixed(plan: &mut Value, fixed: &[String]) {
+    for list in ["references", "inputs"] {
+        for reference in plan.get_mut(list).and_then(Value::as_array_mut).into_iter().flatten() {
+            if let Some(artifact) = reference.get("canon").and_then(Value::as_str).filter(|artifact| fixed.iter().any(|known| known == artifact)).map(String::from) {
+                reference[FIXED_BY] = json!(artifact);
+            }
+        }
+    }
+}
+
+/// Whether a later step's plan, made again after the fixes before it, is
+/// the approved one in all but the references marked `FIXED_BY`, each of
+/// which now names the file its fix published. Otherwise, what differs.
+fn same_but_fixed(approved: &Value, now: &Value, published: &HashMap<String, String>) -> Result<(), String> {
+    let left_out = ["hash", "estimate", "price_note", "price_hint", "references", "inputs", "canon"];
+    let rest = |plan: &Value| -> Value { plan.as_object().map(|fields| Value::Object(fields.iter().filter(|(key, _)| !left_out.contains(&key.as_str())).map(|(key, value)| (key.clone(), value.clone())).collect())).unwrap_or(Value::Null) };
+    if rest(approved) != rest(now) {
+        let differs = approved.as_object().into_iter().flatten().filter(|(key, value)| !left_out.contains(&key.as_str()) && now.get(key.as_str()) != Some(*value)).map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        return Err(format!("its {} changed", if differs.is_empty() { String::from("plan") } else { differs.join(", ") }));
+    }
+    // The canon it read, each as `{name, value, read_at, from}`: when it was
+    // read always differs, and a fixed artifact's value is its fix's file.
+    let read = |plan: &Value| -> Vec<Value> { plan.get("canon").and_then(Value::as_array).cloned().unwrap_or_default() };
+    let (was, is) = (read(approved), read(now));
+    if was.len() != is.len() {
+        return Err(String::from("the canon it reads changed"));
+    }
+    for (was, is) in was.iter().zip(&is) {
+        let text = |entry: &Value, key: &str| entry.get(key).cloned().unwrap_or(Value::Null);
+        let name = was.get("name").and_then(Value::as_str).unwrap_or("");
+        if text(was, "name") != text(is, "name") || text(was, "from") != text(is, "from") {
+            return Err(String::from("the canon it reads changed"));
+        }
+        let value_ok = match published.get(name) {
+            Some(file) => is.get("value").and_then(Value::as_str) == Some(file.as_str()),
+            None => text(was, "value") == text(is, "value"),
+        };
+        if !value_ok {
+            return Err(format!("its canon {name} changed"));
+        }
+    }
+    for list in ["references", "inputs"] {
+        let (was, is) = (approved.get(list).and_then(Value::as_array).cloned().unwrap_or_default(), now.get(list).and_then(Value::as_array).cloned().unwrap_or_default());
+        if was.len() != is.len() {
+            return Err(format!("its {list} changed"));
+        }
+        for (was, is) in was.iter().zip(&is) {
+            let mut kept = was.clone();
+            if let Some(object) = kept.as_object_mut() {
+                object.remove(FIXED_BY);
+            }
+            match was.get(FIXED_BY).and_then(Value::as_str) {
+                Some(artifact) => {
+                    let wanted = published.get(artifact).ok_or_else(|| format!("{artifact} was not fixed first"))?;
+                    if is.get("file").and_then(Value::as_str) != Some(wanted.as_str()) {
+                        return Err(format!("its reference to {artifact} is not the fix just published"));
+                    }
+                    let strip = |reference: &Value| -> Value { reference.as_object().map(|fields| Value::Object(fields.iter().filter(|(key, _)| !["file", "path", "sha256", FIXED_BY].contains(&key.as_str())).map(|(key, value)| (key.clone(), value.clone())).collect())).unwrap_or(Value::Null) };
+                    if strip(was) != strip(is) {
+                        return Err(format!("its reference to {artifact} changed"));
+                    }
+                }
+                None if kept != *is => return Err(format!("its {list} changed")),
+                None => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a request still at its endpoint was sent as its step's plan is
+/// now: the same prompt, the same files referred to in order, and the same
+/// model and settings, so its take, once collected, is the step's own.
+fn sent_as_planned(spec: &Value, plan: &Value) -> bool {
+    let files = |value: &Value| -> Vec<Value> { value.get("references").and_then(Value::as_array).into_iter().flatten().map(|reference| reference.get("file").cloned().unwrap_or(Value::Null)).collect() };
+    let endpoint = |value: &Value, key: &str| value.pointer(&format!("/endpoint/{key}")).cloned().unwrap_or(Value::Null);
+    spec.get("prompt") == plan.get("prompt") && files(spec) == files(plan) && endpoint(spec, "model") == endpoint(plan, "model") && endpoint(spec, "settings") == endpoint(plan, "settings")
+}
+
+/// A request still at its endpoint, collected with `request.py collect`,
+/// which spends nothing and waits for it: the file it made. When it is not
+/// finished yet it stays pending, for a later fix to collect.
+fn collect_take(scripts: &Path, cwd: &Path, vars: &[(String, String)], id: &str) -> Result<String, String> {
+    skills_run(&skills_argv(scripts, "request.py", &["collect", id]), cwd, vars).map_err(|reason| format!("its request {id} is still at its endpoint and could not be collected yet, so a later fix will collect it: {reason}"))?;
+    let shown: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "request.py", &["show", id]), cwd, vars)?).map_err(|error| format!("The collected request could not be read: {error}"))?;
+    shown.get("outputs").and_then(Value::as_array).and_then(|outputs| outputs.first()).and_then(Value::as_str).map(String::from).ok_or_else(|| format!("its request {id} was collected but made no file"))
+}
+
+/// A fix's take published at once as its artifact's next version, with
+/// `--fixes` and what its step refers to.
+fn publish_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str, step: &FixStep, take: &str, request: Option<&str>) -> Result<(), String> {
+    let query = format!("SELECT refs FROM step WHERE chain='{}' AND name='{}'", step.chain.replace('\'', "''"), step.step.replace('\'', "''"));
+    let refs: Vec<Value> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, &query, "--read-only"]), cwd, vars).ok().and_then(|printed| serde_json::from_str(printed.trim()).ok()).unwrap_or_default();
+    let mut args: Vec<String> = ["publish", pipeline, &step.artifact, "--file", take, "--chain", &step.chain, "--fixes"].iter().map(|arg| arg.to_string()).collect();
+    if let Some(request) = request {
+        args.extend([String::from("--request"), request.to_string()]);
+    }
+    for reference in &refs {
+        let text = |key: &str| reference.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        if !text("artifact").is_empty() {
+            args.extend([String::from("--from"), text("artifact"), if text("role").is_empty() { String::from("input") } else { text("role") }]);
+        }
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    skills_run(&skills_argv(scripts, "pipeline.py", &args), cwd, vars).map(|_| ()).map_err(|reason| format!("{}'s fix could not be published: {reason}", step.artifact))
 }
 
 /// Where a download's own record of its address, page, and licence is kept.
@@ -688,7 +991,7 @@ impl Runner {
                     return Begun::Answered(failed(call, "This command spends money, so it is never run as a plain command. Send a request with send_request and its spec, or a step with rerun_step, so the user approves its plan."));
                 }
                 if publishes(&argv) {
-                    return Begun::Answered(failed(call, "Publishing goes through the publish card, never a plain command: put the take into the chain with publish_take."));
+                    return Begun::Answered(failed(call, "Canon follows from the cells; nothing is published by command."));
                 }
                 // A command that only reads runs at once, with no question.
                 if only_reads(&argv, env.scripts.as_deref(), folder) {
@@ -721,7 +1024,7 @@ impl Runner {
                     if stand_in {
                         run.push(String::from("--stand-in"));
                     }
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in, fix: None })
                 });
             }
             RERUN_STEP => {
@@ -753,7 +1056,57 @@ impl Runner {
                 return self.plan_later(call, move || {
                     let (plan, hash) = planned(&planning, &cwd, &vars, stand_in)?;
                     run.extend([String::from("--expect"), hash]);
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in, fix: None })
+                });
+            }
+            FIX_CHAIN => {
+                let pipeline = text("pipeline");
+                let Some(scripts) = env.scripts.clone() else { return Begun::Answered(failed(call, crate::skills_checkout::MISSING)) };
+                if let Err(reason) = plans_offline(&scripts.join("pipeline.py")) {
+                    return Begun::Answered(failed(call, reason));
+                }
+                let (cwd, vars, call_name, tool_name) = (folder.to_path_buf(), env.vars.clone(), call.to_string(), tool.to_string());
+                return self.plan_later(call, move || {
+                    let (found, not_fixed, waiting) = steps_to_fix(&scripts, &cwd, &vars, &pipeline)?;
+                    if found.is_empty() && not_fixed.is_empty() {
+                        return Err(String::from("Nothing is out of date, so there is nothing to fix."));
+                    }
+                    if found.is_empty() {
+                        let mut said = not_fixed_line(&not_fixed);
+                        if !waiting.is_empty() {
+                            said = format!("{said} {}", waiting_line(&waiting));
+                        }
+                        return Err(said);
+                    }
+                    let (mut plans, mut steps, mut fixed) = (Vec::new(), Vec::new(), Vec::new());
+                    let pending = pending_requests(&cwd);
+                    let (mut collected, mut left_pending) = (Vec::new(), Vec::new());
+                    for (chain, step, artifact, uses) in found {
+                        let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &chain, &step, "--plan", "--json"]);
+                        if stand_in {
+                            argv.push(String::from("--stand-in"));
+                        }
+                        let (mut plan, hash) = planned(&argv, &cwd, &vars, stand_in)?;
+                        // A request still at its endpoint is collected, never
+                        // made again, when it was sent as the step is now and
+                        // from nothing this fix replaces; else it would bring
+                        // back a take still out of date, so the step is made
+                        // again, on the card with its cost.
+                        if let Some((id, spec)) = pending.get(&(chain.clone(), step.clone())) {
+                            if !uses.iter().any(|used| fixed.contains(used)) && sent_as_planned(spec, &plan) {
+                                collected.push(step.clone());
+                                steps.push(FixStep { chain, step, artifact: artifact.clone(), hash: String::new(), collect: Some(id.clone()), plan: None });
+                                fixed.push(artifact);
+                                continue;
+                            }
+                            left_pending.push(step.clone());
+                        }
+                        mark_fixed(&mut plan, &fixed);
+                        plans.push(plan);
+                        steps.push(FixStep { chain, step, artifact: artifact.clone(), hash, collect: None, plan: Some(plans.len() - 1) });
+                        fixed.push(artifact);
+                    }
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed, waiting, collected, left_pending }) })
                 });
             }
             _ => return Begun::Answered(failed(call, "No such tool.")),
@@ -854,6 +1207,115 @@ impl Runner {
         self.tasks.push(Task { call: call.to_string(), done, stop });
     }
 
+    /// The approved fix of the dependency chain, run step by step: each
+    /// later step planned again and run only when it is the plan approved
+    /// but for the files the fixes before it made; each result published as
+    /// its artifact's next version with `--fixes`. Stop ends it before the
+    /// next step.
+    fn fix_chain(&mut self, call: &str, fix: Fix, approved: Vec<Value>, stand_in: bool) {
+        let (answered, cwd, vars) = (call.to_string(), self.cwd.clone(), self.env.clone());
+        self.spawn(call, move |stop| {
+            let Fix { scripts, pipeline, steps, not_fixed, waiting, left_pending, .. } = fix;
+            let mut published: HashMap<String, String> = HashMap::new();
+            let mut done: Vec<Value> = Vec::new();
+            let mut stopped: Option<String> = None;
+            for (index, step) in steps.iter().enumerate() {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    stopped = Some(String::from("the user stopped the fix"));
+                    break;
+                }
+                // A request still at its endpoint: collected, never made again.
+                if let Some(id) = &step.collect {
+                    let take = match collect_take(&scripts, &cwd, &vars, id) {
+                        Ok(take) => take,
+                        Err(reason) => {
+                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            break;
+                        }
+                    };
+                    if let Err(reason) = publish_fix(&scripts, &cwd, &vars, &pipeline, step, &take, Some(id)) {
+                        stopped = Some(reason);
+                        break;
+                    }
+                    published.insert(step.artifact.clone(), take.clone());
+                    done.push(json!({ "artifact": step.artifact, "chain": step.chain, "step": step.step, "file": take, "collected": id }));
+                    continue;
+                }
+                // A later step's plan as it is now, after the fixes before it.
+                let plan_index = step.plan.unwrap_or(index);
+                let hash = if published.is_empty() {
+                    step.hash.clone()
+                } else {
+                    let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &step.chain, &step.step, "--plan", "--json"]);
+                    if stand_in {
+                        argv.push(String::from("--stand-in"));
+                    }
+                    match planned(&argv, &cwd, &vars, stand_in).and_then(|(plan, hash)| same_but_fixed(&approved[plan_index], &plan, &published).map(|()| hash)) {
+                        Ok(hash) => hash,
+                        Err(reason) => {
+                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            break;
+                        }
+                    }
+                };
+                let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &step.chain, &step.step, "--json", "--expect", &hash]);
+                if stand_in {
+                    argv.push(String::from("--stand-in"));
+                }
+                let made = match skills_run(&argv, &cwd, &vars) {
+                    Ok(printed) => printed.lines().rev().find_map(|line| serde_json::from_str::<Value>(line.trim()).ok()).unwrap_or(Value::Null),
+                    Err(reason) => {
+                        stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                        break;
+                    }
+                };
+                // A request that went to its endpoint's queue is collected
+                // there and then, never made again.
+                let pending = made.get("pending").and_then(Value::as_str).map(String::from);
+                let take = match &pending {
+                    Some(id) => match collect_take(&scripts, &cwd, &vars, id) {
+                        Ok(take) => take,
+                        Err(reason) => {
+                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            break;
+                        }
+                    },
+                    None => match made.get("files").and_then(Value::as_array).and_then(|files| files.first()).and_then(Value::as_str) {
+                        Some(take) => take.to_string(),
+                        None => {
+                            stopped = Some(format!("{} / {} made no file", step.chain, step.step));
+                            break;
+                        }
+                    },
+                };
+                let request = pending.or_else(|| made.get("report").and_then(Value::as_str).and_then(|report| Path::new(report).file_stem()).map(|stem| stem.to_string_lossy().to_string()));
+                if let Err(reason) = publish_fix(&scripts, &cwd, &vars, &pipeline, step, &take, request.as_deref()) {
+                    stopped = Some(reason);
+                    break;
+                }
+                published.insert(step.artifact.clone(), take.clone());
+                done.push(json!({ "artifact": step.artifact, "chain": step.chain, "step": step.step, "file": take }));
+            }
+            let mut output = json!({ "fixed": done });
+            if !not_fixed.is_empty() {
+                output["made_by_no_step"] = json!(not_fixed);
+            }
+            if !waiting.is_empty() {
+                output["made_from_what_no_step_makes"] = json!(waiting);
+            }
+            if !left_pending.is_empty() {
+                output["made_again_though_still_at_its_endpoint"] = json!(left_pending);
+            }
+            if let Some(reason) = &stopped {
+                let left: Vec<&str> = steps.iter().skip(published.len()).map(|step| step.artifact.as_str()).collect();
+                output["stopped"] = json!(reason);
+                output["not_fixed"] = json!(left);
+                output["next"] = json!("Tell the user where it stopped and why. A new fix_dependency_chain plans the rest on a new card.");
+            }
+            ToolResult { call: answered, ok: stopped.is_none(), output, images: Vec::new() }
+        });
+    }
+
     /// The approved searches, run one after another.
     fn search(&mut self, call: &str, searches: Vec<(String, bool)>, key: String) {
         let answered = call.to_string();
@@ -928,6 +1390,10 @@ impl Runner {
             Asking::Command { argv, .. } => (vec![argv], false),
             // A step that runs a script, such as a builder, sends nothing to
             // a model, so Stop ends it as it ends any command.
+            Asking::Plans { fix: Some(fix), plans, stand_in, .. } => {
+                self.fix_chain(&call, fix, plans, stand_in);
+                return None;
+            }
             Asking::Plans { runs, stand_in, plans, .. } => (runs, !stand_in && plans.iter().any(|plan| plan.get("endpoint").is_some_and(|endpoint| !endpoint.is_null()))),
             Asking::Searches { searches, .. } => {
                 let Some(key) = self.search_key.take() else { return Some(failed(&call, "Brave Search has no key.")) };
@@ -1200,6 +1666,89 @@ mod tests {
         }
     }
 
+    /// Catches a step whose request is still at its endpoint made again and
+    /// paid for twice, rather than collected; one that failed or was
+    /// cancelled taken for one still waiting; and the card not saying so.
+    #[test]
+    fn a_request_still_at_its_endpoint_is_collected_not_made_again() {
+        let folder = std::env::temp_dir().join(format!("runner-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("requests")).unwrap();
+        let pending = |id: &str, step: &str, extra: Value| {
+            let mut record = json!({ "id": id, "spec": { "chain": "the final shot", "step": step } });
+            if let (Some(record), Some(extra)) = (record.as_object_mut(), extra.as_object()) {
+                record.extend(extra.clone());
+            }
+            std::fs::write(folder.join(format!("requests/{id}.pending.json")), record.to_string()).unwrap();
+        };
+        pending("shot-1", "final shot", json!({}));
+        pending("retime-1", "retime", json!({ "failed": "fal: error" }));
+        pending("upscale-1", "upscale", json!({ "cancelled": true }));
+        let found = pending_requests(&folder);
+        assert_eq!(found.get(&(String::from("the final shot"), String::from("final shot"))).map(|(id, _)| id.as_str()), Some("shot-1"));
+        assert_eq!(found.len(), 1, "a failed or cancelled request was taken for one still waiting: {found:?}");
+        let fix = Fix { scripts: PathBuf::new(), pipeline: String::from("002"), steps: Vec::new(), not_fixed: Vec::new(), waiting: Vec::new(), collected: vec![String::from("final shot")], left_pending: vec![String::from("retime")] };
+        assert_eq!(fix.pending_lines(), ["Still at its endpoint, so collected, not made again: final shot.", "Still at its endpoint from before it went out of date, so made again: retime."]);
+        // A request is collected only when it was sent as its step is now.
+        let spec = json!({ "prompt": "The shot.", "references": [{ "file": "library/layout.png" }] });
+        let plan = json!({ "prompt": "The shot.", "references": [{ "order": 1, "file": "library/layout.png", "sha256": "a" }] });
+        assert!(sent_as_planned(&spec, &plan));
+        let republished = json!({ "prompt": "The shot.", "references": [{ "order": 1, "file": "library/layout-2.png", "sha256": "b" }] });
+        assert!(!sent_as_planned(&spec, &republished), "a request sent from a layout published again since was to be collected");
+        let mut remodelled = plan.clone();
+        remodelled["endpoint"] = json!({ "kind": "fal", "model": "another", "settings": {} });
+        assert!(!sent_as_planned(&spec, &remodelled), "a request sent to another model than the step names now was to be collected");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a step fixed before a step whose artifact it refers to, as
+    /// Last order's "far-end layout, door half open" refers to the door
+    /// open layout a later step makes, and chain order lost where nothing
+    /// else decides.
+    #[test]
+    fn a_fix_runs_each_step_after_what_it_is_made_from() {
+        let step = |place: (i64, i64), name: &str, uses: &[&str]| FixOrder { place, chain: String::from("the animatic"), step: name.to_string(), artifact: format!("the diner: {name}"), uses: uses.iter().map(|used| format!("the diner: {used}")).collect() };
+        let order = fix_order(vec![step((1, 10), "door half open", &["door open"]), step((1, 11), "door open", &["layout"]), step((1, 12), "the bell", &["door half open"]), step((1, 2), "other", &[])]);
+        let names: Vec<&str> = order.iter().map(|(_, step, _, _)| step.as_str()).collect();
+        assert_eq!(names, ["other", "door open", "door half open", "the bell"]);
+    }
+
+    /// Catches a fix's later step run on a plan that changed in more than
+    /// the file an earlier fix made, or one whose reference is not that
+    /// fix's file, and a step marked when it uses nothing being fixed.
+    #[test]
+    fn a_later_step_runs_only_as_approved_but_for_the_fixes() {
+        let mut approved = json!({
+            "endpoint": { "kind": "fal", "model": "m" }, "prompt": "The diner.", "hash": "h1",
+            "references": [{ "order": 1, "role": "image 1", "canon": "the diner: layout", "file": "library/layout.png", "sha256": "a" }, { "order": 2, "role": "image 2", "canon": "the cook: sheet", "file": "library/sheet.png", "sha256": "b" }],
+        });
+        mark_fixed(&mut approved, &[String::from("the diner: layout")]);
+        assert_eq!(approved["references"][0][FIXED_BY], "the diner: layout");
+        assert!(approved["references"][1].get(FIXED_BY).is_none(), "a reference nothing fixes was marked");
+        let published = HashMap::from([(String::from("the diner: layout"), String::from("library/layout-2.png"))]);
+        let mut now = json!({
+            "endpoint": { "kind": "fal", "model": "m" }, "prompt": "The diner.", "hash": "h2",
+            "references": [{ "order": 1, "role": "image 1", "canon": "the diner: layout", "file": "library/layout-2.png", "sha256": "c" }, { "order": 2, "role": "image 2", "canon": "the cook: sheet", "file": "library/sheet.png", "sha256": "b" }],
+        });
+        assert_eq!(same_but_fixed(&approved, &now, &published), Ok(()));
+        now["prompt"] = json!("The diner at night.");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "a changed prompt ran");
+        now["prompt"] = json!("The diner.");
+        now["references"][1]["sha256"] = json!("d");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "a reference no fix made changed and ran");
+        now["references"][1]["sha256"] = json!("b");
+        now["references"][0]["file"] = json!("library/someone-else.png");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "a reference that is not the fix's file ran");
+        now["references"][0]["file"] = json!("library/layout-2.png");
+        // The canon it read: read again at another time, the fixed artifact
+        // now its fix's file; anything else changed is refused.
+        approved["canon"] = json!([{ "name": "the diner: layout", "value": "library/layout.png", "read_at": "t1", "from": "pipeline/001/canon.sql" }, { "name": "the cook: sheet", "value": "library/sheet.png", "read_at": "t1", "from": "pipeline/001/canon.sql" }]);
+        now["canon"] = json!([{ "name": "the diner: layout", "value": "library/layout-2.png", "read_at": "t2", "from": "pipeline/001/canon.sql" }, { "name": "the cook: sheet", "value": "library/sheet.png", "read_at": "t2", "from": "pipeline/001/canon.sql" }]);
+        assert_eq!(same_but_fixed(&approved, &now, &published), Ok(()), "canon read again, or read with its fix, was refused");
+        now["canon"][1]["value"] = json!("library/sheet-2.png");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "canon nothing fixed changed and ran");
+    }
+
     /// Catches a command that spends run as a plain command: the contract's
     /// list, and nothing else.
     #[test]
@@ -1270,7 +1819,7 @@ mod tests {
     /// shell, and a plan with no hash run unbound.
     #[test]
     fn a_spend_through_a_shell_and_a_plan_with_no_hash_are_refused() {
-        assert!(publishes(&argv(&["python3", "/s/scripts/pipeline.py", "publish", "002", "the diner: layout"])), "a publish ran past the publish card");
+        assert!(publishes(&argv(&["python3", "/s/scripts/pipeline.py", "publish", "002", "the diner: layout"])), "a publish ran as a command");
         assert!(publishes(&argv(&["sh", "-c", "python3 pipeline.py publish 002 x"])));
         assert!(!publishes(&argv(&["python3", "/s/scripts/pipeline.py", "touches", "002"])));
         assert!(spends(&argv(&["sh", "-c", "python3 /s/scripts/request.py run agent/spec.json"])));
@@ -1410,6 +1959,93 @@ mod tests {
         let stopped = runner.stop();
         assert_eq!(stopped.len(), 1);
         assert!(runner.jobs.is_empty() && runner.detached.is_empty(), "a script step was left running after Stop");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a fix of the dependency chain drifting from Skills' own
+    /// scripts: a step out of date left off its one card, or one put there
+    /// that was not; a reference an earlier fix replaces left unmarked;
+    /// the steps run out of chain order, or a later one refused once the
+    /// earlier fix changed its reference; and a fix not published as its
+    /// artifact's next version, so the chain is still out of date after.
+    #[test]
+    fn the_dependency_chain_is_fixed_on_one_card_with_the_real_scripts() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("runner-fix-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let harness = |script: &str, args: &[&str]| -> String {
+            let out = Command::new("python3").arg(scripts.join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        harness("pipeline.py", &["new", "001"]);
+        harness("pipeline.py", &["element", "001", "the diner", "--kind", "place"]);
+        harness("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);
+        let endpoint = r#"{"kind": "fal", "model": "stand-in"}"#;
+        harness("pipeline.py", &["step", "001", "the diner", "sheet", "--order", "1", "--skill", "generate-model-sheet", "--endpoint", endpoint, "--template", "A sheet.", "--artifact", "the diner: sheet"]);
+        harness("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: sheet", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
+        harness("pipeline.py", &["step", "001", "the diner", "shot", "--order", "3", "--skill", "create-final-animation", "--endpoint", endpoint, "--template", "The shot.", "--refs", r#"[{"artifact": "the diner: keyframe", "role": "image 1"}]"#, "--artifact", "the diner: shot"]);
+        // A step early in the chain made from a later one's artifact.
+        harness("pipeline.py", &["step", "001", "the diner", "poster", "--order", "2", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The poster.", "--refs", r#"[{"artifact": "the diner: shot", "role": "image 1"}]"#, "--artifact", "the diner: poster"]);
+        // And one made from what no step makes, which a fix cannot make whole.
+        harness("pipeline.py", &["step", "001", "the diner", "card", "--order", "5", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The card.", "--refs", r#"[{"artifact": "the diner: mix", "role": "image 1"}]"#, "--artifact", "the diner: card"]);
+        // Each step made and published as the method does by hand.
+        let make = |step: &str, artifact: &str, from: Option<&str>| {
+            let made: Value = serde_json::from_str(harness("pipeline.py", &["rerun", "001", "--step", "the diner", step, "--stand-in", "--json"]).lines().last().unwrap()).unwrap();
+            let take = made["files"][0].as_str().unwrap().to_string();
+            let request = Path::new(made["report"].as_str().unwrap()).file_stem().unwrap().to_string_lossy().to_string();
+            let mut args = vec!["publish", "001", artifact, "--file", take.as_str(), "--chain", "the diner", "--request", request.as_str()];
+            if let Some(from) = from {
+                args.extend(["--from", from, "image 1"]);
+            }
+            harness("pipeline.py", &args);
+            take
+        };
+        make("sheet", "the diner: sheet", None);
+        make("keyframe", "the diner: keyframe", Some("the diner: sheet"));
+        let shot = make("shot", "the diner: shot", Some("the diner: keyframe"));
+        make("poster", "the diner: poster", Some("the diner: shot"));
+        // A mix filed by hand from the shot: made by no step.
+        std::fs::create_dir_all(folder.join("agent")).unwrap();
+        std::fs::write(folder.join("agent/mix.png"), b"mix").unwrap();
+        let mix = harness("request.py", &["resource", "agent/mix.png", "--name", "mix", "--from", &shot]).lines().last().unwrap().trim().to_string();
+        harness("pipeline.py", &["publish", "001", "the diner: mix", "--file", &mix, "--chain", "the diner", "--from", "the diner: shot", "input"]);
+        make("card", "the diner: card", Some("the diner: mix"));
+        // The sheet made again, so what was made from it is out of date.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        make("sheet", "the diner: sheet", None);
+        let mut runner = Runner::default();
+        runner.assume_prerequisites(&folder);
+        let env = ScriptEnv { scripts: Some(scripts.clone()), ..ScriptEnv::default() };
+        if let Begun::Answered(result) = runner.begin(&folder, env, "c1", "t", FIX_CHAIN, &json!({ "pipeline": "001", "stand_in": true })) {
+            panic!("answered at once: {:?}", result.output);
+        }
+        wait_until_asked(&mut runner);
+        let Some(Asking::Plans { plans, fix: Some(fix), .. }) = runner.asking() else { panic!("the fix showed no card") };
+        let steps: Vec<&str> = fix.steps.iter().map(|step| step.step.as_str()).collect();
+        assert_eq!(steps, ["keyframe", "shot", "poster"], "the card did not hold exactly what is out of date, each after what it is made from");
+        assert_eq!(fix.not_fixed(), ["the diner: mix"], "what no step makes was dropped without a word");
+        assert_eq!(fix.waiting(), ["the diner: card"], "a step made from what no step makes was planned and would be paid for");
+        assert_eq!(plans[1]["references"][0][FIXED_BY], "the diner: keyframe", "the shot's reference to the keyframe's fix was not marked");
+        assert!(runner.answer(true).is_none());
+        let start = std::time::Instant::now();
+        let answer = loop {
+            if let Some(answer) = runner.poll().0.pop() {
+                break answer;
+            }
+            assert!(start.elapsed().as_secs() < 120, "the fix never ended");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(answer.ok, "the fix stopped: {:?}", answer.output);
+        let touches: Value = serde_json::from_str(&harness("pipeline.py", &["touches", "001", "--json"])).unwrap();
+        let left: Vec<&str> = touches["out_of_date"].as_array().unwrap().iter().filter_map(|entry| entry["artifact"].as_str()).collect();
+        assert_eq!(left, ["the diner: card", "the diner: mix"], "the chain is still out of date after its fix, past what no step makes");
+        let log = std::fs::read_to_string(folder.join("pipeline/001/runs.jsonl")).unwrap();
+        assert_eq!(log.lines().filter(|line| line.contains("\"fixes\"")).count(), 3, "the fixes were not published as fixes");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
