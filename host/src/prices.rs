@@ -541,7 +541,8 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
     let made = made_by(plan.pointer("/endpoint/settings"));
     let mut known = usages().lock().ok()?;
     let mut earlier: Vec<Used> = Vec::new();
-    for entry in std::fs::read_dir(folder.join("requests")).ok()?.flatten() {
+    // A new project has no requests yet, and is estimated all the same.
+    for entry in std::fs::read_dir(folder.join("requests")).into_iter().flatten().flatten() {
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("html") {
             continue;
