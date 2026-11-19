@@ -401,6 +401,12 @@ pub(crate) struct Fix {
     /// What a step makes from those, or from what is made from them: left
     /// off the card, since remaking it would leave it out of date, and named.
     waiting: Vec<String>,
+    /// The steps whose request is still at its endpoint: collected, never
+    /// made again.
+    collected: Vec<String>,
+    /// The steps whose request is still at its endpoint, made before a fix
+    /// it uses: left until it is collected, with what is made from them.
+    left_pending: Vec<String>,
 }
 
 impl Fix {
@@ -413,6 +419,19 @@ impl Fix {
     /// makes.
     pub(crate) fn waiting(&self) -> &[String] {
         &self.waiting
+    }
+
+    /// The card's lines for the steps whose request is still at its
+    /// endpoint.
+    pub(crate) fn pending_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if !self.collected.is_empty() {
+            lines.push(format!("Still at its endpoint, so collected, not made again: {}.", self.collected.join(", ")));
+        }
+        if !self.left_pending.is_empty() {
+            lines.push(format!("Still at its endpoint from before the fixes it uses, so left until it is collected: {}.", self.left_pending.join(", ")));
+        }
+        lines
     }
 }
 
@@ -432,6 +451,31 @@ struct FixStep {
     step: String,
     artifact: String,
     hash: String,
+    /// The request still at its endpoint to collect instead of making it
+    /// again.
+    collect: Option<String>,
+    /// Its plan's place among the card's plans, when it is made again.
+    plan: Option<usize>,
+}
+
+/// Each step's request still at its endpoint, by its chain and step, from
+/// the pending records in `requests/`: paid for, and collected, never sent
+/// again. One that failed or was cancelled is not.
+fn pending_requests(cwd: &Path) -> HashMap<(String, String), String> {
+    let mut found = HashMap::new();
+    for entry in std::fs::read_dir(cwd.join("requests")).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".pending.json") else { continue };
+        let Some(pending) = std::fs::read_to_string(entry.path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()) else { continue };
+        if pending.get("failed").is_some_and(|failed| !failed.is_null()) || pending.get("cancelled").is_some_and(|cancelled| !cancelled.is_null() && cancelled != false) {
+            continue;
+        }
+        let text = |key: &str| pending.pointer(&format!("/spec/{key}")).and_then(Value::as_str).map(String::from);
+        if let (Some(chain), Some(step)) = (text("chain"), text("step")) {
+            found.insert((chain, step), id.to_string());
+        }
+    }
+    found
 }
 
 /// The mark on a reference an earlier fix in the same plan replaces.
@@ -457,7 +501,7 @@ fn skills_run(argv: &[String], cwd: &Path, vars: &[(String, String)]) -> Result<
 /// each is made from, so a step runs after every fix it refers to, and in
 /// chain order where that leaves a choice; and what is out of date but made
 /// by no step.
-fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<(Vec<(String, String, String)>, Vec<String>, Vec<String>), String> {
+fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<(Vec<(String, String, String, Vec<String>)>, Vec<String>, Vec<String>), String> {
     let touches: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "pipeline.py", &["touches", pipeline, "--json"]), cwd, vars)?).map_err(|error| format!("What is out of date could not be read: {error}"))?;
     let stale: Vec<&str> = touches.get("out_of_date").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str)).collect();
     let query = "SELECT json_array(c.ord, s.ord, s.chain, s.name, s.artifact, s.refs) FROM step s JOIN chain c ON c.name = s.chain WHERE s.artifact IS NOT NULL AND s.artifact != ''";
@@ -507,7 +551,7 @@ struct FixOrder {
 /// every other step whose artifact it refers to, and the earliest in chain
 /// order goes first where that leaves a choice. A loop, which no chain
 /// should hold, is broken in chain order.
-fn fix_order(mut steps: Vec<FixOrder>) -> Vec<(String, String, String)> {
+fn fix_order(mut steps: Vec<FixOrder>) -> Vec<(String, String, String, Vec<String>)> {
     steps.sort_by(|a, b| a.place.cmp(&b.place));
     let mut ordered: Vec<FixOrder> = Vec::new();
     while !steps.is_empty() {
@@ -515,7 +559,7 @@ fn fix_order(mut steps: Vec<FixOrder>) -> Vec<(String, String, String)> {
         let next = steps.iter().position(|step| !waits(step, &steps)).unwrap_or(0);
         ordered.push(steps.remove(next));
     }
-    ordered.into_iter().map(|step| (step.chain, step.step, step.artifact)).collect()
+    ordered.into_iter().map(|step| (step.chain, step.step, step.artifact, step.uses)).collect()
 }
 
 /// Marks each reference of a plan that an earlier fix in the same plan
@@ -588,6 +632,34 @@ fn same_but_fixed(approved: &Value, now: &Value, published: &HashMap<String, Str
         }
     }
     Ok(())
+}
+
+/// A request still at its endpoint, collected with `request.py collect`,
+/// which spends nothing and waits for it: the file it made. When it is not
+/// finished yet it stays pending, for a later fix to collect.
+fn collect_take(scripts: &Path, cwd: &Path, vars: &[(String, String)], id: &str) -> Result<String, String> {
+    skills_run(&skills_argv(scripts, "request.py", &["collect", id]), cwd, vars).map_err(|reason| format!("its request {id} is still at its endpoint and could not be collected yet, so a later fix will collect it: {reason}"))?;
+    let shown: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "request.py", &["show", id]), cwd, vars)?).map_err(|error| format!("The collected request could not be read: {error}"))?;
+    shown.get("outputs").and_then(Value::as_array).and_then(|outputs| outputs.first()).and_then(Value::as_str).map(String::from).ok_or_else(|| format!("its request {id} was collected but made no file"))
+}
+
+/// A fix's take published at once as its artifact's next version, with
+/// `--fixes` and what its step refers to.
+fn publish_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str, step: &FixStep, take: &str, request: Option<&str>) -> Result<(), String> {
+    let query = format!("SELECT refs FROM step WHERE chain='{}' AND name='{}'", step.chain.replace('\'', "''"), step.step.replace('\'', "''"));
+    let refs: Vec<Value> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, &query, "--read-only"]), cwd, vars).ok().and_then(|printed| serde_json::from_str(printed.trim()).ok()).unwrap_or_default();
+    let mut args: Vec<String> = ["publish", pipeline, &step.artifact, "--file", take, "--chain", &step.chain, "--fixes"].iter().map(|arg| arg.to_string()).collect();
+    if let Some(request) = request {
+        args.extend([String::from("--request"), request.to_string()]);
+    }
+    for reference in &refs {
+        let text = |key: &str| reference.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        if !text("artifact").is_empty() {
+            args.extend([String::from("--from"), text("artifact"), if text("role").is_empty() { String::from("input") } else { text("role") }]);
+        }
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    skills_run(&skills_argv(scripts, "pipeline.py", &args), cwd, vars).map(|_| ()).map_err(|reason| format!("{}'s fix could not be published: {reason}", step.artifact))
 }
 
 /// Where a download's own record of its address, page, and licence is kept.
@@ -996,7 +1068,29 @@ impl Runner {
                         return Err(said);
                     }
                     let (mut plans, mut steps, mut fixed) = (Vec::new(), Vec::new(), Vec::new());
-                    for (chain, step, artifact) in found {
+                    let pending = pending_requests(&cwd);
+                    let (mut collected, mut left_pending, mut left) = (Vec::new(), Vec::new(), Vec::<String>::new());
+                    for (chain, step, artifact, uses) in found {
+                        // Made from a step left until its request is collected:
+                        // left with it.
+                        if uses.iter().any(|used| left.contains(used)) {
+                            left_pending.push(step);
+                            left.push(artifact);
+                            continue;
+                        }
+                        // A request still at its endpoint is collected, never
+                        // made again; unless it was made before a fix it uses.
+                        if let Some(id) = pending.get(&(chain.clone(), step.clone())) {
+                            if uses.iter().any(|used| fixed.contains(used)) {
+                                left_pending.push(step);
+                                left.push(artifact);
+                            } else {
+                                collected.push(step.clone());
+                                steps.push(FixStep { chain, step, artifact: artifact.clone(), hash: String::new(), collect: Some(id.clone()), plan: None });
+                                fixed.push(artifact);
+                            }
+                            continue;
+                        }
                         let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &chain, &step, "--plan", "--json"]);
                         if stand_in {
                             argv.push(String::from("--stand-in"));
@@ -1004,10 +1098,13 @@ impl Runner {
                         let (mut plan, hash) = planned(&argv, &cwd, &vars, stand_in)?;
                         mark_fixed(&mut plan, &fixed);
                         plans.push(plan);
-                        steps.push(FixStep { chain, step, artifact: artifact.clone(), hash });
+                        steps.push(FixStep { chain, step, artifact: artifact.clone(), hash, collect: None, plan: Some(plans.len() - 1) });
                         fixed.push(artifact);
                     }
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed, waiting }) })
+                    if steps.is_empty() {
+                        return Err(format!("Still at its endpoint from before the fixes it uses, so left until it is collected: {}.", left_pending.join(", ")));
+                    }
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed, waiting, collected, left_pending }) })
                 });
             }
             _ => return Begun::Answered(failed(call, "No such tool.")),
@@ -1116,7 +1213,7 @@ impl Runner {
     fn fix_chain(&mut self, call: &str, fix: Fix, approved: Vec<Value>, stand_in: bool) {
         let (answered, cwd, vars) = (call.to_string(), self.cwd.clone(), self.env.clone());
         self.spawn(call, move |stop| {
-            let Fix { scripts, pipeline, steps, not_fixed, waiting } = fix;
+            let Fix { scripts, pipeline, steps, not_fixed, waiting, left_pending, .. } = fix;
             let mut published: HashMap<String, String> = HashMap::new();
             let mut done: Vec<Value> = Vec::new();
             let mut stopped: Option<String> = None;
@@ -1125,15 +1222,33 @@ impl Runner {
                     stopped = Some(String::from("the user stopped the fix"));
                     break;
                 }
+                // A request still at its endpoint: collected, never made again.
+                if let Some(id) = &step.collect {
+                    let take = match collect_take(&scripts, &cwd, &vars, id) {
+                        Ok(take) => take,
+                        Err(reason) => {
+                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            break;
+                        }
+                    };
+                    if let Err(reason) = publish_fix(&scripts, &cwd, &vars, &pipeline, step, &take, Some(id)) {
+                        stopped = Some(reason);
+                        break;
+                    }
+                    published.insert(step.artifact.clone(), take.clone());
+                    done.push(json!({ "artifact": step.artifact, "chain": step.chain, "step": step.step, "file": take, "collected": id }));
+                    continue;
+                }
                 // A later step's plan as it is now, after the fixes before it.
-                let hash = if index == 0 {
+                let plan_index = step.plan.unwrap_or(index);
+                let hash = if published.is_empty() {
                     step.hash.clone()
                 } else {
                     let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &step.chain, &step.step, "--plan", "--json"]);
                     if stand_in {
                         argv.push(String::from("--stand-in"));
                     }
-                    match planned(&argv, &cwd, &vars, stand_in).and_then(|(plan, hash)| same_but_fixed(&approved[index], &plan, &published).map(|()| hash)) {
+                    match planned(&argv, &cwd, &vars, stand_in).and_then(|(plan, hash)| same_but_fixed(&approved[plan_index], &plan, &published).map(|()| hash)) {
                         Ok(hash) => hash,
                         Err(reason) => {
                             stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
@@ -1152,32 +1267,28 @@ impl Runner {
                         break;
                     }
                 };
-                if made.get("pending").is_some_and(|pending| !pending.is_null()) {
-                    stopped = Some(format!("{} / {} is still being made at its endpoint: collect it with request.py collect, then fix again", step.chain, step.step));
-                    break;
-                }
-                let Some(take) = made.get("files").and_then(Value::as_array).and_then(|files| files.first()).and_then(Value::as_str).map(String::from) else {
-                    stopped = Some(format!("{} / {} made no file", step.chain, step.step));
-                    break;
+                // A request that went to its endpoint's queue is collected
+                // there and then, never made again.
+                let pending = made.get("pending").and_then(Value::as_str).map(String::from);
+                let take = match &pending {
+                    Some(id) => match collect_take(&scripts, &cwd, &vars, id) {
+                        Ok(take) => take,
+                        Err(reason) => {
+                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            break;
+                        }
+                    },
+                    None => match made.get("files").and_then(Value::as_array).and_then(|files| files.first()).and_then(Value::as_str) {
+                        Some(take) => take.to_string(),
+                        None => {
+                            stopped = Some(format!("{} / {} made no file", step.chain, step.step));
+                            break;
+                        }
+                    },
                 };
-                // Published at once as the artifact's next version, a fix,
-                // with what its step refers to.
-                let request = made.get("report").and_then(Value::as_str).and_then(|report| Path::new(report).file_stem()).map(|stem| stem.to_string_lossy().to_string());
-                let query = format!("SELECT refs FROM step WHERE chain='{}' AND name='{}'", step.chain.replace('\'', "''"), step.step.replace('\'', "''"));
-                let refs: Vec<Value> = skills_run(&skills_argv(&scripts, "pipeline.py", &["sql", &pipeline, &query, "--read-only"]), &cwd, &vars).ok().and_then(|printed| serde_json::from_str(printed.trim()).ok()).unwrap_or_default();
-                let mut args: Vec<String> = ["publish", &pipeline, &step.artifact, "--file", &take, "--chain", &step.chain, "--fixes"].iter().map(|arg| arg.to_string()).collect();
-                if let Some(request) = &request {
-                    args.extend([String::from("--request"), request.clone()]);
-                }
-                for reference in &refs {
-                    let text = |key: &str| reference.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-                    if !text("artifact").is_empty() {
-                        args.extend([String::from("--from"), text("artifact"), if text("role").is_empty() { String::from("input") } else { text("role") }]);
-                    }
-                }
-                let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                if let Err(reason) = skills_run(&skills_argv(&scripts, "pipeline.py", &args), &cwd, &vars) {
-                    stopped = Some(format!("{}'s fix could not be published: {reason}", step.artifact));
+                let request = pending.or_else(|| made.get("report").and_then(Value::as_str).and_then(|report| Path::new(report).file_stem()).map(|stem| stem.to_string_lossy().to_string()));
+                if let Err(reason) = publish_fix(&scripts, &cwd, &vars, &pipeline, step, &take, request.as_deref()) {
+                    stopped = Some(reason);
                     break;
                 }
                 published.insert(step.artifact.clone(), take.clone());
@@ -1189,6 +1300,9 @@ impl Runner {
             }
             if !waiting.is_empty() {
                 output["made_from_what_no_step_makes"] = json!(waiting);
+            }
+            if !left_pending.is_empty() {
+                output["left_until_collected"] = json!(left_pending);
             }
             if let Some(reason) = &stopped {
                 let left: Vec<&str> = steps.iter().skip(published.len()).map(|step| step.artifact.as_str()).collect();
@@ -1550,6 +1664,32 @@ mod tests {
         }
     }
 
+    /// Catches a step whose request is still at its endpoint made again and
+    /// paid for twice, rather than collected; one that failed or was
+    /// cancelled taken for one still waiting; and the card not saying so.
+    #[test]
+    fn a_request_still_at_its_endpoint_is_collected_not_made_again() {
+        let folder = std::env::temp_dir().join(format!("runner-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("requests")).unwrap();
+        let pending = |id: &str, step: &str, extra: Value| {
+            let mut record = json!({ "id": id, "spec": { "chain": "the final shot", "step": step } });
+            if let (Some(record), Some(extra)) = (record.as_object_mut(), extra.as_object()) {
+                record.extend(extra.clone());
+            }
+            std::fs::write(folder.join(format!("requests/{id}.pending.json")), record.to_string()).unwrap();
+        };
+        pending("shot-1", "final shot", json!({}));
+        pending("retime-1", "retime", json!({ "failed": "fal: error" }));
+        pending("upscale-1", "upscale", json!({ "cancelled": true }));
+        let found = pending_requests(&folder);
+        assert_eq!(found.get(&(String::from("the final shot"), String::from("final shot"))).map(String::as_str), Some("shot-1"));
+        assert_eq!(found.len(), 1, "a failed or cancelled request was taken for one still waiting: {found:?}");
+        let fix = Fix { scripts: PathBuf::new(), pipeline: String::from("002"), steps: Vec::new(), not_fixed: Vec::new(), waiting: Vec::new(), collected: vec![String::from("final shot")], left_pending: vec![String::from("retime")] };
+        assert_eq!(fix.pending_lines(), ["Still at its endpoint, so collected, not made again: final shot.", "Still at its endpoint from before the fixes it uses, so left until it is collected: retime."]);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     /// Catches a step fixed before a step whose artifact it refers to, as
     /// Last order's "far-end layout, door half open" refers to the door
     /// open layout a later step makes, and chain order lost where nothing
@@ -1558,7 +1698,7 @@ mod tests {
     fn a_fix_runs_each_step_after_what_it_is_made_from() {
         let step = |place: (i64, i64), name: &str, uses: &[&str]| FixOrder { place, chain: String::from("the animatic"), step: name.to_string(), artifact: format!("the diner: {name}"), uses: uses.iter().map(|used| format!("the diner: {used}")).collect() };
         let order = fix_order(vec![step((1, 10), "door half open", &["door open"]), step((1, 11), "door open", &["layout"]), step((1, 12), "the bell", &["door half open"]), step((1, 2), "other", &[])]);
-        let names: Vec<&str> = order.iter().map(|(_, step, _)| step.as_str()).collect();
+        let names: Vec<&str> = order.iter().map(|(_, step, _, _)| step.as_str()).collect();
         assert_eq!(names, ["other", "door open", "door half open", "the bell"]);
     }
 

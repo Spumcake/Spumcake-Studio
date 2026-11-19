@@ -97,6 +97,9 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
             {
                 lines.push(Line::Muted(crate::runner::waiting_line(fix.waiting())));
             }
+            if let Asking::Plans { fix: Some(fix), .. } = asking {
+                lines.extend(fix.pending_lines().into_iter().map(Line::Muted));
+            }
             // What a listed price leaves out, such as charges per token.
             for note in plans.iter().filter_map(|plan| plan.get("price_note").and_then(Value::as_str)) {
                 lines.push(Line::Muted(format!("The price {note}.")));
