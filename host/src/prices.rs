@@ -599,14 +599,33 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
         let tokens = median(pool.iter().filter(|(at, _, _)| *at == nearest).map(|(_, tokens, _)| *tokens).collect())?;
         Some(tokens * wanted / nearest * made.2 as f64)
     };
-    let out = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out).or_else(scaled_out)?;
+    // An image whose size the service chooses, "auto", is counted at the
+    // largest size the model's models.json lists, of its quality when there
+    // is one, so the card shows an upper bound; the project's own requests
+    // at "auto" refine it once one has run.
+    let largest_out = || {
+        let tokens = listed.as_ref()?.get("per_image_out")?.as_object()?;
+        let sized = |same: bool| tokens.iter().filter_map(|(key, tokens)| {
+            let (size, quality) = key.split_once(' ').unwrap_or((key.as_str(), ""));
+            (!same || made.1.as_str() == Some(quality)).then(|| Some((area(size)?, tokens.as_f64()?))).flatten()
+        }).max_by(|a, b| a.0.total_cmp(&b.0));
+        Some(sized(true).or_else(|| sized(false))?.1 * made.2 as f64)
+    };
+    let exact = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out);
+    let unsized = made.0.as_str().is_none_or(|size| area(size).is_none());
+    let (out, upper) = match exact {
+        Some(out) => (out, false),
+        None if unsized => (largest_out()?, true),
+        None => (scaled_out()?, false),
+    };
     let mut cost = 0.0;
     for (tokens, key) in [(text, "input_text"), (image, "input_image"), (out, "output_image")] {
         if tokens > 0.0 {
             cost += tokens * price(key)? / 1e6;
         }
     }
-    (cost > 0.0).then(|| format!("about {} · {FROM_YOUR_PRICES}", money(cost)))
+    let bound = if upper { "up to about" } else { "about" };
+    (cost > 0.0).then(|| format!("{bound} {} · {FROM_YOUR_PRICES}", money(cost)))
 }
 
 /// A plan's estimate, from the user's token prices when no list gives its
@@ -725,6 +744,11 @@ mod tests {
         assert_eq!(from_token_prices(&data, &folder, &wide), Some(format!("about $0.064 · {FROM_YOUR_PRICES}")), "a film of another shape was left unknown");
         wide["endpoint"]["settings"]["quality"] = json!("medium");
         assert!(from_token_prices(&data, &folder, &wide).is_some(), "a quality never listed was left unknown");
+        // A size the service chooses is counted at the largest size listed,
+        // 1536x864 high's 1078 tokens, and shown as an upper bound.
+        let mut chosen = plan.clone();
+        chosen["endpoint"]["settings"] = json!({ "size": "auto", "quality": "high" });
+        assert_eq!(from_token_prices(&data, &folder, &chosen), Some(format!("up to about $0.054 · {FROM_YOUR_PRICES}")), "a size the service chooses was left unknown");
         // Prices only partly set still point to Settings.
         settings["token_prices"] = json!([{ "endpoint": "images", "model": model, "output_image": 30.0 }]);
         std::fs::write(data.join("settings.json"), settings.to_string()).unwrap();

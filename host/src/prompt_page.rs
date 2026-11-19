@@ -330,9 +330,10 @@ fn write_template(folder: &Path, template: &str) -> Result<String, String> {
 /// The cost line under the card, from a plan's estimate and the service.
 pub(crate) fn cost_line(plan: &Value, service: &str) -> String {
     let estimate = plan.get("estimate").and_then(Value::as_str).unwrap_or("");
-    let shown = match estimate.strip_prefix("about ") {
-        Some(rest) => format!("About {rest}"),
-        None => String::from("Cost unknown"),
+    let shown = match (estimate.strip_prefix("about "), estimate.strip_prefix("up to about ")) {
+        (Some(rest), _) => format!("About {rest}"),
+        (_, Some(rest)) => format!("Up to about {rest}"),
+        _ => String::from("Cost unknown"),
     };
     if service.is_empty() { shown } else { format!("{shown} · {service}") }
 }
