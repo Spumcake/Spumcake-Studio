@@ -170,6 +170,8 @@ fn toolbar(kind: &str) -> Toolbar {
 /// A row of the Layers list. A layer has an image; a group has none.
 fn layer_row(dir: &Path, id: u64, parent: Option<u64>, depth: u32, name: &str, group: bool) -> LayerRow {
     LayerRow {
+        dim: false,
+        outlined: false,
         id,
         parent,
         depth,
