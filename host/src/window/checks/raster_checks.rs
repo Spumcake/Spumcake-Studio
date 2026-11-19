@@ -375,6 +375,9 @@ fn film(dir: &Path) -> Film {
                 mark: None,
                 chosen: false,
                 pending: None,
+                outlined: false,
+                stack: None,
+                caption: String::new(),
             })
             .collect(),
         shown: 1,

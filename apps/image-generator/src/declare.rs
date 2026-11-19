@@ -10,7 +10,7 @@ use crate::rounds::{self, View};
 use crate::session::{Image, Page, Session, ToolKind};
 use crate::text::{Align, Face};
 use protocol::{
-    Action, Binding, CellSetting, Chord, ChoicePreview, Film, FilmGroup, FilmItem, FlagIcons, HeadingAction, IconToggle, Keys,
+    Action, Binding, CellSetting, Chord, ChoicePreview, Film, FilmGroup, FilmItem, FilmStack, FlagIcons, HeadingAction, IconToggle, Keys,
     LayerRow, Layers, MenuEntry, PanelCell, PanelPage, PropValue, Properties, ReferenceRole, Row, RowKind, Section, TabEntry,
     Tabs, Thumbnail, ToolItem, Toolbar,
 };
@@ -402,8 +402,9 @@ fn settings_row(session: &Session) -> (Vec<ToolItem>, Vec<ToolItem>) {
     }
 }
 
-/// The menu. In a project every change is written by itself, so Save and
-/// Save As are not offered.
+/// The menu. In a project every change is written by itself, so Save As
+/// is not offered, and Save only for an edit of a take, where it saves the
+/// take's next iteration.
 pub fn menu(session: &Session) -> Vec<MenuEntry> {
     let mut rows = vec![
         row("New image", Action::new("new_image")),
@@ -413,6 +414,8 @@ pub fn menu(session: &Session) -> Vec<MenuEntry> {
     if session.project.is_none() {
         rows.push(row("Save", Action::new("save")));
         rows.push(row("Save as…", Action::new("save_as")));
+    } else if session.edits_a_take() {
+        rows.push(row("Save", Action::new("save")));
     }
     let mut export = row("Export PNG…", Action::new("export_png"));
     export.divider = true;
@@ -442,6 +445,7 @@ pub fn keys() -> Keys {
         bind(chord("Y", true, Some(false)), Action::new("redo")),
         bind(chord("N", true, Some(false)), Action::new("new_image")),
         bind(chord("O", true, Some(false)), Action::new("open")),
+        bind(chord("S", true, Some(false)), Action::new("save")),
         bind(chord("D", true, Some(false)), Action::new("deselect")),
         bind(chord("I", true, Some(true)), Action::new("invert")),
         bind(chord("Enter", false, Some(false)), Action::new("crop_apply")),
@@ -947,14 +951,32 @@ pub fn film(image: &Image) -> Film {
         .tiles
         .iter()
         .enumerate()
-        .map(|(index, tile)| FilmItem {
-            name: format!("Take {}", tile.take + 1),
-            thumbnail: rounds.thumbnail(tile),
-            menu: tile.path().map(take_menu).unwrap_or_default(),
-            badge: String::new(),
-            mark: tile.file.as_ref().filter(|file| file.canon).map(|_| String::from("badge-check")),
-            chosen: rounds.shown == Some(index),
-            pending: tile.pending.clone(),
+        .map(|(index, tile)| {
+            let asset = tile.asset.as_ref();
+            // A round's tile is its asset: outlined while out of date, a
+            // stack while it has iterations, Unverified when nothing records
+            // what it was made from. An opened stack's tiles are numbered.
+            let (name, caption) = match (tile.iteration, asset) {
+                (Some(at), Some(asset)) => (format!("Take {} · iteration {at} of {}", tile.take + 1, 1 + asset.iterations.len()), at.to_string()),
+                (None, Some(asset)) if asset.unverified => (format!("Take {}", tile.take + 1), String::from("Unverified")),
+                _ => (format!("Take {}", tile.take + 1), String::new()),
+            };
+            let round = tile.iteration.is_none();
+            FilmItem {
+                name,
+                thumbnail: rounds.thumbnail(tile),
+                menu: tile.path().map(|path| take_menu(path, round, round && asset.is_some_and(|asset| asset.outlined))).unwrap_or_default(),
+                badge: String::new(),
+                mark: tile.file.as_ref().filter(|file| file.canon).map(|_| String::from("badge-check")),
+                chosen: rounds.shown == Some(index),
+                pending: tile.pending.clone(),
+                outlined: round && asset.is_some_and(|asset| asset.outlined),
+                stack: asset.filter(|asset| round && !asset.iterations.is_empty()).map(|asset| FilmStack {
+                    count: 1 + asset.iterations.len(),
+                    open: Action::with_arg("take_stack", json!({ "take": asset.path })),
+                }),
+                caption,
+            }
         })
         .collect();
     let mut groups: Vec<FilmGroup> = rounds.groups().into_iter().map(|(label, count)| FilmGroup { label, count, menu: Vec::new() }).collect();
@@ -990,6 +1012,9 @@ pub fn film(image: &Image) -> Film {
                 mark: None,
                 chosen: false,
                 pending: None,
+                outlined: false,
+                stack: None,
+                caption: String::new(),
             }
         });
     let takes = items.len();
@@ -1006,18 +1031,30 @@ pub fn film(image: &Image) -> Film {
 }
 
 /// A take's menu, as ig-candidate-chosen shows it.
-fn take_menu(path: &str) -> Vec<MenuEntry> {
+/// A take's menu, as ig-candidate-chosen and ig-out-of-date show it. A
+/// round's take is its asset, which Use this take puts in use; while it is
+/// out of date it adds Ignore and the assistant's fix. An iteration of an
+/// opened stack starts a round or opens to edit.
+fn take_menu(path: &str, round: bool, outlined: bool) -> Vec<MenuEntry> {
     let target = json!({ "take": path });
+    let mut menu = vec![row("Next round from this", Action::with_arg("take_next_round", target.clone()))];
+    if round {
+        // Beside the takes in use, replacing none, so it asks nothing first.
+        menu.push(row("Use this take", Action::with_arg("take_use", target.clone())));
+    }
+    if outlined {
+        let mut ignore = row("Ignore", Action::with_arg("take_ignore", target.clone()));
+        ignore.divider = true;
+        menu.push(ignore);
+        menu.push(row("Ask the assistant to fix the dependency chain", Action::with_arg("take_fix", target.clone())));
+    }
     let mut edit = row("Edit", Action::with_arg("take_edit", target.clone()));
     edit.divider = true;
-    let report = row("Open report", Action::with_arg("take_report", target.clone()));
-    vec![
-        row("Next round from this", Action::with_arg("take_next_round", target.clone())),
-        // Beside the takes in use, replacing none, so it asks nothing first.
-        row("Use this take", Action::with_arg("take_use", target)),
-        edit,
-        report,
-    ]
+    menu.push(edit);
+    if round {
+        menu.push(row("Open report", Action::with_arg("take_report", target)));
+    }
+    menu
 }
 
 pub fn tabs(session: &Session) -> Option<Tabs> {

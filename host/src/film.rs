@@ -6,14 +6,16 @@
 //! for a drag. What any of it means is the sub-application's. Items come in
 //! runs, each under its label, such as a round of takes, and a drag stays
 //! inside its run. A tile carries words on its corner, a mark, the chosen
-//! take's star, or, for a take not made yet, a striped or failed tile.
+//! take's star, or, for a take not made yet, a striped or failed tile; an
+//! out-of-date take has a red outline, a stack of iterations its count on a
+//! dark round badge that opens it, and any tile words under it.
 
 use crate::widgets;
 use eframe::egui::{
     self, Color32, CursorIcon, Event, Key, MouseWheelUnit, PointerButton, Popup, Rect, RectAlign, Sense,
     SetOpenCommand, pos2, vec2,
 };
-use protocol::{Action, Film, FilmItem, FilmPending};
+use protocol::{Action, Film, FilmItem, FilmPending, FilmStack};
 use serde_json::{Value, json};
 
 /// The strip's height, its hairline included, in points.
@@ -56,11 +58,27 @@ const STRIPE_STEP: f32 = 8.0;
 /// A tile that failed: pale, with a red mark, as ig-request-failed shows.
 const FAILED_FILL: Color32 = Color32::from_rgb(248, 249, 250);
 const FAILED: Color32 = Color32::from_rgb(220, 38, 38);
+/// An out-of-date take's outline, as ig-out-of-date draws it.
+const OUT_OF_DATE: Color32 = Color32::from_rgb(220, 38, 38);
+/// The line of words under the tiles, such as an iteration's number, when
+/// any tile has them.
+const CAPTION_H: f32 = 16.0;
+const CAPTION_SIZE: f32 = 11.5;
+/// A stack's count badge, a dark disc at the tile's bottom right.
+const STACK_RADIUS: f32 = 8.0;
 const SPINNER: Color32 = Color32::from_rgb(120, 126, 136);
 
-/// The strip's height for `film`: taller by a line when its runs have labels.
+/// The strip's height for `film`: taller by a line when its runs have
+/// labels, and by another when its tiles have words under them.
 pub(crate) fn height(film: &Film) -> f32 {
-    if labelled(film) { HEIGHT + LABEL_H } else { HEIGHT }
+    let label = if labelled(film) { LABEL_H } else { 0.0 };
+    let caption = if captioned(film) { CAPTION_H } else { 0.0 };
+    HEIGHT + label + caption
+}
+
+/// Whether any tile has words under it.
+fn captioned(film: &Film) -> bool {
+    film.items.iter().any(|item| !item.caption.is_empty())
 }
 
 /// Whether any run has a label to draw above it.
@@ -402,7 +420,8 @@ impl Strip {
         // Under the runs' labels when they have them, the thumbnails are
         // centered on the rest of the strip.
         let label_h = if labelled(film) { LABEL_H } else { 0.0 };
-        let top = (rect.top() + label_h + rect.bottom()) / 2.0 + 0.5 - THUMB_H / 2.0;
+        let caption_h = if captioned(film) { CAPTION_H } else { 0.0 };
+        let top = (rect.top() + label_h + rect.bottom() - caption_h) / 2.0 + 0.5 - THUMB_H / 2.0;
         let tile = |left: f32, width: f32| Rect::from_min_size(pos2(start + left, top), vec2(width, THUMB_H));
 
         // The open drag lands or is let go.
@@ -477,6 +496,20 @@ impl Strip {
                 continue;
             }
             paint_thumb(&strip, &painter, place, item, index == film.shown);
+            if !item.caption.is_empty() {
+                let mut job = egui::text::LayoutJob::simple_singleline(item.caption.clone(), egui::FontId::proportional(CAPTION_SIZE), widgets::MUTED);
+                job.wrap = egui::text::TextWrapping::truncate_at_width((place.width() + GAP).max(1.0));
+                let galley = painter.layout_job(job);
+                painter.galley(pos2(place.center().x - galley.size().x / 2.0, place.bottom() + 4.0), galley, widgets::MUTED);
+            }
+            // A stack's badge opens it, over the tile's own click.
+            if let Some(stack) = &item.stack {
+                let spot = Rect::from_center_size(stack_center(place), vec2(2.0 * STACK_RADIUS + 4.0, 2.0 * STACK_RADIUS + 4.0));
+                let badge = strip.interact(spot, strip.id().with(("stack", index)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                if acts && badge.clicked() {
+                    out.push(stack.open.clone());
+                }
+            }
             if !item.menu.is_empty() {
                 let open = (acts && response.secondary_clicked()).then_some(SetOpenCommand::Bool(true));
                 let mut renaming = None;
@@ -544,6 +577,12 @@ impl Strip {
 /// its badge at the bottom right, its mark at the top left, and the chosen
 /// take's star at the top right.
 fn paint_thumb(ui: &egui::Ui, painter: &egui::Painter, place: Rect, item: &FilmItem, shown: bool) {
+    // A stack's iterations show as edges behind it, up and to the right.
+    if item.stack.is_some() {
+        for step in [4.0, 2.0] {
+            widgets::outlined(painter, place.translate(vec2(step, -step)), RADIUS, Color32::WHITE, widgets::BORDER);
+        }
+    }
     match &item.pending {
         Some(FilmPending::Running { since }) => paint_running(ui, painter, place, *since),
         Some(FilmPending::Failed) => {
@@ -568,11 +607,22 @@ fn paint_thumb(ui: &egui::Ui, painter: &egui::Painter, place: Rect, item: &FilmI
     if shown || item.chosen {
         widgets::outlined(painter, place.expand(3.0), RADIUS + 3.0, Color32::TRANSPARENT, SHOWN);
         widgets::outlined(painter, place.expand(2.0), RADIUS + 2.0, Color32::TRANSPARENT, SHOWN);
-    } else {
+    } else if !item.outlined {
         widgets::outlined(painter, place, RADIUS, Color32::TRANSPARENT, widgets::BORDER);
     }
+    // Out of date: the red outline, inside the chosen one's blue.
+    if item.outlined {
+        let at = if shown || item.chosen { place.expand(0.5) } else { place.expand(1.5) };
+        widgets::outlined(painter, at, RADIUS + 1.0, Color32::TRANSPARENT, OUT_OF_DATE);
+        widgets::outlined(painter, at.shrink(1.0), RADIUS, Color32::TRANSPARENT, OUT_OF_DATE);
+    }
+    if let Some(stack) = &item.stack {
+        stack_badge(painter, place, stack);
+    }
     if !item.badge.is_empty() {
-        badge(painter, place, &item.badge);
+        // Beside a stack's badge when it has one.
+        let room = if item.stack.is_some() { 2.0 * STACK_RADIUS + 4.0 } else { 0.0 };
+        badge(painter, Rect::from_min_max(place.min, place.max - vec2(room, 0.0)), &item.badge);
     }
     if let Some(mark) = &item.mark {
         // The canon seal, as vg-filmstrip-rounds shows: a white icon in a
@@ -588,6 +638,20 @@ fn paint_thumb(ui: &egui::Ui, painter: &egui::Painter, place: Rect, item: &FilmI
         widgets::disc(painter, center, 7.5, SHOWN);
         crate::toolbar::paint_icon(painter, center, "star-solid", 9.0, Color32::WHITE);
     }
+}
+
+/// Where a stack's count badge sits on its tile.
+fn stack_center(place: Rect) -> egui::Pos2 {
+    pos2(place.right() - STACK_RADIUS - 3.0, place.bottom() - STACK_RADIUS - 3.0)
+}
+
+/// A stack's count, white on a dark disc in a white ring, as
+/// ig-iteration-stack shows it.
+fn stack_badge(painter: &egui::Painter, place: Rect, stack: &FilmStack) {
+    let center = stack_center(place);
+    widgets::disc(painter, center, STACK_RADIUS, BADGE_FILL);
+    widgets::ring(painter, center, STACK_RADIUS, 1.2, Color32::WHITE);
+    painter.text(center, egui::Align2::CENTER_CENTER, stack.count.to_string(), egui::FontId::proportional(BADGE_SIZE - 1.0), Color32::WHITE);
 }
 
 /// Words on a dark rounded badge at the tile's bottom right, such as a
@@ -689,6 +753,37 @@ mod tests {
         assert_eq!(draw(&mut strip, "1", &two(&["Round 1"])), 0.0);
         assert!(draw(&mut strip, "1", &two(&["Round 1", "Round 2"])) > 0.0, "a second cell's new round was taken for the first cell's");
     }
+    /// Catches a stack whose badge does nothing or selects its tile, and
+    /// words under the tiles drawn into a strip with no room for them.
+    #[test]
+    fn a_stacks_badge_opens_it_and_words_go_under_the_tiles() {
+        let mut film = film(&[(160, 90), (160, 90)]);
+        film.items[0].stack = Some(FilmStack { count: 3, open: Action::new("take_stack") });
+        film.items[0].outlined = true;
+        film.items[1].caption = "Unverified".into();
+        assert_eq!(height(&film), HEIGHT + CAPTION_H);
+        let ctx = egui::Context::default();
+        crate::toolbar::install_fonts(&ctx);
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, height(&film)));
+        let mut strip = Strip::default();
+        let mut draw = |strip: &mut Strip, events: Vec<Event>| {
+            let mut out = Vec::new();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 200.0))), events, ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| strip.show(ui, "1", &film, rect, false, false, &mut out));
+            output.textures_delta.clear();
+            out
+        };
+        draw(&mut strip, Vec::new());
+        let laid = layout(&film);
+        let top = (rect.top() + rect.bottom() - CAPTION_H) / 2.0 + 0.5 - THUMB_H / 2.0;
+        let at = stack_center(Rect::from_min_size(pos2(laid.lefts[0], top), vec2(laid.widths[0], THUMB_H)));
+        let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let mut out = draw(&mut strip, vec![Event::PointerMoved(at), press(true)]);
+        out.extend(draw(&mut strip, vec![press(false)]));
+        let ids: Vec<&str> = out.iter().map(|action| action.id.as_str()).collect();
+        assert!(ids.contains(&"take_stack") && !ids.contains(&"select"), "{ids:?}");
+    }
+
     use protocol::Thumbnail;
 
     fn film(sizes: &[(u32, u32)]) -> Film {
@@ -703,6 +798,9 @@ mod tests {
                     mark: None,
                     chosen: false,
                     pending: None,
+                    outlined: false,
+                    stack: None,
+                    caption: String::new(),
                 })
                 .collect(),
             shown: 0,

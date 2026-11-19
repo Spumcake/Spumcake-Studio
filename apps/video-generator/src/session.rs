@@ -565,7 +565,7 @@ impl Session {
             // Use this take answered: an error is said at the bottom left;
             // the seal comes with the next `takes`.
             // A refusal is said, and taken away by a later success.
-            HostMessage::TakeUsed { tab, error, .. } => {
+            HostMessage::TakeUsed { tab, error, .. } | HostMessage::TakeIgnored { tab, error, .. } => {
                 if let Some(error) = error.filter(|error| !error.is_empty()) {
                     self.refused.insert(tab.clone());
                     out.push(deliver::notices(&tab, Some((error, protocol::NoticeState::Failed))));
@@ -1121,7 +1121,7 @@ impl Session {
                 return;
             }
             // A take's menu.
-            "take_next_round" | "take_use" | "take_edit" | "take_report" => {
+            "take_next_round" | "take_use" | "take_edit" | "take_report" | "take_ignore" | "take_fix" | "take_stack" => {
                 let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
                     return;
                 };
@@ -1134,6 +1134,15 @@ impl Session {
                         self.use_take(&path, out);
                         return;
                     }
+                    "take_ignore" => {
+                        self.ignore_take(&path, out);
+                        return;
+                    }
+                    "take_fix" => {
+                        self.ask_to_fix(&path, out);
+                        return;
+                    }
+                    "take_stack" => self.toggle_stack(&path),
                     "take_report" => {
                         self.open_report(&path, out);
                         return;
