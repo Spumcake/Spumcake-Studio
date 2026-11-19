@@ -1214,6 +1214,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// Catches the take answers drifting from Skills' own scripts: a take
+    /// put in use not published as its step's artifact; a second take of
+    /// the same step replacing the first rather than standing beside it; a
+    /// Save on an asset other work was made from going ahead without the
+    /// warning, or filed as anything but its next iteration; what was made
+    /// from it not outlined after; and Ignore not clearing the outline.
+    #[test]
+    fn takes_are_used_iterated_and_ignored_with_the_real_scripts() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("take-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests", "work", "agent"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let skills = |script: &str, args: &[&str]| {
+            let out = Command::new("python3").arg(scripts.join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        skills("pipeline.py", &["new", "001"]);
+        skills("pipeline.py", &["element", "001", "the diner", "--kind", "place"]);
+        skills("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);
+        skills("pipeline.py", &["step", "001", "the diner", "layout", "--order", "1", "--skill", "build-previs", "--artifact", "the diner: layout"]);
+        skills("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", r#"{"kind": "fal", "model": "stand-in"}"#, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: layout", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
+        let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
+        // The layout, filed and published from a workspace's file.
+        std::fs::write(folder.join("work/layout.png"), b"\x89PNG\r\n\x1a\nlayout").unwrap();
+        let asked = Asked::Publish { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: String::from("the diner: layout"), source: String::from("work/layout.png"), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+        let view = prepare(&place, &asked).unwrap();
+        let (layout, _) = carry(&place, &Card { asked, view }, false).unwrap();
+        // Two takes of the keyframe's step, made with the stand-in.
+        let take = |known: &[String]| {
+            let name = format!("keyframe-{}", known.len() + 1);
+            std::fs::write(folder.join("agent/keyframe.json"), skills("pipeline.py", &["fill", "001", "the diner", "keyframe", "--name", &name])).unwrap();
+            skills("request.py", &["run", "agent/keyframe.json", "--stand-in"]);
+            std::fs::read_dir(folder.join("library")).unwrap().flatten().map(|entry| format!("library/{}", entry.file_name().to_string_lossy())).find(|file| !known.contains(file)).unwrap()
+        };
+        let first = take(&[]);
+        let step = protocol::StepRef { chain: String::from("the diner"), step: String::from("keyframe") };
+        assert_eq!(use_take(&place, 0, "1", Some(step.clone()), &first), Ok(String::from("the diner: keyframe")));
+        let second = take(std::slice::from_ref(&first));
+        assert_eq!(use_take(&place, 0, "1", Some(step), &second), Ok(String::from("the diner: keyframe, 2")), "a second take replaced the first");
+        let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
+        assert_eq!(canon.files.get("the diner: keyframe"), Some(&first), "the first take left use");
+        assert_eq!(canon.files.get("the diner: keyframe, 2"), Some(&second));
+        // A Save on the layout, which both keyframes were made from.
+        let (warning, made_from) = iteration_warning(&place, &layout).unwrap().expect("a Save on a dependency gave no warning");
+        assert!(warning.ends_with("is in use as a dependency, and new iterations would break canonical consistency."), "{warning}");
+        assert_eq!(made_from, "2 takes in keyframe were made from it.");
+        std::fs::write(folder.join("work/layout-edit.png"), b"\x89PNG\r\n\x1a\nedited").unwrap();
+        let filed = save_iteration(&place, &layout, "work/layout-edit.png").unwrap().expect("nothing was filed");
+        let assets = assets_of(&place).unwrap();
+        let layout_asset = assets.iter().find(|asset| asset.first == layout).expect("the layout lost its asset");
+        assert_eq!(layout_asset.canonical(), filed, "the Save was not the layout's next iteration");
+        let history = skills("pipeline.py", &["history", "001", "the diner: layout", "--json"]);
+        assert!(history.contains(&filed), "the iteration was not published as the layout's next version");
+        let keyframe = assets.iter().find(|asset| asset.first == first).unwrap();
+        assert!(keyframe.outlined, "what was made from the layout was not outlined: {keyframe:?}");
+        // Ignore clears the first keyframe's outline, and not the second's.
+        ignore_take(&place, &first).unwrap();
+        let assets = assets_of(&place).unwrap();
+        assert!(!assets.iter().find(|asset| asset.first == first).unwrap().outlined, "Ignore left the outline");
+        assert!(assets.iter().find(|asset| asset.first == second).unwrap().outlined, "Ignore cleared another take's outline");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     /// Gives the scratch repository an identity of its own, so a commit
     /// never needs the computer's.
     fn give_git_identity(folder: &Path) {

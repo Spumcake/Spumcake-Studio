@@ -401,7 +401,8 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
     // chain has a step that follows that skill.
     let chain_take = |record: &Value, step: &StepRef| {
         let Some(skill) = canon.step_skills.get(&(step.chain.clone(), step.step.clone())) else { return false };
-        let places: HashSet<Option<i64>> = canon.step_skills.iter().filter(|((chain, _), other)| *chain == step.chain && *other == skill).map(|(key, _)| canon.step_orders.get(key).copied()).collect();
+        // A step whose place is not known is a place of its own.
+        let places: HashSet<String> = canon.step_skills.iter().filter(|((chain, _), other)| *chain == step.chain && *other == skill).map(|(key, _)| canon.step_orders.get(key).map_or_else(|| format!("step {}", key.1), |order| order.to_string())).collect();
         record.get("step").and_then(Value::as_str).is_none() && record.get("skill").and_then(Value::as_str) == Some(skill.as_str()) && places.len() == 1
     };
     let names_cell = |record: &Value| {

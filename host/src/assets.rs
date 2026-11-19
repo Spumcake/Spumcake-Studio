@@ -135,6 +135,15 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             takes.push((String::new(), file.clone(), None));
         }
     }
+    // So is a file iterated since, such as a filed layout edited in its
+    // workspace, though canon now names its iteration.
+    let mut edited: Vec<&String> = next.keys().filter(|file| is_reference(file) && !iterated.contains(file.as_str())).collect();
+    edited.sort();
+    for file in edited {
+        if seen.insert(file.clone()) {
+            takes.push((String::new(), file.clone(), None));
+        }
+    }
     let listed = |key: &str| -> HashSet<String> { touches.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str).map(String::from)).collect() };
     let (out_of_date, unverified) = (listed("out_of_date"), listed("unverified"));
     let step_of_artifact: HashMap<&String, &(String, String)> = canon.step_artifacts.iter().map(|(step, artifact)| (artifact, step)).collect();
