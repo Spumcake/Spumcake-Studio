@@ -90,6 +90,10 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
             for note in plans.iter().filter_map(|plan| plan.get("price_note").and_then(Value::as_str)) {
                 lines.push(Line::Muted(format!("The price {note}.")));
             }
+            // Where the prices of a model priced by its tokens are set.
+            for hint in plans.iter().filter_map(|plan| plan.get("price_hint").and_then(Value::as_str)) {
+                lines.push(Line::Muted(hint.to_string()));
+            }
             for plan in plans {
                 let endpoint = plan.get("endpoint").cloned().unwrap_or(Value::Null);
                 if !endpoint.is_null() {

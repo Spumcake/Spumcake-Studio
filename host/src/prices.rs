@@ -113,7 +113,8 @@ fn user_token_prices(data: &Path) -> Vec<(String, String, Value)> {
 /// is not today's listed price, the spec's or step's own price.
 pub(crate) fn note_for(data: &Path, plan: &Value) -> Option<String> {
     let estimate = plan.get("estimate").and_then(Value::as_str)?;
-    if !estimate.starts_with("about $") || estimate.contains("earlier request") {
+    // An estimate from the project's bills or the user's prices says so itself.
+    if !estimate.starts_with("about $") || estimate.contains("earlier request") || estimate.contains(FROM_YOUR_PRICES) {
         return None;
     }
     let spec_own = || Some(String::from("comes from the request's own endpoint, not today's price list"));
@@ -492,13 +493,53 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 
 /// The mark on an estimate made from the user's token prices.
 pub(crate) const FROM_YOUR_PRICES: &str = "estimate from your prices";
+/// The card's second line when a model priced by its tokens has no prices.
+pub(crate) const SET_PRICES: &str = "Set its prices in Settings, under its endpoint.";
+
+/// A model's token counts as its skill's `models.json` gives them, the
+/// service's own: `tokens: {per_image_in, per_image_out: {"<size>
+/// <quality>": n}}`, read from the skill folders the data folder's
+/// settings list. None when no skill gives them.
+fn listed_tokens(data: &Path, service: &str, model: &str) -> Option<Value> {
+    let settings: crate::workspace::Settings = std::fs::read_to_string(data.join("settings.json")).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders));
+    skills.iter().find_map(|skill| {
+        let listed: Value = std::fs::read_to_string(skill.folder.join("models.json")).ok().and_then(|text| serde_json::from_str(&text).ok())?;
+        listed
+            .as_array()?
+            .iter()
+            .find(|entry| entry.get("service").and_then(Value::as_str) == Some(service) && entry.get("model").and_then(Value::as_str) == Some(model))?
+            .get("tokens")
+            .filter(|tokens| tokens.is_object())
+            .cloned()
+    })
+}
+
+/// Whether a plan to a model priced by its tokens waits on the user's
+/// prices: its cost is unknown, and its prices are not all set.
+pub(crate) fn needs_prices(data: &Path, plan: &Value) -> bool {
+    let unknown = plan.get("estimate").and_then(Value::as_str).is_none_or(|estimate| estimate.starts_with("unknown"));
+    let service = plan.pointer("/endpoint/kind").and_then(Value::as_str).and_then(|kind| kind.split('-').next()).unwrap_or("");
+    let model = plan.pointer("/endpoint/model").and_then(Value::as_str).unwrap_or("");
+    // Set means every price a request to it uses: text in, image in, and
+    // image out.
+    let set = user_token_prices(data).iter().any(|(known, priced, per)| known == service && priced == model && ["input_text", "input_image", "output_image"].iter().all(|key| per.get(*key).is_some()));
+    unknown && service == "openai" && plan.get("stand_in").and_then(Value::as_bool) != Some(true) && !set
+}
+
+/// An image's area from its size, "1536x864".
+fn area(size: &str) -> Option<f64> {
+    let (width, height) = size.split_once('x')?;
+    Some(width.trim().parse::<f64>().ok()? * height.trim().parse::<f64>().ok()?).filter(|area| *area > 0.0)
+}
 
 /// For a plan to a model priced by its tokens, an estimate from the user's
 /// token prices and what it will send: its prompt's text, as the project's
 /// earlier requests to the model counted it, or a token for every four
-/// characters; each image it sends, as they counted one; and each image it
-/// makes, as they counted one of the same size and quality. None when a
-/// price or a count it needs is unknown.
+/// characters; each image it sends, and each image it makes at its size and
+/// quality, as those requests counted them, or else as the model's skill's
+/// `models.json` gives them. None when a price or a count it needs is
+/// unknown.
 pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Option<String> {
     let service = plan.pointer("/endpoint/kind").and_then(Value::as_str)?.split('-').next()?.to_string();
     let model = plan.pointer("/endpoint/model").and_then(Value::as_str)?;
@@ -509,7 +550,8 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
     let made = made_by(plan.pointer("/endpoint/settings"));
     let mut known = usages().lock().ok()?;
     let mut earlier: Vec<Used> = Vec::new();
-    for entry in std::fs::read_dir(folder.join("requests")).ok()?.flatten() {
+    // A new project has no requests yet, and is estimated all the same.
+    for entry in std::fs::read_dir(folder.join("requests")).into_iter().flatten().flatten() {
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("html") {
             continue;
@@ -529,8 +571,35 @@ pub(crate) fn from_token_prices(data: &Path, folder: &Path, plan: &Value) -> Opt
     }
     let per_character = median(earlier.iter().filter(|used| used.prompt > 0).map(|used| used.text_in / used.prompt as f64).collect()).unwrap_or(0.25);
     let text = prompt as f64 * per_character;
-    let image = if references == 0 { 0.0 } else { median(earlier.iter().filter(|used| used.references > 0).map(|used| used.image_in / used.references as f64).collect())? * references as f64 };
-    let out = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect())?;
+    drop(known);
+    let listed = listed_tokens(data, &service, model);
+    let per_image_in = median(earlier.iter().filter(|used| used.references > 0).map(|used| used.image_in / used.references as f64).collect()).or_else(|| listed.as_ref()?.get("per_image_in")?.as_f64());
+    let image = if references == 0 { 0.0 } else { per_image_in? * references as f64 };
+    let listed_out = || {
+        let key = [made.0.as_str().unwrap_or(""), made.1.as_str().unwrap_or("")].join(" ");
+        Some(listed.as_ref()?.get("per_image_out")?.get(key.trim())?.as_f64()? * made.2 as f64)
+    };
+    // An image of a size or quality never counted: an image's tokens grow
+    // with its area, so it is counted from the nearest size counted, of its
+    // quality when there is one, as the project recorded it or the
+    // skill's models.json lists it.
+    let scaled_out = || {
+        let wanted = area(made.0.as_str()?)?;
+        let mut counted: Vec<(f64, f64, bool)> = earlier.iter().filter_map(|used| Some((area(used.made.0.as_str()?)?, used.out / used.made.2.max(1) as f64, used.made.1 == made.1))).collect();
+        for (key, tokens) in listed.as_ref().and_then(|listed| listed.get("per_image_out")).and_then(Value::as_object).into_iter().flatten() {
+            let (size, quality) = key.split_once(' ').unwrap_or((key.as_str(), ""));
+            if let (Some(at), Some(tokens)) = (area(size), tokens.as_f64()) {
+                counted.push((at, tokens, made.1.as_str() == Some(quality)));
+            }
+        }
+        let same: Vec<(f64, f64, bool)> = counted.iter().copied().filter(|(_, _, same)| *same).collect();
+        let pool = if same.is_empty() { counted } else { same };
+        let distance = |at: f64| (at / wanted).ln().abs();
+        let nearest = pool.iter().map(|(at, _, _)| *at).min_by(|a, b| distance(*a).total_cmp(&distance(*b)))?;
+        let tokens = median(pool.iter().filter(|(at, _, _)| *at == nearest).map(|(_, tokens, _)| *tokens).collect())?;
+        Some(tokens * wanted / nearest * made.2 as f64)
+    };
+    let out = median(earlier.iter().filter(|used| used.made == made).map(|used| used.out).collect()).or_else(listed_out).or_else(scaled_out)?;
     let mut cost = 0.0;
     for (tokens, key) in [(text, "input_text"), (image, "input_image"), (out, "output_image")] {
         if tokens > 0.0 {
@@ -560,7 +629,8 @@ mod tests {
     /// Catches a model priced by its tokens left at "Cost unknown" once the
     /// user has set its prices, an estimate that ignores the prompt or the
     /// images it sends, one made from another size's images or a
-    /// stand-in's counts, and the user's prices missing from the setup file.
+    /// stand-in's counts, the user's prices missing from the setup file, and
+    /// a note on the card saying the price came from somewhere else.
     #[test]
     fn a_token_priced_model_is_estimated_from_the_users_prices() {
         let root = std::env::temp_dir().join(format!("prices-tokens-{}", std::process::id()));
@@ -600,10 +670,65 @@ mod tests {
         let mut filled = plan.clone();
         fill_from_token_prices(&data, &folder, &mut filled);
         assert_eq!(filled["estimate"], json!(format!("about $0.09 · {FROM_YOUR_PRICES}")));
+        assert_eq!(note_for(&data, &filled), None, "the card said an estimate from the user's prices came from elsewhere");
+        // A size never made is counted from the nearest size made, at its
+        // quality, by area: 1100 tokens at 1536x864 make about 3477 at
+        // 2048x2048.
         let mut larger = plan.clone();
         larger["endpoint"]["settings"]["size"] = json!("2048x2048");
-        assert_eq!(from_token_prices(&data, &folder, &larger), None, "an image of a size never made was estimated");
+        assert_eq!(from_token_prices(&data, &folder, &larger), Some(format!("about $0.19 · {FROM_YOUR_PRICES}")), "an image of a size never made was left unknown");
         assert_eq!(known(&data)["openai"][model]["per_million_tokens"]["output_image"], json!(40.0), "the setup file lost the user's prices");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Catches a new project's first request to a model priced by its
+    /// tokens left at "Cost unknown" with its prices set, when its skill's
+    /// `models.json` gives the model's token counts; and the card's line
+    /// pointing to Settings shown once prices are set, or missing before.
+    #[test]
+    fn a_new_projects_first_request_is_estimated_from_its_models_counts() {
+        let root = std::env::temp_dir().join(format!("prices-new-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (data, folder, skill) = (root.join("data"), root.join("project"), root.join("skills").join("generate-keyframe"));
+        for made in [&data, &folder, &skill] {
+            std::fs::create_dir_all(made).unwrap();
+        }
+        let model = "gpt-image-2.6-sunburst";
+        std::fs::write(skill.join("SKILL.md"), "---\nname: generate-keyframe\ndescription: Make keyframes.\n---\n").unwrap();
+        std::fs::write(skill.join("models.json"), json!([{ "service": "openai", "model": model, "name": "OpenAI GPT-Image-2.6 Sunburst", "tokens": { "per_image_in": 1296, "per_image_out": { "1536x864 high": 1078, "1344x768 high": 983 } } }]).to_string()).unwrap();
+        let plan = json!({
+            "endpoint": { "kind": "openai-image-edit", "model": model, "settings": { "size": "1536x864", "quality": "high" } },
+            "prompt": "p".repeat(400),
+            "references": [{ "order": 1 }, { "order": 2 }],
+            "estimate": "unknown: no price for this endpoint",
+        });
+        let mut settings = json!({
+            "endpoints": [{ "id": "images", "name": "Images", "kind": "openai", "address": "http://images.test/v1" }],
+            "skill_folders": [root.join("skills").display().to_string()],
+        });
+        std::fs::write(data.join("settings.json"), settings.to_string()).unwrap();
+        assert!(needs_prices(&data, &plan), "a card with no prices did not point to Settings");
+        settings["token_prices"] = json!([{ "endpoint": "images", "model": model, "input_text": 5.0, "input_image": 8.0, "output_image": 30.0 }]);
+        std::fs::write(data.join("settings.json"), settings.to_string()).unwrap();
+        assert!(!needs_prices(&data, &plan), "a card with prices set still pointed to Settings");
+        // 400 characters at a quarter token each, two images at 1296
+        // tokens each, and one image made at 1078 tokens: 100 × $5 +
+        // 2592 × $8 + 1078 × $30, a million tokens each.
+        let mut filled = plan.clone();
+        fill_from_token_prices(&data, &folder, &mut filled);
+        assert_eq!(filled["estimate"], json!(format!("about $0.054 · {FROM_YOUR_PRICES}")), "a project with no requests yet was not estimated");
+        // A film at another aspect ratio, and at a quality never listed, is
+        // counted from the nearest size listed: 1078 tokens at 1536x864 make
+        // about 1437 at 2048x864.
+        let mut wide = plan.clone();
+        wide["endpoint"]["settings"] = json!({ "size": "2048x864", "quality": "high" });
+        assert_eq!(from_token_prices(&data, &folder, &wide), Some(format!("about $0.064 · {FROM_YOUR_PRICES}")), "a film of another shape was left unknown");
+        wide["endpoint"]["settings"]["quality"] = json!("medium");
+        assert!(from_token_prices(&data, &folder, &wide).is_some(), "a quality never listed was left unknown");
+        // Prices only partly set still point to Settings.
+        settings["token_prices"] = json!([{ "endpoint": "images", "model": model, "output_image": 30.0 }]);
+        std::fs::write(data.join("settings.json"), settings.to_string()).unwrap();
+        assert!(needs_prices(&data, &plan), "a card with prices partly set did not point to Settings");
         let _ = std::fs::remove_dir_all(&root);
     }
 
