@@ -593,38 +593,54 @@ mod tests {
     }
 
     #[test]
-    fn the_export_runs_the_step_and_its_take_joins_the_gallery() {
+    fn the_export_runs_the_step_s_script_and_files_a_video_of_its_own() {
         let mut session = from_its_step("export-step");
-        // Untouched: the step runs at once.
+        session.film_element = Some("Last order".to_string());
+        let dir = session.project().unwrap().to_path_buf();
+        // Untouched: the step's own script assembles it at once, into work/;
+        // the step itself is not run.
         let step = session.start_export().unwrap();
         assert_eq!(step, "the animatic: animatic");
-        let Some(protocol::AppMessage::RunStep { id, step, .. }) = session.take_outgoing().pop() else {
-            panic!("the step was not run");
+        let Some(protocol::AppMessage::RunSkillScript { id, skill, script, args }) = session.take_outgoing().pop() else {
+            panic!("the step's script was not run");
         };
-        assert_eq!((step.chain.as_str(), step.step.as_str()), ("the animatic", "animatic"));
+        assert_eq!((skill.as_str(), script.as_str()), ("build-animatic", "assemble.py"));
+        assert_eq!(args, ["prompts/resources/2026-11-14_16-07-animatic-assembly.json", "work/last-order-animatic.mp4"]);
         assert_eq!(session.animatic_state()["state"], "exporting");
         // Pressed again while it runs: no second run, and no card says so.
         assert!(session.start_export().is_err());
         assert!(session.take_outgoing().is_empty());
         assert!(!session.kept_notices.iter().any(|notice| notice.text == "Animatic video not exported"));
-        let dir = session.project().unwrap().to_path_buf();
-        std::fs::write(dir.join("library/2026-11-17_10-01-animatic.mp4"), b"video").unwrap();
-        session.step_ran(&id, Some("library/2026-11-17_10-01-animatic.mp4"), None);
-        // The take joins the step's gallery; nothing is published.
-        assert!(session.take_outgoing().is_empty(), "the take was published");
-        assert!(session.kept_notices.iter().any(|notice| notice.text == "Animatic video exported" && notice.detail == "library/2026-11-17_10-01-animatic.mp4"));
-        // The take is the animatic's file now, for list_items and renders.
+        // Assembled: filed with no inputs, a new video of its own.
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        std::fs::write(dir.join("work/last-order-animatic.mp4"), b"video").unwrap();
+        session.skill_script_ran(&id, "", None);
+        let Some(protocol::AppMessage::FileResource { path, from, id: Some(id), .. }) = session.take_outgoing().pop() else {
+            panic!("the video was not filed");
+        };
+        assert_eq!((path.as_str(), from.is_empty()), ("work/last-order-animatic.mp4", true));
+        std::fs::write(dir.join("prompts/resources/2026-11-19_10-01-last-order-animatic.mp4"), b"video").unwrap();
+        session.filed(&id, "prompts/resources/2026-11-19_10-01-last-order-animatic.mp4", None);
+        // Nothing is published, the copy in work/ is gone, and the card says
+        // where the video is.
+        assert!(session.take_outgoing().is_empty(), "the video was published");
+        assert!(!dir.join("work/last-order-animatic.mp4").exists());
+        assert!(session.kept_notices.iter().any(|notice| notice.text == "Animatic video exported" && notice.detail == "prompts/resources/2026-11-19_10-01-last-order-animatic.mp4"));
         assert_eq!(session.animatic_state()["state"], "done");
-        assert_eq!(session.animatic_state()["file"], "library/2026-11-17_10-01-animatic.mp4");
+        assert_eq!(session.animatic_state()["file"], "prompts/resources/2026-11-19_10-01-last-order-animatic.mp4");
         assert!(!dir.join("exports").exists());
         // Retimed in another tool: the storyboard's own timing is saved
-        // over it before the step runs.
+        // over it before the script runs.
         session.retimed = Some((session.active_id(), "prompts/resources/other.json".into()));
         session.start_export().unwrap();
-        assert!(matches!(session.take_outgoing().pop(), Some(protocol::AppMessage::RunSkillScript { .. })));
+        let Some(protocol::AppMessage::RunSkillScript { script, .. }) = session.take_outgoing().pop() else {
+            panic!("the timing was not saved first");
+        };
+        assert_eq!(script, "write-assembly.py");
         session.saving = None;
         session.retimed = None;
-        // Retimed: the timing is saved first, then the step runs.
+        // Retimed: the timing is saved first, then the script runs on the
+        // new assembly.
         let (second, last) = (session.film().clips[1].id, session.film().clips[3].id);
         session.resize_clip(second, true, 2);
         session.resize_clip(last, true, -2);
@@ -638,12 +654,13 @@ mod tests {
             panic!("the step's edit was not asked");
         };
         session.step_edited(&id, None);
-        let Some(protocol::AppMessage::RunStep { id, .. }) = session.take_outgoing().pop() else {
-            panic!("the step did not run after the save");
+        let Some(protocol::AppMessage::RunSkillScript { id, script, args, .. }) = session.take_outgoing().pop() else {
+            panic!("the script did not run after the save");
         };
-        // A step that is not approved says why on the export's card.
-        session.step_ran(&id, None, Some("The user did not approve it, so nothing ran."));
-        assert!(session.kept_notices.iter().any(|notice| notice.text == "Animatic video not exported" && notice.detail == "The user did not approve it, so nothing ran."));
+        assert_eq!((script.as_str(), args[0].as_str()), ("assemble.py", "prompts/resources/new.json"));
+        // A script that fails says why on the export's card.
+        session.skill_script_ran(&id, "", Some("ffmpeg is not installed."));
+        assert!(session.kept_notices.iter().any(|notice| notice.text == "Animatic video not exported" && notice.detail == "ffmpeg is not installed."));
         assert!(session.take_outgoing().is_empty());
     }
 
@@ -1000,11 +1017,12 @@ mod tests {
     fn the_timeline_shows_what_is_placed_at_its_latest_iteration() {
         let (mut session, _) = opened("iterations");
         let dir = session.project().unwrap().to_path_buf();
-        let second = session.film().clips[1].id;
-        // A take no step uses, inserted by hand as shot 2's image key.
-        let take = "library/2026-11-14_15-58-keyframe-the-bell-take-2.png";
+        let (second, fourth) = (session.film().clips[1].id, session.film().clips[3].id);
+        // A take no step uses, inserted by hand as shot 4's image key, so
+        // shot 2 keeps the bell's keyframe and shot 3 the line's.
+        let take = "library/2026-11-14_15-58-keyframe-waiting-take-2.png";
         std::fs::copy(dir.join("library/2026-11-12_20-03-otis-line-1.wav"), dir.join(take)).unwrap();
-        session.enter_clip(second);
+        session.enter_clip(fourth);
         assert!(session.insert_image_key(take));
         session.leave_clip();
         let before = session.film().clone();
@@ -1014,7 +1032,7 @@ mod tests {
         // Edited in its own workspace: an iteration filed naming the take it
         // iterates. The timeline shows it by itself, with no undo step.
         let newer = "prompts/resources/2026-11-19_09-00-keyframe-the-bell-take-2.png";
-        record(&dir, "prompts/resources/records.jsonl", &[json!({ "at": "2026-11-19T14:00:00Z", "file": newer, "inputs": [{ "file": take }], crate::iterations::ITERATES: { "file": take, "sha256": "a1" } })]);
+        record(&dir, "prompts/resources/records.jsonl", &[json!({ "at": "2026-11-19T14:00:00Z", "file": newer, "inputs": [{ "file": take }], protocol::ITERATES: { "file": take, "sha256": "a1" } })]);
         check_now(&mut session);
         assert!(session.film().files().contains(newer) && !session.film().files().contains(take));
         // Undo takes the resize back, never the iteration.
@@ -1026,16 +1044,16 @@ mod tests {
         // The bell's keyframe edited in canon, with the run log naming the
         // version it was edited from: the timeline follows it too.
         let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+        assert!(session.film().files().contains(bell), "the bell's keyframe is no longer placed");
         record(&dir, "pipeline/002/runs.jsonl", &[json!({ "event": "publish", "at": "2026-11-19T15:00:00Z", "artifact": "Last order: keyframe, the bell", "file": "prompts/resources/bell-2.png", "edited_from": bell })]);
         // Another take put in use for the line's step: not an iteration, so
         // what was placed stays.
         let line = "library/2026-11-14_15-37-keyframe-the-line.png";
         record(&dir, "pipeline/002/runs.jsonl", &[json!({ "event": "publish", "at": "2026-11-19T15:01:00Z", "artifact": "Last order: keyframe, the line", "file": "library/line-take-4.png", "replaced": line })]);
-        let shown = session.film().clone();
         check_now(&mut session);
         assert!(session.film().files().contains(newer), "a drawn hold was read as an iteration");
         assert!(session.film().files().contains(line), "another take put in use replaced what was placed");
-        assert_eq!(session.film().files().contains("prompts/resources/bell-2.png"), shown.files().contains(bell));
+        assert!(session.film().files().contains("prompts/resources/bell-2.png") && !session.film().files().contains(bell), "the bell's edit did not follow");
         // The take, not changed, is where it was.
         assert!(session.film().files().contains("library/2026-11-12_20-03-otis-line-1.wav"));
     }

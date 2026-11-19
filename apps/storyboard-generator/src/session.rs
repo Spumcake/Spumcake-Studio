@@ -388,8 +388,10 @@ pub struct Session {
     /// save knows what is there: the host answers reads in any order.
     film_read: bool,
     steps_read: bool,
-    /// Export animatic video, running the project's animatic step.
+    /// Export animatic video, running the project's animatic step's script.
     stepping: Option<project::Stepping>,
+    /// How the last export ended: the filed video, or why there is none.
+    export_outcome: Option<Result<String, String>>,
     /// Sounds from outside the project being filed into it, by the
     /// filing's id.
     filing: HashMap<String, sound::Filing>,
@@ -465,6 +467,7 @@ impl Session {
             film_read: false,
             steps_read: false,
             stepping: None,
+            export_outcome: None,
             filing: HashMap::new(),
             last_check: None,
         };

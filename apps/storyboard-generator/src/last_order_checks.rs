@@ -142,10 +142,8 @@ impl Copy {
                 }),
                 // The storyboard publishes nothing.
                 AppMessage::Publish { .. } => panic!("the storyboard asked to publish: {message:?}"),
-                AppMessage::RunStep { id, step, .. } => Some(match self.rerun(&step.chain, &step.step) {
-                    Ok(take) => HostMessage::StepRan { id: id.clone(), take: take["files"][0].as_str().map(str::to_string), error: None },
-                    Err(error) => HostMessage::StepRan { id: id.clone(), take: None, error: Some(error) },
-                }),
+                // The storyboard runs no step: its export runs the step's script.
+                AppMessage::RunStep { .. } => panic!("the storyboard asked to run a step: {message:?}"),
                 _ => None,
             };
             seen.push(message);
@@ -207,14 +205,15 @@ fn tool_and_tab(server: &mut Server, copy: &Copy, tab: &str, name: &str, input: 
             group: format!("check-{name}"),
         })
         .unwrap();
-    let mut output = Value::Null;
-    for reply in &replies {
-        if let AppMessage::ToolResult(result) = reply {
-            output = result.output.clone();
-        }
-    }
-    let shown = shown_tab(&copy.host(server, replies)).unwrap_or_else(|| tab.to_string());
-    (output, shown)
+    // Its answer, sent at once or, as an export's is, once its work is done.
+    let call = format!("check-{name}");
+    let seen = copy.host(server, replies);
+    let output = seen.iter().rev().find_map(|reply| match reply {
+        AppMessage::ToolResult(result) if result.call == call => Some(result.output.clone()),
+        _ => None,
+    });
+    let shown = shown_tab(&seen).unwrap_or_else(|| tab.to_string());
+    (output.unwrap_or(Value::Null), shown)
 }
 
 fn shown_tab(seen: &[AppMessage]) -> Option<String> {
@@ -477,7 +476,7 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
     // Export animatic video files the drawn hold, saves the timing, and
     // runs the step; nothing is published.
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
-    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    assert!(exported["made"]["file"].as_str().is_some_and(|file| file.starts_with("prompts/resources/") && file.ends_with(".mp4")), "{exported}");
     let (_, refs) = step(copy);
     let hold = refs[1]["file"].as_str().unwrap_or_else(|| panic!("the drawn hold is not named by its file: {refs}")).to_string();
     assert!(refs[1].get("artifact").is_none() && hold.starts_with("prompts/resources/"), "{refs}");
@@ -508,12 +507,26 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
 fn import_and_export_through_the_project(copy: &Copy) {
     let (mut server, tab) = opened(copy);
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
-    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    assert!(exported["made"]["file"].as_str().is_some_and(|file| file.starts_with("prompts/resources/") && file.ends_with(".mp4")), "{exported}");
     // The step made the animatic, and it is the animatic's file now.
     let film = tool(&mut server, copy, &tab, "read_film", json!({}));
     assert_eq!(film["animatic"]["state"], "done", "{}", film["animatic"]);
     let take = film["animatic"]["file"].as_str().unwrap();
     assert!(copy.project.join(take).is_file() && !take.starts_with("exports/"), "{take}");
+    // A video of its own: filed with no inputs, published as nothing, and
+    // the animatic step's own artifact left alone.
+    let record = copy.run(&copy.scripts.join("request.py"), &["show".to_string(), take.to_string()]).unwrap();
+    let record: Value = serde_json::from_str(&record).unwrap_or_else(|_| panic!("no record of the export: {record}"));
+    assert!(record["inputs"].as_array().is_none_or(|inputs| inputs.is_empty()), "{record}");
+    let canon = copy.pipeline(&["sql", &format!("SELECT count(*) FROM artifact WHERE file = '{take}'"), "--read-only"]).unwrap();
+    assert_eq!(canon.trim(), "0", "the export was published");
+    // A keyframe changed: touches never lists the export.
+    let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+    let work = darkened(copy, bell, "bell-for-export.png");
+    let filed = copy.file(&work, &[bell.to_string()]).unwrap();
+    copy.pipeline(&["publish", "Last order: keyframe, the bell", "--file", filed.as_str(), "--from", "Last order: keyframe, the bell", "edited"]).unwrap();
+    let touched = copy.pipeline(&["touches", "--json"]).unwrap() + &copy.pipeline(&["touches", "--artifact", "Last order: keyframe, the bell", "--json"]).unwrap();
+    assert!(!touched.contains(take), "touches lists the export: {touched}");
     let outside = std::env::temp_dir().join(format!("storyboard-outside-sound-{}.wav", std::process::id()));
     std::fs::write(&outside, crate::sounds::wav_bytes(crate::sounds::RATE, &crate::sounds::clicks(24, &[]))).unwrap();
     let filing = tool(&mut server, copy, &tab, "import_sound", json!({ "path": outside.display().to_string() }));
@@ -706,7 +719,7 @@ fn loudness(samples: &[f32], rate: u32, frames: usize) -> Vec<f64> {
 fn playback_is_the_take(copy: &Copy) {
     let (mut server, tab) = opened(copy);
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
-    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    assert!(exported["made"]["file"].as_str().is_some_and(|file| file.starts_with("prompts/resources/") && file.ends_with(".mp4")), "{exported}");
     let film = tool(&mut server, copy, &tab, "read_film", json!({}));
     assert_eq!(film["animatic"]["state"], "done", "{}", film["animatic"]);
     let take = copy.project.join(film["animatic"]["file"].as_str().unwrap());

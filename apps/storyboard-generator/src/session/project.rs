@@ -170,6 +170,8 @@ pub struct Stepping {
     /// The items the animatic is made from, as the export began.
     pub sources: Vec<(String, String)>,
     pub since: Instant,
+    /// The video `assemble.py` writes in `work/`, which is then filed.
+    pub video: String,
 }
 
 /// The storyboard in `folder` whose timing was read from the step `key`,
@@ -190,6 +192,14 @@ fn kept_for(folder: &std::path::Path, key: &(String, String)) -> Option<std::pat
     // The one kept last, when more than one was.
     found.sort_by_key(|path| std::cmp::Reverse(std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()));
     found.into_iter().next()
+}
+
+/// The project's iterations, from its records and every pipeline's run
+/// log, as `protocol::Iterations` reads them.
+fn read_iterations(project: &std::path::Path) -> protocol::Iterations {
+    let records = std::fs::read_to_string(project.join(protocol::RESOURCE_RECORDS)).unwrap_or_default();
+    let logs: Vec<String> = std::fs::read_dir(project.join("pipeline")).into_iter().flatten().flatten().filter_map(|pipeline| std::fs::read_to_string(pipeline.path().join("runs.jsonl")).ok()).collect();
+    protocol::Iterations::from_text(&records, &logs.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 fn row_text(row: &Value) -> Option<String> {
@@ -297,7 +307,7 @@ impl Session {
         let Some(project) = self.project.clone().filter(|_| !self.is_playing()) else {
             return;
         };
-        let iterations = crate::iterations::Iterations::read(&project);
+        let iterations = read_iterations(&project);
         let mut followed = false;
         for record in &mut self.storyboards {
             for file in record.film().files() {
@@ -541,11 +551,12 @@ impl Session {
         Ok(())
     }
 
-    /// Export animatic video: the animatic is made by running its step
-    /// again, as `build-animatic` makes it, after saving the timing when it
-    /// differs, and filing its drawn holds first. Its video joins the
-    /// step's gallery as a take; nothing is published. Returns the step
-    /// being run.
+    /// Export animatic video: the animatic is made by the step's own
+    /// script, as `build-animatic` makes it, after saving the timing when it
+    /// differs, and filing its drawn holds first. Its video is filed as a
+    /// new video of its own, tied to no storyboard and no step, and never
+    /// an iteration of an earlier export; nothing is published. Returns the
+    /// step whose script made it.
     pub(crate) fn export_by_step(&mut self) -> Result<String, String> {
         if self.active_storyboard().assembly().is_none() && self.steps.is_empty() {
             return Err("This project has no animatic yet.".to_string());
@@ -585,31 +596,72 @@ impl Session {
         self.stepping.is_some() || self.saving.as_ref().is_some_and(|saving| saving.then_export.is_some()) || self.after_filing.as_ref().is_some_and(|(_, export)| export.is_some())
     }
 
-    /// Asks the host to run the animatic's step again.
+    /// Runs the animatic step's own script, `build-animatic`'s
+    /// `assemble.py`, on the assembly the step names, writing the video in
+    /// `work/`; it is then filed as a video of its own. The step itself is
+    /// not run, so its artifact is left alone.
     fn run_step(&mut self, storyboard: DrawingId, step: AnimaticStep, sources: Vec<(String, String)>) {
-        let id = self.next_request();
-        self.outgoing.push(AppMessage::RunStep { id: id.clone(), tab: storyboard.get().to_string(), step: step.step_ref() });
-        self.stepping = Some(Stepping { id, storyboard, step, sources, since: Instant::now() });
-    }
-
-    /// The host ran the animatic's step: its take joins the step's gallery,
-    /// never published here, and the export's card says where it is.
-    pub fn step_ran(&mut self, id: &str, take: Option<&str>, error: Option<&str>) {
-        let Some(stepping) = self.stepping.take_if(|stepping| stepping.id == id) else {
+        let (Some(assembly), Some(project)) = (crate::assembly::named_in(&step.script), self.project.clone()) else {
+            self.step_export_failed("The animatic's step names no assembly.");
             return;
         };
-        let take = match (error, take) {
-            (None, Some(take)) if !take.is_empty() => take.to_string(),
-            (error, _) => {
-                self.step_export_failed(error.unwrap_or_default());
-                return;
-            }
-        };
-        self.step_exported(stepping.storyboard, &take, stepping.sources);
+        let base = self.film_name().to_lowercase().replace(' ', "-");
+        let folder = project.join(super::WORK);
+        let name = (1..1000).map(|n| if n == 1 { format!("{base}-animatic.mp4") } else { format!("{base}-animatic-{n}.mp4") }).find(|name| !folder.join(name).exists()).unwrap_or_else(|| format!("{base}-animatic.mp4"));
+        let _ = std::fs::create_dir_all(&folder);
+        let video = format!("{}/{name}", super::WORK);
+        let id = self.next_request();
+        self.outgoing.push(AppMessage::RunSkillScript {
+            id: id.clone(),
+            skill: "build-animatic".to_string(),
+            script: "assemble.py".to_string(),
+            args: vec![assembly, video.clone()],
+        });
+        self.stepping = Some(Stepping { id, storyboard, step, sources, since: Instant::now(), video });
     }
 
-    /// Skills' writer ran: its output is the filed file's `{path, sha256}`.
+    /// `assemble.py` wrote the export's video: it is filed with `request.py
+    /// resource` and no inputs, a new video of its own, with no card.
+    fn video_assembled(&mut self, error: Option<&str>) {
+        if let Some(error) = error {
+            let video = self.stepping.take().map(|stepping| stepping.video);
+            if let (Some(video), Some(project)) = (video, &self.project) {
+                let _ = std::fs::remove_file(project.join(video));
+            }
+            self.step_export_failed(error);
+            return;
+        }
+        let id = self.next_request();
+        let Some(stepping) = self.stepping.as_mut() else {
+            return;
+        };
+        stepping.id = id.clone();
+        stepping.since = Instant::now();
+        let message = AppMessage::FileResource { tab: stepping.storyboard.get().to_string(), path: stepping.video.clone(), from: Vec::new(), id: Some(id) };
+        self.outgoing.push(message);
+    }
+
+    /// The export's video is filed as `file`: the export's card says where.
+    fn video_filed(&mut self, file: &str, error: Option<&str>) {
+        let Some(stepping) = self.stepping.take() else {
+            return;
+        };
+        if let Some(project) = &self.project {
+            let _ = std::fs::remove_file(project.join(&stepping.video));
+        }
+        match error.or(file.is_empty().then_some("The project did not say where it filed the video.")) {
+            Some(error) => self.step_export_failed(error),
+            None => self.step_exported(stepping.storyboard, file, stepping.sources),
+        }
+    }
+
+    /// A skill's script ran: `assemble.py` for an export, or Skills' writer,
+    /// whose output is the filed file's `{path, sha256}`.
     pub fn skill_script_ran(&mut self, id: &str, output: &str, error: Option<&str>) {
+        if self.stepping.as_ref().is_some_and(|stepping| stepping.id == id) {
+            self.video_assembled(error);
+            return;
+        }
         if !self.saving.as_ref().is_some_and(|saving| saving.waiting == id) {
             return;
         }
@@ -644,6 +696,10 @@ impl Session {
     pub fn filed(&mut self, id: &str, file: &str, error: Option<&str>) {
         if self.hold_filing.contains_key(id) {
             self.hold_filed(id, file, error);
+            return;
+        }
+        if self.stepping.as_ref().is_some_and(|stepping| stepping.id == id) {
+            self.video_filed(file, error);
             return;
         }
         if self.filing.contains_key(id) {

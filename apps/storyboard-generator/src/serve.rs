@@ -104,6 +104,8 @@ pub struct Server {
     deferred: Vec<RecoveryOffer>,
     /// A `keep` waiting on Storyboard Generator's own Save: the host's tab and the storyboard.
     keeping: Option<(String, DrawingId)>,
+    /// An export_animatic call waiting for its video to be filed.
+    exporting: Option<String>,
     /// The current project's folder from the host.
     project: Option<PathBuf>,
     /// Storyboards with work not yet in their file, since when.
@@ -154,6 +156,7 @@ impl Server {
             hidden: restore,
             deferred,
             keeping: None,
+            exporting: None,
             project: None,
             unwritten_since: HashMap::new(),
             write_failed: HashMap::new(),
@@ -418,7 +421,8 @@ impl Server {
             HostMessage::StepEdited { id, error } => self.session.step_edited(&id, error.as_deref()),
             HostMessage::CanonEdited { id, error } => self.session.canon_edited(&id, error.as_deref()),
             HostMessage::SkillScriptRan { id, output, error } => self.session.skill_script_ran(&id, &output, error.as_deref()),
-            HostMessage::StepRan { id, take, error } => self.session.step_ran(&id, take.as_deref(), error.as_deref()),
+            // The storyboard runs no step: its export runs the step's script.
+            HostMessage::StepRan { .. } => {}
             HostMessage::Preview { id, .. } => replies.push(AppMessage::Previewed {
                 id,
                 thumbnail: None,
@@ -480,6 +484,11 @@ impl Server {
         }
         .run(skill, name, input);
         let mut out = Vec::new();
+        // The export answers once its video is filed, with its path.
+        let exporting = name == "export_animatic" && outcome.ok;
+        if exporting {
+            self.exporting = Some(call.clone());
+        }
         if shown != storyboard {
             let record = self.session.active_storyboard();
             out.push(AppMessage::Document {
@@ -491,8 +500,23 @@ impl Server {
             });
             self.session.activate(shown);
         }
-        out.push(answer(outcome.ok, outcome.output, outcome.images));
+        if !exporting {
+            out.push(answer(outcome.ok, outcome.output, outcome.images));
+        }
+        out.extend(self.export_answered());
         out
+    }
+
+    /// The answer to an export_animatic call, once its video is filed or the
+    /// export failed.
+    fn export_answered(&mut self) -> Option<AppMessage> {
+        self.exporting.as_ref()?;
+        let outcome = self.session.take_export_outcome()?;
+        let call = self.exporting.take()?;
+        Some(AppMessage::ToolResult(match outcome {
+            Ok(file) => ToolResult { call, ok: true, output: serde_json::json!({ "made": { "file": file } }), images: Vec::new() },
+            Err(reason) => ToolResult { call, ok: false, output: serde_json::json!({ "error": reason }), images: Vec::new() },
+        }))
     }
 
     /// A workspace's `open`: that file in a tab, or the storyboard this workspace
@@ -953,7 +977,7 @@ impl Server {
     /// A storyboard shown for the first time is presented in the host's view and
     /// brings its camera.
     fn updates(&mut self, camera: bool) -> Vec<AppMessage> {
-        let mut out = Vec::new();
+        let mut out: Vec<AppMessage> = self.export_answered().into_iter().collect();
         if self.hidden {
             // No tab yet: only a question, such as a file that could not
             // be opened, or the end of a quit.

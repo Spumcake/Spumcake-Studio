@@ -53,6 +53,18 @@ struct Recipe {
     /// last failed write, why and when.
     unwritten_since: Option<Instant>,
     write_failed: Option<(String, Instant)>,
+    /// A chain of the project's living pipeline opened as this recipe: its
+    /// cells are the chain's steps, read from `canon.sql` each time it
+    /// opens, and it is never written to a file of its own.
+    chain: Option<String>,
+}
+
+/// A canon read waiting for its answer.
+enum Asked {
+    Chains,
+    /// A chain's steps, and whether `open` asked for it, so a chain that is
+    /// gone answers as a missing file does.
+    Steps(String, bool),
 }
 
 /// What a save during quit is waiting on.
@@ -82,6 +94,11 @@ pub struct Session {
     clipboard: Option<Cell>,
     /// The project's folder, when the host runs this inside a project.
     project: Option<PathBuf>,
+    /// The project's chains, as last read, for Open chain.
+    chains: Vec<protocol::canon::Chain>,
+    /// Canon reads asked of the host, by their id.
+    asked: HashMap<String, Asked>,
+    next_read: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -126,6 +143,9 @@ impl Session {
             adding: String::from(TEXT_KIND),
             clipboard: None,
             project: None,
+            chains: Vec::new(),
+            asked: HashMap::new(),
+            next_read: 1,
         }
     }
 
@@ -184,7 +204,17 @@ impl Session {
                         self.recipes[index].label = label;
                     }
                 }
+                // The project's chains, each of which opens as a recipe.
+                self.chains.clear();
+                self.read_canon(protocol::canon::CHAINS.to_string(), Asked::Chains, &mut out);
                 out.extend(self.declared());
+            }
+            HostMessage::CanonRows { id, rows, error } => self.canon_rows(&id, &rows, error.as_deref(), &mut out),
+            HostMessage::Command { id, arg, .. } if id == "open_chain" => {
+                if let Some(chain) = arg.as_ref().and_then(|arg| arg.get("value").or(Some(arg))).and_then(serde_json::Value::as_str) {
+                    let query = protocol::canon::chain_steps(chain);
+                    self.read_canon(query, Asked::Steps(chain.to_string(), false), &mut out);
+                }
             }
             // A path outside the project opens nothing.
             HostMessage::Open { path } if path.as_deref().is_some_and(|path| !self.in_project(Path::new(path))) => {}
@@ -317,6 +347,10 @@ impl Session {
         let Some(recipe) = self.recipes.get(index) else {
             return Ok(None);
         };
+        // A chain's recipe is its steps in canon.sql, never a file of its own.
+        if recipe.chain.is_some() {
+            return Ok(recipe.path.clone());
+        }
         if !recipe.dirty {
             return Ok(recipe.path.clone());
         }
@@ -429,9 +463,92 @@ impl Session {
             dirty: false,
             unwritten_since: None,
             write_failed: None,
+            chain: None,
         });
         self.active = self.recipes.len() - 1;
         self.active
+    }
+
+    /// Asks the host to read the project's canon.
+    fn read_canon(&mut self, query: String, asked: Asked, out: &mut Vec<AppMessage>) {
+        let id = format!("canon-{}", self.next_read);
+        self.next_read += 1;
+        self.asked.insert(id.clone(), asked);
+        out.push(AppMessage::ReadCanon { id, query });
+    }
+
+    /// The host's answer to a canon read: the chains Open chain lists, or a
+    /// chain's steps, shown as its recipe. A read that failed leaves things
+    /// as they are; the host says why where it can.
+    fn canon_rows(&mut self, id: &str, rows: &[serde_json::Value], error: Option<&str>, out: &mut Vec<AppMessage>) {
+        let Some(asked) = self.asked.remove(id) else {
+            return;
+        };
+        if error.is_some() {
+            return;
+        }
+        match asked {
+            Asked::Chains => {
+                self.chains = protocol::canon::chains_of(rows);
+                out.extend(self.declared());
+            }
+            Asked::Steps(chain, opened) => {
+                let steps = protocol::canon::steps_of(rows);
+                if steps.is_empty() && opened {
+                    out.push(unreadable(format!("{chain} is not a chain of the project's pipeline.")));
+                    return;
+                }
+                self.show_chain(&chain, &steps, out);
+            }
+        }
+    }
+
+    /// Where a chain's recipe is kept as a tab: `pipeline/<n>/canon.sql#<chain>`
+    /// in the living pipeline.
+    fn chain_file(&self, chain: &str) -> Option<PathBuf> {
+        let project = self.project.as_ref()?;
+        let names: Vec<String> = std::fs::read_dir(project.join("pipeline")).ok()?.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+        let pipeline = protocol::canon::living_pipeline(names.iter().map(String::as_str))?;
+        Some(project.join(protocol::canon::chain_path(&pipeline, chain)))
+    }
+
+    /// Shows a chain as its recipe: one cell per order, each the step at its
+    /// place, which the host fills from the step, and nothing else, as a
+    /// step's cell must be. A chain already open is read again in place.
+    fn show_chain(&mut self, chain: &str, steps: &[protocol::canon::Step], out: &mut Vec<AppMessage>) {
+        let cells: Vec<Cell> = protocol::canon::cells_of(steps)
+            .into_iter()
+            .filter_map(|assets| {
+                let place = assets.first()?;
+                let mut cell = Cell::text(format!("{}/{}", place.chain, place.order), "");
+                cell.input.clear();
+                cell.kind = protocol::canon::kind_of(place).to_string();
+                cell.step = Some(protocol::StepRef { chain: place.chain.clone(), step: place.name.clone() });
+                Some(cell)
+            })
+            .collect();
+        let title = self.chains.iter().find(|known| known.name == chain).map(|known| if known.title.is_empty() { known.name.clone() } else { known.title.clone() }).unwrap_or_else(|| chain.to_string());
+        let index = match self.recipes.iter().position(|recipe| recipe.chain.as_deref() == Some(chain)) {
+            Some(index) => index,
+            None => {
+                let index = self.push_recipe(None);
+                self.recipes[index].chain = Some(chain.to_string());
+                out.push(AppMessage::Contents { tab: self.recipes[index].id.clone(), kind: ContentsKind::Cells });
+                index
+            }
+        };
+        let path = self.chain_file(chain);
+        let recipe = &mut self.recipes[index];
+        recipe.path = path;
+        recipe.label = title;
+        recipe.selected = cells.first().map(|cell| cell.id.clone());
+        recipe.cells = cells;
+        recipe.undo.clear();
+        recipe.redo.clear();
+        recipe.dirty = false;
+        self.active = index;
+        self.emit_cells(out);
+        out.extend(self.declared());
     }
 
     /// The first free name of `name`'s: free among the open tabs, other than
@@ -889,16 +1006,7 @@ impl Session {
                 });
                 self.emit_cells(out);
             }
-            Err(reason) => out.push(AppMessage::Ask(Ask {
-                id: "recipe-unreadable".into(),
-                title: "This recipe could not be opened".into(),
-                lines: vec![reason],
-                buttons: vec![AskButton {
-                    id: "ok".into(),
-                    label: "OK".into(),
-                }],
-                dismiss: Some("ok".into()),
-            })),
+            Err(reason) => out.push(unreadable(reason)),
         }
     }
 
@@ -1021,6 +1129,13 @@ impl Session {
             self.emit_cells(out);
             return;
         };
+        // A chain's recipe, kept as `pipeline/<n>/canon.sql#<chain>`, opens
+        // read again from the project's canon.
+        if let Some((_, chain)) = protocol::canon::chain_of_path(&path) {
+            let query = protocol::canon::chain_steps(chain);
+            self.read_canon(query, Asked::Steps(chain.to_string(), true), out);
+            return;
+        }
         let path = PathBuf::from(path);
         match read_recipe(&path) {
             Ok(read) => {
@@ -1032,16 +1147,7 @@ impl Session {
                 });
                 self.emit_cells(out);
             }
-            Err(reason) => out.push(AppMessage::Ask(Ask {
-                id: "recipe-unreadable".into(),
-                title: "This recipe could not be opened".into(),
-                lines: vec![reason],
-                buttons: vec![AskButton {
-                    id: "ok".into(),
-                    label: "OK".into(),
-                }],
-                dismiss: Some("ok".into()),
-            })),
+            Err(reason) => out.push(unreadable(reason)),
         }
     }
 
@@ -1077,7 +1183,7 @@ impl Session {
     fn declared(&self) -> Vec<AppMessage> {
         let mut messages = vec![
             AppMessage::Toolbar(toolbar(&self.adding)),
-            AppMessage::Menu { rows: menu(self.project.is_some()) },
+            AppMessage::Menu { rows: menu(self.project.is_some(), &self.chains) },
             AppMessage::Keys(keys()),
         ];
         if let Some(recipe) = self.recipes.get(self.active) {
@@ -1091,7 +1197,7 @@ impl Session {
                         dirty: recipe.dirty,
                         close_waits: false,
                         path: recipe.path.as_ref().map(|path| path.display().to_string()),
-                        saves: true,
+                        saves: recipe.chain.is_none(),
                     })
                     .collect(),
                 active: recipe.id.clone(),
@@ -1246,8 +1352,20 @@ fn kind_label(kind: &str) -> &'static str {
 
 /// The menu. In a project every change is written by itself, so Save and
 /// Save As are not offered.
-fn menu(in_project: bool) -> Vec<MenuEntry> {
+fn menu(in_project: bool, chains: &[protocol::canon::Chain]) -> Vec<MenuEntry> {
     let mut rows = vec![row("New recipe", "new_recipe"), row("Open recipe…", "open")];
+    // Each chain of the project's living pipeline, in order, opens as a
+    // recipe, as the 3D Viewport's Open place lists its places.
+    if in_project {
+        let listed: Vec<MenuEntry> = chains
+            .iter()
+            .map(|chain| MenuEntry {
+                action: Some(Action { id: "open_chain".into(), arg: Some(serde_json::Value::String(chain.name.clone())) }),
+                ..row(if chain.title.is_empty() { &chain.name } else { &chain.title }, "open_chain")
+            })
+            .collect();
+        rows.push(MenuEntry { enabled: !listed.is_empty(), action: None, submenu: listed, ..row("Open chain", "open_chain") });
+    }
     if !in_project {
         rows.push(row("Save", "save"));
         rows.push(row("Save as", "save_as"));
@@ -1311,7 +1429,18 @@ fn file_title(path: &Path) -> String {
 
 /// True when the file is a recipe this application can open.
 pub fn claims(path: &Path) -> bool {
-    read_recipe(path).is_ok()
+    protocol::canon::chain_of_path(&path.to_string_lossy()).is_some_and(|(file, _)| Path::new(file).is_file()) || read_recipe(path).is_ok()
+}
+
+/// The question a recipe that cannot be opened asks, saying why.
+fn unreadable(reason: String) -> AppMessage {
+    AppMessage::Ask(Ask {
+        id: "recipe-unreadable".into(),
+        title: "This recipe could not be opened".into(),
+        lines: vec![reason],
+        buttons: vec![AskButton { id: "ok".into(), label: "OK".into() }],
+        dismiss: Some("ok".into()),
+    })
 }
 
 /// A recipe file: version 2, or version 1, as 0.5 saved it, whose
@@ -1733,7 +1862,7 @@ mod tests {
         let replies = session.handle(HostMessage::Keep { tab: "1".into() });
         let expected = folder.join("Untitled Recipe.smx").display().to_string();
         assert!(replies.iter().any(|reply| matches!(reply, AppMessage::Kept { path: Some(path), error: None, .. } if *path == expected)));
-        let labels: Vec<String> = menu(true).into_iter().map(|row| row.label).collect();
+        let labels: Vec<String> = menu(true, &[]).into_iter().map(|row| row.label).collect();
         assert!(!labels.iter().any(|label| label.starts_with("Save")), "{labels:?}");
 
         let outside = project_folder("outside").join("Elsewhere.smx");
@@ -1755,5 +1884,65 @@ mod tests {
         for dir in [folder, locked, outside.parent().unwrap().to_path_buf()] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// A chain of the project's living pipeline opens as a recipe: listed
+    /// under Open chain, its steps read as one cell per order, each a step's
+    /// cell with nothing of its own, and never written to a file.
+    #[test]
+    fn a_chain_opens_as_a_recipe_of_its_steps() {
+        let folder = project_folder("chain");
+        std::fs::create_dir_all(folder.join("pipeline/001")).unwrap();
+        std::fs::create_dir_all(folder.join("pipeline/002")).unwrap();
+        let mut session = Session::launch();
+        let out = session.handle(HostMessage::Project { folder: folder.display().to_string() });
+        let Some(AppMessage::ReadCanon { id, query }) = out.iter().find(|message| matches!(message, AppMessage::ReadCanon { .. })).cloned() else {
+            panic!("the chains were not read");
+        };
+        assert_eq!(query, protocol::canon::CHAINS);
+        let out = session.handle(HostMessage::CanonRows { id, rows: vec![serde_json::json!({ "name": "Otis", "order": 3, "title": "" })], error: None });
+        let Some(AppMessage::Menu { rows }) = out.iter().find(|message| matches!(message, AppMessage::Menu { .. })).cloned() else {
+            panic!("no menu");
+        };
+        let open = rows.iter().find(|row| row.label == "Open chain").expect("Open chain");
+        assert_eq!(open.submenu.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(), ["Otis"]);
+        let action = open.submenu[0].action.clone().unwrap();
+        let out = session.handle(HostMessage::Command { id: action.id, tab: None, arg: action.arg, node: None, viewport: [0.0, 0.0] });
+        let Some(AppMessage::ReadCanon { id, .. }) = out.iter().find(|message| matches!(message, AppMessage::ReadCanon { .. })).cloned() else {
+            panic!("the chain's steps were not read");
+        };
+        let steps = vec![
+            serde_json::json!({ "chain": "Otis", "order": 1, "name": "model sheet", "skill": "generate-model-sheet", "artifact": "Otis: model sheet", "endpoint": "openai-image-edit", "file": "library/otis.png" }),
+            serde_json::json!({ "chain": "Otis", "order": 1, "name": "model sheet, 2", "skill": "generate-model-sheet", "artifact": "Otis: model sheet, 2", "endpoint": "openai-image-edit", "file": "" }),
+            serde_json::json!({ "chain": "Otis", "order": 2, "name": "the line, voice take", "skill": "generate-voice", "artifact": "Otis: the line, voice take", "endpoint": "fal", "file": "library/line.wav" }),
+        ];
+        let out = session.handle(HostMessage::CanonRows { id, rows: steps, error: None });
+        let (cells, _) = last_cells(&out);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].step, Some(protocol::StepRef { chain: "Otis".into(), step: "model sheet".into() }));
+        assert_eq!((cells[0].kind.as_str(), cells[1].kind.as_str()), (protocol::IMAGE_KIND, protocol::SOUND_KIND));
+        assert!(cells.iter().all(|cell| !cell.copies_its_step()));
+        let Some(AppMessage::Tabs(tabs)) = out.iter().rev().find(|message| matches!(message, AppMessage::Tabs(_))).cloned() else {
+            panic!("no tabs");
+        };
+        let shown = tabs.tabs.iter().find(|tab| tab.id == tabs.active).unwrap();
+        assert_eq!((shown.label.as_str(), shown.saves), ("Otis", false));
+        // Kept as the chain in the living pipeline, so it comes back after a
+        // restart, read again from canon.sql.
+        assert_eq!(shown.path.as_deref(), Some(folder.join("pipeline/002/canon.sql#Otis").display().to_string()).as_deref());
+        let mut restored = Session::restored();
+        restored.handle(HostMessage::Project { folder: folder.display().to_string() });
+        let out = restored.handle(HostMessage::Open { path: shown.path.clone() });
+        let Some(AppMessage::ReadCanon { id, query }) = out.iter().find(|message| matches!(message, AppMessage::ReadCanon { .. })).cloned() else {
+            panic!("the chain was not read again");
+        };
+        assert_eq!(query, protocol::canon::chain_steps("Otis"));
+        // A chain that is gone answers as a missing file does.
+        let out = restored.handle(HostMessage::CanonRows { id, rows: Vec::new(), error: None });
+        assert!(out.iter().any(|message| matches!(message, AppMessage::Ask(ask) if ask.id == "recipe-unreadable")));
+        // Never written: its steps are its record.
+        session.write_due(Instant::now() + WRITE_AFTER * 2);
+        assert!(recipes(&folder).iter().all(|name| name != "Otis.smx"), "{:?}", recipes(&folder));
+        let _ = std::fs::remove_dir_all(folder);
     }
 }

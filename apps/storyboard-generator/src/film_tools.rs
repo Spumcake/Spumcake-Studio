@@ -80,7 +80,7 @@ pub fn group() -> ToolGroup {
             tool("delete_sound", "Take a sound off its track. Its file stays where it is in the project.", json!({ "sound": integer("The sound's id.") }), &["sound"]),
             tool("set_listening_volume", "Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step.", json!({ "volume": { "type": "number", "minimum": 0, "maximum": 1 } }), &["volume"]),
             tool("read_sound", "How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound.", json!({ "start": integer("The film's first frame, from 1."), "end": integer("The film's last frame, from 1.") }), &["start", "end"]),
-            tool("export_animatic", "Export the animatic: the project's animatic step makes it again, as build-animatic does, after its drawn holds are filed and the timing is saved when it differs; its video joins the step's gallery as a take, and nothing is published. Returns the step at once; list_items says when it is done.", json!({}), &[]),
+            tool("export_animatic", "Export the animatic: build-animatic's script assembles it, after its drawn holds are filed and the timing is saved when it differs. Its video is filed as a new video of its own, outside any cell, tied to no storyboard and no step, and nothing is published. Answers once it is filed, with the video's path as file.", json!({}), &[]),
             tool("list_items", "Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed.", json!({}), &[]),
             tool("insert_image_key", "Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does.", json!({ "image": { "type": "string", "description": "The image's path in the project, such as library/keyframe.png." } }), &["image"]),
             tool("save_timing", "Save the storyboard's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, or the bed is muted. Drawn holds are filed as plain files first, never published.", json!({}), &[]),
@@ -548,8 +548,9 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 return Ok(json!({ "start": start + 1, "loudness": loudness }));
             }
             "export_animatic" => {
-                let step = session.start_export()?;
-                made = json!({ "step": step, "note": "The project's animatic step runs again, after the timing is saved when it differs; the user approves it on the plan card. Its video joins the step's gallery as a take. list_items says when it is done." });
+                session.start_export()?;
+                // Answered once the video is filed, with its path.
+                made = json!({ "exporting": true });
             }
             "list_items" => {
                 let path = session.animatic_state()["item"]["path"].as_str().map(str::to_string);
