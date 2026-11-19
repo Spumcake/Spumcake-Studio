@@ -212,7 +212,7 @@ mod tests {
             std::fs::write(folder.join(format!("requests/{id}.html")), format!("<script type=\"application/json\" id=\"request\">{record}</script>")).unwrap();
         };
         report("bell", "2026-11-19T09:00:00Z", "keyframe, the bell", json!(["library/bell.png"]));
-        report("bell-2", "2026-11-19T09:30:00Z", "keyframe, the bell, 2", json!(["library/bell-alt.png"]));
+        report("bell-2", "2026-11-19T09:30:00Z", "keyframe, the bell (2)", json!(["library/bell-alt.png"]));
         report("bell-fix", "2026-11-19T11:00:00Z", "keyframe, the bell", json!(["library/bell-3.png"]));
         report("notes", "2026-11-19T08:00:00Z", "story", json!(["brief/notes.md"]));
         std::fs::write(
@@ -233,14 +233,14 @@ mod tests {
         )
         .unwrap();
         let mut canon = Canon::default();
-        for (step, artifact, order) in [("keyframe, the bell", "Last order: keyframe, the bell", 3), ("keyframe, the bell, 2", "Last order: keyframe, the bell, 2", 3)] {
+        for (step, artifact, order) in [("keyframe, the bell", "Last order: keyframe, the bell", 3), ("keyframe, the bell (2)", "Last order: keyframe, the bell (2)", 3)] {
             let key = (String::from("the animatic"), step.to_string());
             canon.step_artifacts.insert(key.clone(), artifact.to_string());
             canon.step_orders.insert(key, order);
         }
         canon.files.insert(String::from("Last order: keyframe, the bell"), String::from("library/bell-3.png"));
         canon.files.insert(String::from("Last order: the diner, layout"), String::from("prompts/resources/layout.png"));
-        let touches = json!({ "out_of_date": [{ "artifact": "Last order: keyframe, the bell", "why": ["x"] }, { "artifact": "Last order: keyframe, the bell, 2", "why": ["x"] }], "unverified": [] });
+        let touches = json!({ "out_of_date": [{ "artifact": "Last order: keyframe, the bell", "why": ["x"] }, { "artifact": "Last order: keyframe, the bell (2)", "why": ["x"] }], "unverified": [] });
         let found = assets(&folder, &canon, &touches);
         let firsts: Vec<&str> = found.iter().map(|asset| asset.first.as_str()).collect();
         assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/layout.png"], "an iteration became an asset, or a document was taken for one");
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(bell.cell, Some((String::from("the animatic"), 3)));
         let alternative = &found[1];
         assert!(!alternative.in_use && !alternative.outlined, "an asset not in use was outlined: {alternative:?}");
-        assert_eq!(alternative.artifact.as_deref(), Some("Last order: keyframe, the bell, 2"));
+        assert_eq!(alternative.artifact.as_deref(), Some("Last order: keyframe, the bell (2)"));
         assert_eq!(alternative.cell, Some((String::from("the animatic"), 3)), "the second asset lost its cell");
         assert!(found[2].in_use && found[2].cell.is_none(), "a published resource no step makes was given a cell");
         let _ = std::fs::remove_dir_all(&folder);

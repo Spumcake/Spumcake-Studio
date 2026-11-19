@@ -645,8 +645,9 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
     // was made, from its own record.
     let order = canon.step_orders.get(&(step.chain.clone(), step.step.clone())).copied().ok_or("The step has no place in its chain.")?;
     let base = crate::prompt_page::alternative_of(&step.step).0.to_string();
-    let n = (2..).find(|n| !canon.step_orders.contains_key(&(step.chain.clone(), format!("{base}, {n}"))) && !canon.files.contains_key(&format!("{}, {n}", crate::prompt_page::alternative_of(&artifact).0))).unwrap_or(2);
-    let (name, alternative) = (format!("{base}, {n}"), format!("{}, {n}", crate::prompt_page::alternative_of(&artifact).0));
+    let first = crate::prompt_page::alternative_of(&artifact).0.to_string();
+    let n = (2..).find(|n| !canon.step_orders.contains_key(&(step.chain.clone(), crate::prompt_page::alternative_name(&base, *n))) && !canon.files.contains_key(&crate::prompt_page::alternative_name(&first, *n))).unwrap_or(2);
+    let (name, alternative) = (crate::prompt_page::alternative_name(&base, n), crate::prompt_page::alternative_name(&first, n));
     publish(&alternative)?;
     let made = record.or_else(|| request_of(place, &asset.first).and_then(|request| place.script("request.py", &["show", &request]).ok()).and_then(|shown| serde_json::from_str::<Value>(&shown).ok()));
     step_as_made(place, &canon, &step, &name, order, &alternative, made.as_ref())?;
@@ -1345,10 +1346,14 @@ mod tests {
         let step = protocol::StepRef { chain: String::from("the diner"), step: String::from("keyframe") };
         assert_eq!(use_take(&place, 0, "1", Some(step.clone()), &first), Ok(String::from("the diner: keyframe")));
         let second = take(std::slice::from_ref(&first));
-        assert_eq!(use_take(&place, 0, "1", Some(step), &second), Ok(String::from("the diner: keyframe, 2")), "a second take replaced the first");
+        assert_eq!(use_take(&place, 0, "1", Some(step), &second), Ok(String::from("the diner: keyframe (2)")), "a second take replaced the first");
         let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
         assert_eq!(canon.files.get("the diner: keyframe"), Some(&first), "the first take left use");
-        assert_eq!(canon.files.get("the diner: keyframe, 2"), Some(&second));
+        assert_eq!(canon.files.get("the diner: keyframe (2)"), Some(&second));
+        // Skills reads the alternative as the keyframe's own, verified.
+        let touches: Value = serde_json::from_str(&skills("pipeline.py", &["touches", "001", "--json"])).unwrap();
+        let unverified: Vec<&str> = touches["unverified"].as_array().unwrap().iter().filter_map(|entry| entry["artifact"].as_str()).collect();
+        assert!(!unverified.contains(&"the diner: keyframe (2)"), "the alternative reads as unverified: {touches}");
         // A Save on the layout, which both keyframes were made from.
         let (warning, made_from) = iteration_warning(&place, &layout).unwrap().expect("a Save on a dependency gave no warning");
         assert!(warning.ends_with("is in use as a dependency, and new iterations would break canonical consistency."), "{warning}");
