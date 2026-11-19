@@ -292,9 +292,14 @@ fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
 /// copied into `output/`, and, in git, what that wrote committed by path.
 /// Returns the file in `output/`.
 fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
-    let (artifact, file) = (delivery.artifact.as_str(), delivery.file.as_str());
-    let made_from = sources_of(place, artifact, None, file, &[])?;
-    let chain = chain_of(place, artifact)?;
+    // The mix is an asset of its own, made from the shot, as finishing is
+    // and Last order's mixes are: "<shot>, mixed", with the shot as the
+    // picture. The shot's own asset in use is never replaced.
+    let (shot, file) = (delivery.artifact.as_str(), delivery.file.as_str());
+    let artifact = format!("{shot}, mixed");
+    let artifact = artifact.as_str();
+    let made_from = sources_of(place, artifact, None, file, &[(shot.to_string(), String::from(THE_PICTURE))])?;
+    let chain = chain_of(place, shot)?;
     let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact, "--file", file];
     if let Some(chain) = &chain {
         args.extend(["--chain", chain.as_str()]);
@@ -305,20 +310,12 @@ fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     place.script("pipeline.py", &args)?;
     let _ = place.script("pipeline.py", &["render", &place.pipeline]);
     let printed = place.script("pipeline.py", &["deliver", &place.pipeline, file])?;
-    let output = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or("The film was published, but where it was delivered was not given.")?;
-    if in_git(&place.folder) {
-        let paths = [format!("pipeline/{}", place.pipeline), file.to_string(), String::from("prompts/resources/records.jsonl"), output.clone()];
-        let existing: Vec<&str> = paths.iter().map(String::as_str).filter(|path| place.folder.join(path).exists()).collect();
-        let mut add = vec!["add", "--"];
-        add.extend(&existing);
-        git(&place.folder, &add).map_err(|error| format!("Delivered, but not committed: {error}"))?;
-        let message = format!("Deliver {artifact}: {output}.");
-        let mut committing = vec!["commit", "-m", message.as_str(), "--"];
-        committing.extend(&existing);
-        git(&place.folder, &committing).map_err(|error| format!("Delivered, but not committed: {error}"))?;
-    }
-    Ok(output)
+    // Studio commits nothing by itself: committing is the user's.
+    printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or_else(|| String::from("The film was published, but where it was delivered was not given."))
 }
+
+/// The role a mix names its shot in, as Last order's mixes do.
+const THE_PICTURE: &str = "the picture";
 
 /// The chain an artifact belongs to: its step's, or its own row's.
 fn chain_of(place: &Place, artifact: &str) -> Result<Option<String>, String> {
@@ -614,10 +611,8 @@ fn ignore_take(place: &Place, path: &str) -> Result<(), String> {
 fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::StepRef>, path: &str) -> Result<String, String> {
     let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
     // The step its report names, or else the cell's.
-    let named = request_of(place, path)
-        .and_then(|request| place.script("request.py", &["show", &request]).ok())
-        .and_then(|shown| serde_json::from_str::<Value>(&shown).ok())
-        .and_then(|record| Some(protocol::StepRef { chain: record.get("chain")?.as_str()?.to_string(), step: record.get("step")?.as_str()?.to_string() }));
+    let record = request_of(place, path).and_then(|request| place.script("request.py", &["show", &request]).ok()).and_then(|shown| serde_json::from_str::<Value>(&shown).ok());
+    let named = record.as_ref().and_then(|record| Some(protocol::StepRef { chain: record.get("chain")?.as_str()?.to_string(), step: record.get("step")?.as_str()?.to_string() }));
     let step = named.or(cell_step).ok_or_else(|| String::from(IN_NO_RECIPE))?;
     let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned().ok_or_else(|| String::from(NO_ARTIFACT))?;
     // The asset is put in use at its latest iteration, canon as the guide
@@ -627,39 +622,106 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
         return Ok(in_use);
     }
     let latest = asset.canonical().to_string();
-    let holds = canon.files.get(&artifact).filter(|file| canon.published.contains(*file));
-    let artifact = match holds {
-        None => artifact,
-        Some(_) => alternative_step(place, &canon, &step, &artifact)?,
+    let publish = |artifact: &str| {
+        let asked = Asked::Publish { asker: super::publishing::Asker::Workspace { app, tab: tab.to_string() }, artifact: artifact.to_string(), source: latest.clone(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+        let view = prepare(place, &asked)?;
+        carry(place, &Card { asked, view }, false).map(|_| ())
     };
-    let asked = Asked::Publish { asker: super::publishing::Asker::Workspace { app, tab: tab.to_string() }, artifact: artifact.clone(), source: latest, from: Vec::new(), with: Vec::new(), sources: Vec::new() };
-    let view = prepare(place, &asked)?;
-    carry(place, &Card { asked, view }, false)?;
-    Ok(artifact)
+    // Its own step's artifact, while that holds nothing yet and the step is
+    // still as the take was made.
+    let holds = canon.files.get(&artifact).filter(|file| canon.published.contains(*file));
+    if holds.is_none() {
+        match publish(&artifact) {
+            Ok(()) => return Ok(artifact),
+            Err(error) if !error.contains(STEP_EDITED) => return Err(error),
+            Err(_) => {}
+        }
+    }
+    // Else an asset of its own beside those in use, the next alternative at
+    // the step's place. The take is published first, with no step yet, so a
+    // refusal leaves nothing behind; its step is then written as the take
+    // was made, from its own record.
+    let order = canon.step_orders.get(&(step.chain.clone(), step.step.clone())).copied().ok_or("The step has no place in its chain.")?;
+    let base = crate::prompt_page::alternative_of(&step.step).0.to_string();
+    let n = (2..).find(|n| !canon.step_orders.contains_key(&(step.chain.clone(), format!("{base}, {n}"))) && !canon.files.contains_key(&format!("{}, {n}", crate::prompt_page::alternative_of(&artifact).0))).unwrap_or(2);
+    let (name, alternative) = (format!("{base}, {n}"), format!("{}, {n}", crate::prompt_page::alternative_of(&artifact).0));
+    publish(&alternative)?;
+    let made = record.or_else(|| request_of(place, &asset.first).and_then(|request| place.script("request.py", &["show", &request]).ok()).and_then(|shown| serde_json::from_str::<Value>(&shown).ok()));
+    step_as_made(place, &canon, &step, &name, order, &alternative, made.as_ref())?;
+    Ok(alternative)
 }
 
-/// A new step at `step`'s place, the next alternative, `"<step>, N"`,
-/// with its prompt, references, and settings as they stand and its own
-/// artifact, `"<element>: <role>, N"`. Returns the artifact.
-fn alternative_step(place: &Place, canon: &crate::prompt_page::Canon, step: &protocol::StepRef, artifact: &str) -> Result<String, String> {
+/// What Skills says when a take's step was edited after the take was made.
+const STEP_EDITED: &str = "its step was edited since this take was made";
+
+/// The alternative step `name` at `order`, holding the prompt, references,
+/// and settings its take was made with, as its request record keeps them,
+/// so Skills reads the take as its step's own. A reference whose artifact
+/// still holds the file it sent names the artifact; one published again
+/// since names the file sent. With no record, the step is copied as it is.
+fn step_as_made(place: &Place, canon: &crate::prompt_page::Canon, step: &protocol::StepRef, name: &str, order: i64, artifact: &str, record: Option<&Value>) -> Result<(), String> {
     let read: Value = serde_json::from_str(&place.script("pipeline.py", &["step", &place.pipeline, &step.chain, &step.step, "--show"])?).map_err(|error| format!("The step could not be read: {error}"))?;
-    let text = |key: &str| read.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-    let order = read.get("ord").and_then(Value::as_i64).ok_or("The step has no place in its chain.")?.to_string();
-    let base = crate::prompt_page::alternative_of(&step.step).0.to_string();
-    let n = (2..).find(|n| !canon.step_orders.contains_key(&(step.chain.clone(), format!("{base}, {n}")))).unwrap_or(2);
-    let (name, artifact) = (format!("{base}, {n}"), format!("{}, {n}", crate::prompt_page::alternative_of(artifact).0));
-    let template = text("template");
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let (template, refs, endpoint, skill) = match record {
+        Some(record) => {
+            let refs: Vec<Value> = record
+                .get("references")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|reference| {
+                    let (file, canon_name) = (text(reference, "file"), text(reference, "canon"));
+                    let mut made = if !canon_name.is_empty() && canon.files.get(&canon_name) == Some(&file) { serde_json::json!({ "artifact": canon_name }) } else { serde_json::json!({ "file": file }) };
+                    for key in ["role", "field"] {
+                        if !text(reference, key).is_empty() {
+                            made[key] = serde_json::json!(text(reference, key));
+                        }
+                    }
+                    made
+                })
+                .collect();
+            let endpoint = record.get("endpoint").filter(|endpoint| endpoint.is_object()).map(Value::to_string).unwrap_or_else(|| text(&read, "endpoint"));
+            let skill = if text(record, "skill").is_empty() { text(&read, "skill") } else { text(record, "skill") };
+            (text(record, "prompt"), serde_json::to_string(&refs).unwrap_or_default(), endpoint, skill)
+        }
+        None => (text(&read, "template"), text(&read, "refs"), text(&read, "endpoint"), text(&read, "skill")),
+    };
     let template = if template.starts_with('@') { format!("@{}", crate::prompt_page::write_template(&place.folder, &template)?) } else { template };
-    let (skill, endpoint, refs) = (text("skill"), text("endpoint"), text("refs"));
-    let mut args: Vec<&str> = vec!["step", &place.pipeline, &step.chain, &name, "--order", &order, "--artifact", &artifact];
+    let order = order.to_string();
+    let mut args: Vec<&str> = vec!["step", &place.pipeline, &step.chain, name, "--order", &order, "--artifact", artifact];
     for (flag, value) in [("--skill", &skill), ("--endpoint", &endpoint), ("--template", &template), ("--refs", &refs)] {
         if !value.is_empty() {
             args.extend([flag, value.as_str()]);
         }
     }
-    place.script("pipeline.py", &args)?;
-    Ok(artifact)
+    place.script("pipeline.py", &args).map(|_| ())
 }
+
+/// A refusal from Skills' scripts as the user reads it: one of Studio's own
+/// sentences as it is, Skills' known refusals as sentences, and anything
+/// else as `otherwise`, never the script's own words.
+fn plain_refusal(error: &str, otherwise: &str) -> String {
+    let own = [IN_NO_RECIPE, NO_ARTIFACT, NO_ASSET, "This project has no pipeline yet."];
+    if own.contains(&error) {
+        return error.to_string();
+    }
+    let known = [
+        (STEP_EDITED, TAKE_STEP_CHANGED),
+        ("has been published again since this take was made", TAKE_INPUT_CHANGED),
+        ("that was never published", ITERATION_NEVER_IN_USE),
+        ("has no record of what made it", NO_RECORD),
+        ("its record does not hold", NO_RECORD),
+    ];
+    known.iter().find(|(said, _)| error.contains(said)).map_or_else(|| otherwise.to_string(), |(_, sentence)| sentence.to_string())
+}
+
+const TAKE_STEP_CHANGED: &str = "This take's step was changed after it was made, so it can't be put in use as it is.";
+const TAKE_INPUT_CHANGED: &str = "An image this take was made from has changed since, so it can't be put in use as it is.";
+const ITERATION_NEVER_IN_USE: &str = "This was made from a version that was never in use, so it can't be saved as its next iteration.";
+const NO_RECORD: &str = "Nothing records what this was made from, so it can't be put in use.";
+const NOT_USED: &str = "The take could not be put in use.";
+const NOT_SAVED: &str = "The iteration could not be saved.";
+const NOT_IGNORED: &str = "The take's outline could not be cleared.";
 
 /// Whether a Save on the asset at `path` waits on the warning: the asset is
 /// in use and other work in use was made from it. Returns the warning's
@@ -886,7 +948,7 @@ impl HostWindow {
             TakeDone::Used { app, tab, cell, path, result } => {
                 let (artifact, error) = match result {
                     Ok(artifact) => (Some(artifact), None),
-                    Err(error) => (None, Some(error)),
+                    Err(error) => (None, Some(plain_refusal(&error, NOT_USED))),
                 };
                 self.send(app, HostMessage::TakeUsed { tab, path, artifact, error });
                 cell
@@ -894,13 +956,13 @@ impl HostWindow {
             TakeDone::Saved { app, tab, cell, path, result } => {
                 let (file, error) = match result {
                     Ok(file) => (file, None),
-                    Err(error) => (None, Some(error)),
+                    Err(error) => (None, Some(plain_refusal(&error, NOT_SAVED))),
                 };
                 self.send(app, HostMessage::IterationSaved { tab, path, file, error });
                 cell
             }
             TakeDone::Ignored { app, tab, cell, path, result } => {
-                self.send(app, HostMessage::TakeIgnored { tab, path, error: result.err() });
+                self.send(app, HostMessage::TakeIgnored { tab, path, error: result.err().map(|error| plain_refusal(&error, NOT_IGNORED)) });
                 cell
             }
             TakeDone::Warn(ask) => {
@@ -1082,12 +1144,17 @@ mod tests {
         std::fs::write(folder.join("agent/mix.wav"), b"RIFF mix").unwrap();
         let mix = last(skills("request.py", &["resource", "agent/mix.wav", "--name", "mix", "--from", &take]));
         let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
-        let delivery = |file: &str| Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: final shot"), file: file.into(), uses: String::from("Take 1 · with Voice"), size: String::from("1280 × 720"), frame_rate: String::from("24 fps"), format: String::from("H.264 with AAC sound") };
+        let delivery = |file: &str| Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: take"), file: file.into(), uses: String::from("Take 1 · with Voice"), size: String::from("1280 × 720"), frame_rate: String::from("24 fps"), format: String::from("H.264 with AAC sound") };
         check_delivery(&place, &delivery(&mix)).unwrap();
         let output = deliver(&place, &delivery(&mix)).unwrap();
         assert!(output.starts_with("output/") && folder.join(&output).is_file(), "{output}");
+        // The mix is an asset of its own, made from the shot as the picture,
+        // and the shot in use is left as it was.
         let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
-        assert!(canon.published.contains(&mix), "the film is not canon");
+        assert_eq!(canon.files.get("the line: take, mixed"), Some(&mix), "the film is not an asset of its own");
+        assert_eq!(canon.files.get("the line: take"), Some(&take), "the delivery replaced the shot in use");
+        let role = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the line: take, mixed' AND source='the line: take'", "--read-only"]);
+        assert_eq!(role.trim(), THE_PICTURE);
         // A mix of a take published again since is refused before its card.
         std::fs::write(folder.join("agent/take2.wav"), b"RIFF take again").unwrap();
         let take2 = last(skills("request.py", &["resource", "agent/take2.wav", "--name", "take-again"]));
@@ -1305,6 +1372,22 @@ mod tests {
         let steps = skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step WHERE chain='the diner'", "--read-only"]);
         assert_eq!(use_take(&place, 0, "1", None, &third), Ok(used.clone()));
         assert_eq!(skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step WHERE chain='the diner'", "--read-only"]), steps, "Use on an asset in use made a new step");
+        // A take made before its step was edited goes into use as made: its
+        // alternative step holds the prompt it was made with.
+        let fourth = take(&[first.clone(), second.clone(), third.clone()]);
+        skills("pipeline.py", &["step", "001", "the diner", "keyframe", "--template", "The diner at night."]);
+        let made = use_take(&place, 0, "1", None, &fourth).expect("a take whose step was edited since was refused");
+        let template = skills("pipeline.py", &["sql", "001", &format!("SELECT template FROM step WHERE artifact='{made}'"), "--read-only"]);
+        assert_eq!(template.trim(), "The diner.", "the alternative step holds the step as edited, not as the take was made");
+        // A take made from an image changed since is refused in plain words,
+        // and leaves no step behind.
+        let fifth = take(&[first.clone(), second.clone(), third.clone(), fourth.clone()]);
+        std::fs::write(folder.join("work/layout-again.png"), b"\x89PNG\r\n\x1a\nagain").unwrap();
+        save_iteration(&place, &layout, "work/layout-again.png").unwrap();
+        let steps = skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step", "--read-only"]);
+        let refused = use_take(&place, 0, "1", None, &fifth).expect_err("a take made from an image changed since was put in use");
+        assert_eq!(plain_refusal(&refused, NOT_USED), TAKE_INPUT_CHANGED, "{refused}");
+        assert_eq!(skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step", "--read-only"]), steps, "a refused Use left a step behind");
         // Ignore clears the first keyframe's outline, and not the second's.
         ignore_take(&place, &first).unwrap();
         let assets = assets_of(&place).unwrap();
