@@ -980,53 +980,64 @@ mod tests {
         assert_eq!(session.active_storyboard().assembly().unwrap().boards.len(), 1);
     }
 
-    /// Answers the canon read `check_retimed` sent for the project's
-    /// current files with `rows`, "file\u{1f}artifact" each.
-    fn answer_artifacts(session: &mut Session, rows: &[(&str, &str)]) {
-        session.last_check = None;
-        session.check_retimed(std::time::Instant::now());
-        let rows: Vec<Value> = rows.iter().map(|(file, artifact)| Value::String(format!("{file}\u{1f}{artifact}"))).collect();
-        for message in session.take_outgoing() {
-            if let protocol::AppMessage::ReadCanon { id, query } = message
-                && query.contains("FROM artifact")
-            {
-                session.canon_rows(&id, &rows, None);
-            }
+    /// Appends `lines` to a JSON-lines record of the project's.
+    fn record(dir: &Path, file: &str, lines: &[Value]) {
+        use std::io::Write;
+        std::fs::create_dir_all(dir.join(file).parent().unwrap()).unwrap();
+        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(file)).unwrap();
+        for line in lines {
+            writeln!(out, "{line}").unwrap();
         }
     }
 
+    /// The storyboard's next look at the project's records.
+    fn check_now(session: &mut Session) {
+        session.last_check = None;
+        session.check_retimed(std::time::Instant::now());
+    }
+
     #[test]
-    fn the_timeline_shows_each_artifact_s_latest_iteration() {
+    fn the_timeline_shows_what_is_placed_at_its_latest_iteration() {
         let (mut session, _) = opened("iterations");
-        let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+        let dir = session.project().unwrap().to_path_buf();
         let second = session.film().clips[1].id;
-        // Read as canon, the keyframe and the take are noted as their
-        // artifacts; nothing changes.
-        answer_artifacts(&mut session, &[(bell, "Last order: keyframe, the bell"), ("library/2026-11-12_20-03-otis-line-1.wav", "Otis: the line, voice take")]);
-        assert_eq!(session.active_storyboard().artifacts().get(bell).map(String::as_str), Some("Last order: keyframe, the bell"));
+        // A take no step uses, inserted by hand as shot 2's image key.
+        let take = "library/2026-11-14_15-58-keyframe-the-bell-take-2.png";
+        std::fs::copy(dir.join("library/2026-11-12_20-03-otis-line-1.wav"), dir.join(take)).unwrap();
+        session.enter_clip(second);
+        assert!(session.insert_image_key(take));
+        session.leave_clip();
         let before = session.film().clone();
         // An edit that is an undo step, so undo would bring back the film
         // as it was before.
         session.resize_clip(second, true, 2);
-        // The keyframe gets a new iteration, saved in the image workspace or
-        // in Claude Code: the timeline shows it by itself, with no undo step.
-        let newer = "prompts/resources/2026-11-19_09-00-keyframe-the-bell.png";
-        answer_artifacts(&mut session, &[(newer, "Last order: keyframe, the bell"), ("library/2026-11-12_20-03-otis-line-1.wav", "Otis: the line, voice take")]);
-        assert!(session.film().files().contains(newer) && !session.film().files().contains(bell));
-        assert_eq!(session.active_storyboard().artifacts().get(newer).map(String::as_str), Some("Last order: keyframe, the bell"));
+        // Edited in its own workspace: an iteration filed naming the take it
+        // iterates. The timeline shows it by itself, with no undo step.
+        let newer = "prompts/resources/2026-11-19_09-00-keyframe-the-bell-take-2.png";
+        record(&dir, "prompts/resources/records.jsonl", &[json!({ "at": "2026-11-19T14:00:00Z", "file": newer, "inputs": [{ "file": take }], crate::iterations::ITERATES: { "file": take, "sha256": "a1" } })]);
+        check_now(&mut session);
+        assert!(session.film().files().contains(newer) && !session.film().files().contains(take));
         // Undo takes the resize back, never the iteration.
         session.undo().unwrap();
-        assert!(session.film().files().contains(newer) && !session.film().files().contains(bell));
+        assert!(session.film().files().contains(newer) && !session.film().files().contains(take));
         assert_eq!(session.film().clips.len(), before.clips.len());
+        // A drawn hold filed from it is made from it, never its iteration.
+        record(&dir, "prompts/resources/records.jsonl", &[json!({ "at": "2026-11-19T15:00:00Z", "file": "prompts/resources/shot-2-hold-1.png", "inputs": [{ "file": newer }] })]);
+        // The bell's keyframe edited in canon, with the run log naming the
+        // version it was edited from: the timeline follows it too.
+        let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+        record(&dir, "pipeline/002/runs.jsonl", &[json!({ "event": "publish", "at": "2026-11-19T15:00:00Z", "artifact": "Last order: keyframe, the bell", "file": "prompts/resources/bell-2.png", "edited_from": bell })]);
+        // Another take put in use for the line's step: not an iteration, so
+        // what was placed stays.
+        let line = "library/2026-11-14_15-37-keyframe-the-line.png";
+        record(&dir, "pipeline/002/runs.jsonl", &[json!({ "event": "publish", "at": "2026-11-19T15:01:00Z", "artifact": "Last order: keyframe, the line", "file": "library/line-take-4.png", "replaced": line })]);
+        let shown = session.film().clone();
+        check_now(&mut session);
+        assert!(session.film().files().contains(newer), "a drawn hold was read as an iteration");
+        assert!(session.film().files().contains(line), "another take put in use replaced what was placed");
+        assert_eq!(session.film().files().contains("prompts/resources/bell-2.png"), shown.files().contains(bell));
         // The take, not changed, is where it was.
         assert!(session.film().files().contains("library/2026-11-12_20-03-otis-line-1.wav"));
-        // Kept in its file, the artifacts come back as they are.
-        let path = session.project().unwrap().join("work/iterations.smx");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        crate::store::write_smx(&path, session.active_storyboard(), "iterations").unwrap();
-        let mut ids = draw::document::Allocator::new();
-        let reopened = crate::store::read_smx(&path).unwrap().into_record(&mut ids, &[]);
-        assert_eq!(reopened.artifacts(), session.active_storyboard().artifacts());
     }
 
     #[test]

@@ -93,10 +93,6 @@ pub struct Record {
     /// Drawn holds filed before the storyboard read any animatic, as a new
     /// film's are until its first save takes them.
     loose_boards: Vec<crate::assembly::FiledHold>,
-    /// What its image keys and sounds show, by canon: each file placed, by
-    /// the canon artifact it is an iteration of, so the timeline follows the
-    /// artifact's latest iteration.
-    artifacts: std::collections::BTreeMap<String, String>,
     id: DrawingId,
     name: String,
     generated_name: String,
@@ -142,7 +138,6 @@ impl Record {
             exported: None,
             assembly: None,
             loose_boards: Vec::new(),
-            artifacts: std::collections::BTreeMap::new(),
             id,
             generated_name: name.clone(),
             name,
@@ -256,7 +251,7 @@ impl Record {
         }
     }
 
-    /// An artifact it shows has a later iteration, `new`, in place
+    /// An image or sound it shows has a later iteration, `new`, in place
     /// of `old`: the film shows it, and so does every film its undo and redo
     /// would bring back, so undo never shows an earlier iteration. Not an
     /// undo step. True when the film changed.
@@ -265,27 +260,10 @@ impl Record {
         for entry in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             entry.repath(old, new);
         }
-        if let Some(artifact) = self.artifacts.remove(old) {
-            self.artifacts.insert(new.to_string(), artifact);
-            self.dirty = true;
-        }
         if changed {
             self.dirty = true;
         }
         changed
-    }
-
-    /// Each file it shows, by the canon artifact it is.
-    pub fn artifacts(&self) -> &std::collections::BTreeMap<String, String> {
-        &self.artifacts
-    }
-
-    /// Kept beside the film, as what it read is.
-    pub fn set_artifacts(&mut self, artifacts: std::collections::BTreeMap<String, String>) {
-        if self.artifacts != artifacts {
-            self.artifacts = artifacts;
-            self.dirty = true;
-        }
     }
 
     pub fn exported(&self) -> Option<&crate::export::Exported> {

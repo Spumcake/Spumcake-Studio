@@ -273,42 +273,53 @@ impl Session {
             self.step_export_failed("The project did not answer.");
         }
         let has_step = self.active_storyboard().assembly().is_some_and(|read| read.step.is_some());
-        let asking = self.canon_asked.values().any(|asked| matches!(asked, Asked::Check(_) | Asked::Artifacts));
-        if self.project.is_none() || asking || self.is_playing() || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
+        let asking = self.canon_asked.values().any(|asked| matches!(asked, Asked::Check(_)));
+        if self.project.is_none() || self.is_playing() || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
             return;
         }
         self.last_check = Some(now);
-        // Each artifact the storyboards show, at its latest
-        // iteration, edited in its own workspace or anywhere else.
-        self.ask_canon(ARTIFACTS, Asked::Artifacts);
-        if has_step {
+        // Each image and sound the storyboards show, at its latest
+        // iteration, made in its own workspace or in another tool.
+        self.follow_iterations();
+        self.read_canon_files();
+        if has_step && !asking {
             let storyboard = self.active_id();
             self.ask_canon(STEPS, Asked::Check(storyboard));
         }
     }
 
-    /// Each storyboard shows each artifact it shows at its latest
-    /// iteration: a file that is canon is noted as its artifact, and a
-    /// file whose artifact now has another current file gives way to it.
-    /// Not an undo step, and never while the film plays.
+    /// Each storyboard shows each image and sound it shows at its latest
+    /// iteration, read from the project's records alike for whatever is placed,
+    /// in canon or not, never from a step's artifact: another take put in
+    /// use is another thing placed, and what was placed stays. Not an undo step,
+    /// and never while the film plays.
     pub(crate) fn follow_iterations(&mut self) {
-        if self.is_playing() {
+        let Some(project) = self.project.clone().filter(|_| !self.is_playing()) else {
             return;
-        }
-        let (canon_files, canon_now) = (&self.canon_files, &self.canon_now);
+        };
+        let iterations = crate::iterations::Iterations::read(&project);
+        let mut followed = false;
         for record in &mut self.storyboards {
-            let mut artifacts = record.artifacts().clone();
             for file in record.film().files() {
-                if let (false, Some(artifact)) = (artifacts.contains_key(&file), canon_files.get(&file)) {
-                    artifacts.insert(file, artifact.clone());
+                let latest = iterations.latest(&file);
+                if latest != file {
+                    followed |= record.follow_iteration(&file, &latest);
                 }
             }
-            record.set_artifacts(artifacts.clone());
-            for (file, artifact) in artifacts {
-                if let Some(latest) = canon_now.get(&artifact).filter(|latest| **latest != file) {
-                    record.follow_iteration(&file, latest);
-                }
-            }
+        }
+        // A save names each canon file by its artifact, so what is canon is
+        // read again at once.
+        if followed {
+            self.read_canon_files();
+        }
+    }
+
+    /// Asks which files are canon, and as which artifacts, unless that is
+    /// already asked: the step's references name a canon file by its
+    /// artifact.
+    fn read_canon_files(&mut self) {
+        if !self.canon_asked.values().any(|asked| matches!(asked, Asked::Artifacts)) {
+            self.ask_canon(ARTIFACTS, Asked::Artifacts);
         }
     }
 
@@ -337,16 +348,11 @@ impl Session {
                 }
             }
             Asked::Artifacts => {
-                // Earlier files stay known as their artifacts, so a file
-                // placed before a new iteration still follows it.
-                self.canon_now.clear();
                 for text in rows.iter().filter_map(row_text) {
                     if let Some((file, artifact)) = text.split_once(SEPARATOR) {
                         self.canon_files.insert(file.to_string(), artifact.to_string());
-                        self.canon_now.insert(artifact.to_string(), file.to_string());
                     }
                 }
-                self.follow_iterations();
             }
             Asked::Open => {
                 let steps = steps_of(rows);

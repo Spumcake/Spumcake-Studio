@@ -171,7 +171,7 @@ fn copy_or_skip() -> Option<Copy> {
 #[test]
 fn last_order_on_a_test_copy() {
     let Some(copy) = copy_or_skip() else { return };
-    let checks: [(&str, fn(&Copy)); 11] = [
+    let checks: [(&str, fn(&Copy)); 12] = [
         ("opens and saves back unchanged", opens_from_its_step_and_saves_back_unchanged),
         ("the step decides, not the newest file", the_step_decides_not_the_newest_file),
         ("Studio's retime is what build-animatic assembles", studios_retime_is_what_build_animatic_assembles),
@@ -182,7 +182,8 @@ fn last_order_on_a_test_copy() {
         ("import and export through the project", import_and_export_through_the_project),
         ("playback is what the step's take is", playback_is_the_take),
         ("a first save records the animatic's step", a_first_save_records_the_animatic_step),
-        ("a keyframe's new iteration shows by itself", a_new_iteration_shows_by_itself),
+        ("what is placed follows its own iterations", a_new_iteration_shows_by_itself),
+        ("a new film's image follows its iteration", a_new_film_s_image_follows_its_iteration),
     ];
     for (name, check) in checks {
         copy.reset();
@@ -234,11 +235,12 @@ fn command(server: &mut Server, copy: &Copy, tab: &str, id: &str) -> Vec<AppMess
 /// tab it opened in.
 fn opened(copy: &Copy) -> (Server, String) {
     let mut server = Server::new(None);
-    server.greeting();
-    // Told the project, it shows the project's animatic.
+    let greeted = server.greeting();
+    // Told the project, it shows the project's animatic; a project with
+    // none keeps the blank it greeted with.
     let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string() }).unwrap();
     let seen = copy.host(&mut server, replies);
-    let tab = shown_tab(&seen).expect("a tab");
+    let tab = shown_tab(&seen).or_else(|| shown_tab(&greeted)).expect("a tab");
     (server, tab)
 }
 
@@ -539,41 +541,131 @@ fn import_and_export_through_the_project(copy: &Copy) {
     assert!(!copy.project.join("work").join(outside.file_name().unwrap()).exists(), "the copy in work/ was kept");
 }
 
-/// Check 11: the bell's keyframe gets a new iteration, filed from it and
-/// published as Claude Code or the image workspace does; the open
-/// storyboard shows it by itself, and its next save names it.
-fn a_new_iteration_shows_by_itself(copy: &Copy) {
-    let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
-    let (mut server, tab) = opened(copy);
-    // A new iteration: the keyframe with a dark band across it.
-    let mut image = image::open(copy.project.join(bell)).unwrap().to_rgb8();
-    for y in 100..140 {
-        for x in 0..image.width() {
-            image.put_pixel(x, y, image::Rgb([20, 20, 20]));
+/// The argument `request.py resource` names what a file iterates with: the
+/// iteration flag, as Skills Work sets it.
+const ITERATION_FLAG: &str = "--iterates";
+
+/// Whether this Skills checkout's `request.py resource` takes the iteration
+/// flag; a check that needs it says it was skipped until it does.
+fn has_iteration_flag(copy: &Copy) -> bool {
+    let usage = copy.run(&copy.scripts.join("request.py"), &["--help".to_string()]).unwrap_or_else(|usage| usage);
+    let found = usage.contains(ITERATION_FLAG);
+    if !found {
+        eprintln!("skipped: a take no step uses follows its iteration, until Skills' request.py resource takes {ITERATION_FLAG}");
+    }
+    found
+}
+
+/// Writes `image` with a dark band across it as `work/<name>`, a new
+/// iteration as the image workspace's Save makes one.
+fn darkened(copy: &Copy, image: &str, name: &str) -> String {
+    let mut pixels = image::open(copy.project.join(image)).unwrap().to_rgb8();
+    for y in 100..140.min(pixels.height()) {
+        for x in 0..pixels.width() {
+            pixels.put_pixel(x, y, image::Rgb([20, 20, 20]));
         }
     }
     std::fs::create_dir_all(copy.project.join("work")).unwrap();
-    image.save(copy.project.join("work/bell-iteration.png")).unwrap();
-    let filed = copy.file("work/bell-iteration.png", &[bell.to_string()]).unwrap();
-    copy.pipeline(&["publish", "Last order: keyframe, the bell", "--file", filed.as_str()]).unwrap();
-    // The storyboard reads canon now and then, and follows it.
+    pixels.save(copy.project.join("work").join(name)).unwrap();
+    format!("work/{name}")
+}
+
+/// Waits, ticking as the host does, until the storyboard shows `file`.
+fn follows(server: &mut Server, copy: &Copy, file: &str) -> bool {
     let started = std::time::Instant::now();
-    let mut followed = false;
-    while !followed && started.elapsed() < std::time::Duration::from_secs(20) {
+    while started.elapsed() < std::time::Duration::from_secs(20) {
         std::thread::sleep(std::time::Duration::from_millis(500));
         let replies = server.tick();
-        copy.host(&mut server, replies);
-        followed = server.session.film().files().contains(&filed);
+        copy.host(server, replies);
+        if server.session.film().files().contains(file) {
+            return true;
+        }
     }
-    assert!(followed, "the storyboard did not follow the keyframe's new iteration");
+    false
+}
+
+/// Check 11: what is placed follows its own iterations, never its step's
+/// artifact. The bell's keyframe edited in canon, as the image workspace's
+/// Save publishes an edit of what is in use, shows by itself, and the next
+/// save names it; another take put in use for the line's step leaves what
+/// was placed; and a take no step uses, inserted by hand, follows the
+/// iteration filed naming it.
+fn a_new_iteration_shows_by_itself(copy: &Copy) {
+    let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+    let line = "library/2026-11-14_15-37-keyframe-the-line.png";
+    let (mut server, tab) = opened(copy);
+    // The bell edited: filed from its file, published as the artifact's
+    // next version naming the artifact itself, so the run log says which
+    // version it was edited from.
+    let work = darkened(copy, bell, "bell-iteration.png");
+    let filed = copy.file(&work, &[bell.to_string()]).unwrap();
+    copy.pipeline(&["publish", "Last order: keyframe, the bell", "--file", filed.as_str(), "--from", "Last order: keyframe, the bell", "edited"]).unwrap();
+    assert!(follows(&mut server, copy, &filed), "the storyboard did not follow the bell's new iteration");
     assert!(!server.session.film().files().contains(bell));
-    // Saved, the timing names the new iteration under the same artifact.
+    // Another take put in use for the line's step: not an iteration.
+    let other = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: keyframe, waiting'", "--read-only"]).unwrap();
+    copy.pipeline(&["publish", "Last order: keyframe, the line", "--file", other.trim()]).unwrap();
+    let replies = server.tick();
+    copy.host(&mut server, replies);
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let replies = server.tick();
+    copy.host(&mut server, replies);
+    assert!(server.session.film().files().contains(line), "another take put in use replaced what was placed");
+    // Saved, the timing names the bell's new iteration under its artifact.
     let saved = tool(&mut server, copy, &tab, "save_timing", json!({}));
     assert!(saved.get("error").is_none(), "{saved}");
     let (script, refs) = step(copy);
     assert_eq!(refs[1]["artifact"], "Last order: keyframe, the bell", "{refs}");
     let assembly: Value = serde_json::from_slice(&std::fs::read(copy.project.join(crate::assembly::named_in(&script).unwrap())).unwrap()).unwrap();
     assert_eq!(assembly["frames"][1]["image"], filed.as_str(), "{assembly}");
+    if !has_iteration_flag(copy) {
+        return;
+    }
+    // A take no step uses, inserted by hand on shot 3, then edited.
+    let canon = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE file IS NOT NULL", "--read-only"]).unwrap();
+    let mut library: Vec<String> = std::fs::read_dir(copy.project.join("library")).unwrap().flatten().map(|entry| format!("library/{}", entry.file_name().to_string_lossy())).collect();
+    library.sort();
+    let take = library.into_iter().find(|file| file.ends_with(".png") && file.contains("keyframe") && !canon.lines().any(|line| line.trim() == file)).expect("a keyframe take no step uses");
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    let third = film["clips"][2]["id"].as_u64().unwrap();
+    tool(&mut server, copy, &tab, "edit_clip", json!({ "clip": third }));
+    let inserted = tool(&mut server, copy, &tab, "insert_image_key", json!({ "image": take }));
+    assert!(inserted.get("error").is_none(), "{inserted}");
+    tool(&mut server, copy, &tab, "leave_clip", json!({}));
+    let work = darkened(copy, &take, "take-iteration.png");
+    let printed = copy.run(&copy.scripts.join("request.py"), &["resource".to_string(), work, "--name".to_string(), "take-iteration".to_string(), "--from".to_string(), take.clone(), ITERATION_FLAG.to_string(), take.clone()]).unwrap();
+    let iteration = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap().to_string();
+    assert!(follows(&mut server, copy, &iteration), "a take no step uses did not follow its iteration");
+}
+
+/// Check 12, on a new film made with `request.py init`, whose canon is
+/// empty: an image filed only with `request.py resource`, placed as an image
+/// key, follows the iteration filed naming it.
+fn a_new_film_s_image_follows_its_iteration(copy: &Copy) {
+    if !has_iteration_flag(copy) {
+        return;
+    }
+    let root = copy.root.join("harbor-film");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let harbor = Copy { root: root.clone(), project: root.join("Harbor"), scripts: copy.scripts.clone(), skills: copy.skills.clone() };
+    std::fs::create_dir_all(&harbor.project).unwrap();
+    harbor.run(&harbor.scripts.join("request.py"), &["init".to_string()]).unwrap();
+    let source = "library/2026-11-14_16-04-keyframe-the-bell.png";
+    std::fs::copy(copy.project.join(source), harbor.project.join("harbour.png")).unwrap();
+    let printed = harbor.run(&harbor.scripts.join("request.py"), &["resource".to_string(), "harbour.png".to_string(), "--name".to_string(), "harbour".to_string()]).unwrap();
+    let image = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap().to_string();
+    let (mut server, tab) = opened(&harbor);
+    let clip = tool(&mut server, &harbor, &tab, "add_clip", json!({ "start": 1, "length": 48 }));
+    let clip = clip["made"]["clip"].as_u64().or_else(|| clip["made"].as_u64()).unwrap_or_else(|| panic!("no clip: {clip}"));
+    tool(&mut server, &harbor, &tab, "edit_clip", json!({ "clip": clip }));
+    let inserted = tool(&mut server, &harbor, &tab, "insert_image_key", json!({ "image": image }));
+    assert!(inserted.get("error").is_none(), "{inserted}");
+    tool(&mut server, &harbor, &tab, "leave_clip", json!({}));
+    let work = darkened(&harbor, &image, "harbour-iteration.png");
+    let printed = harbor.run(&harbor.scripts.join("request.py"), &["resource".to_string(), work, "--name".to_string(), "harbour".to_string(), "--from".to_string(), image.clone(), ITERATION_FLAG.to_string(), image.clone()]).unwrap();
+    let iteration = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap().to_string();
+    assert!(follows(&mut server, &harbor, &iteration), "the new film's image did not follow its iteration");
 }
 
 fn tool_in(server: &mut Server, copy: &Copy, tab: &str, group: &str, name: &str, input: Value) -> Value {

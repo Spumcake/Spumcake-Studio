@@ -370,10 +370,8 @@ pub struct Session {
     canon_asked: HashMap<String, project::Asked>,
     /// The project's animatic steps as last read, by "chain: name".
     steps: HashMap<String, project::AnimaticStep>,
-    /// Published files and their artifacts, and each artifact's current
-    /// file, its latest iteration, as last read.
+    /// Published files and their artifacts, as last read.
     canon_files: HashMap<String, String>,
-    canon_now: HashMap<String, String>,
     /// A Save timing to the project under way.
     saving: Option<project::Saving>,
     /// A storyboard opened from the animatic, and the assembly the step
@@ -459,7 +457,6 @@ impl Session {
             canon_asked: HashMap::new(),
             steps: HashMap::new(),
             canon_files: HashMap::new(),
-            canon_now: HashMap::new(),
             saving: None,
             retimed: None,
             last_saved: None,
@@ -732,7 +729,6 @@ impl Session {
         self.steps_read = false;
         self.steps.clear();
         self.canon_files.clear();
-        self.canon_now.clear();
         let blank = self.storyboards.len() == 1
             && self.storyboards[0].is_clean()
             && self.storyboards[0].path().is_none()

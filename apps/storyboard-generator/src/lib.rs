@@ -7,6 +7,7 @@ pub mod export;
 pub mod film;
 pub mod film_tools;
 pub mod images;
+pub mod iterations;
 pub mod look;
 pub mod playback;
 pub mod prefs;
