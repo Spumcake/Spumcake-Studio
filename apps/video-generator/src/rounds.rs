@@ -276,7 +276,7 @@ mod tests {
             state,
             started: Some(1_793_146_000),
             count,
-            takes: takes.iter().map(|path| TakeFile { path: path.to_string(), media_type: "video/mp4".into(), canon: false }).collect(),
+            takes: takes.iter().map(|path| TakeFile { path: path.to_string(), media_type: "video/mp4".into(), canon: false, iterations: Vec::new(), outlined: false, unverified: false, artifact: None }).collect(),
             error: None,
             report: None,
             artifact: None,
@@ -292,7 +292,7 @@ mod tests {
     fn rounds_lay_out_the_strip() {
         let mut rounds = Rounds::default();
         let mut first = round("r1", 1, &["library/a.mp4", "library/b.mp4"], RoundState::Done, None);
-        first.takes.push(TakeFile { path: "library/c.png".into(), media_type: "image/png".into(), canon: false });
+        first.takes.push(TakeFile { path: "library/c.png".into(), media_type: "image/png".into(), canon: false, iterations: Vec::new(), outlined: false, unverified: false, artifact: None });
         let sent = vec![first, round("r2", 2, &["library/d.mp4"], RoundState::Running, Some(3)), round("r3", 3, &[], RoundState::Failed, None)];
         rounds.set("c1", sent, &["c1".to_string()]);
         assert_eq!(rounds.groups(), [("Round 1 · Model".to_string(), 2), ("Round 2 · Model".to_string(), 3), ("Round 3 · Model".to_string(), 1)]);

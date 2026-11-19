@@ -125,6 +125,45 @@ pub(crate) struct Strip {
     /// A thumbnail being renamed from its menu: its index, the name typed so
     /// far, the row's action, and whether its field still wants the keyboard.
     renaming: Option<(usize, String, Action, bool)>,
+    /// Each tab's labelled runs shown last frame, by label, with whether
+    /// any of its places was still being made, so a run that appears or
+    /// finishes after a tab's first frame is brought into view; opening a
+    /// tab never scrolls.
+    seen: std::collections::HashMap<String, Vec<(String, bool)>>,
+}
+
+/// Each labelled run of `film`, by its label, with whether any of its
+/// places is still being made.
+fn runs_seen(film: &Film, layout: &Layout) -> Vec<(String, bool)> {
+    layout
+        .spans
+        .iter()
+        .filter_map(|span| {
+            let group = film.groups.get(span.group?)?;
+            Some((group.label.clone(), film.items[span.start..span.end].iter().any(|item| item.pending.is_some())))
+        })
+        .collect()
+}
+
+/// The labelled run to bring into view: the last one that is new since
+/// `before`, or that was being made then and is finished now.
+fn run_to_reveal(before: &[(String, bool)], now: &[(String, bool)]) -> Option<usize> {
+    now.iter().rposition(|(label, making)| match before.iter().find(|(seen, _)| seen == label) {
+        None => true,
+        Some((_, was_making)) => *was_making && !making,
+    })
+}
+
+/// The scroll that shows the run from `left` to `right` along the strip in
+/// a strip `width` wide, moving `scroll` as little as it can.
+fn scroll_to_show(scroll: f32, left: f32, right: f32, width: f32) -> f32 {
+    if right - scroll > width {
+        (right - width + INSET).min(left - INSET)
+    } else if left < scroll {
+        left - INSET
+    } else {
+        scroll
+    }
 }
 
 struct Moving {
@@ -282,6 +321,7 @@ impl Strip {
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
+        tab: &str,
         film: &Film,
         rect: Rect,
         locked: bool,
@@ -340,6 +380,18 @@ impl Strip {
                 ui.ctx().request_repaint();
             }
         }
+        // A round that appears, or finishes, past the strip's edge is
+        // brought into view, as "Round 15 appears at the end" has it.
+        let now = runs_seen(film, &layout);
+        if let Some(before) = self.seen.get(tab)
+            && let Some(run) = run_to_reveal(before, &now)
+            && let Some(span) = layout.spans.iter().filter(|span| span.group.is_some()).nth(run)
+            && span.end > span.start
+        {
+            let right = layout.lefts[span.end - 1] + layout.widths[span.end - 1];
+            self.scroll = scroll_to_show(self.scroll, span.left, right, rect.width());
+        }
+        self.seen.insert(tab.to_string(), now);
         self.scroll = self.scroll.clamp(0.0, (layout.total - rect.width()).max(0.0));
         let start = rect.left() - self.scroll;
         // Under the runs' labels when they have them, the thumbnails are
@@ -585,6 +637,44 @@ fn clock(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a round that appears, or finishes, past the strip's edge,
+    /// left where the person must scroll to find it; a strip that jumps
+    /// when nothing new appears; and one that jumps when a tab is opened.
+    #[test]
+    fn a_new_or_finished_round_is_brought_into_view() {
+        let run = |label: &str, making: bool| (label.to_string(), making);
+        let before = [run("Round 1", false), run("Round 2", false)];
+        assert_eq!(run_to_reveal(&before, &before), None, "nothing new moved the strip");
+        assert_eq!(run_to_reveal(&before, &[run("Round 1", false), run("Round 2", false), run("Round 3", true)]), Some(2));
+        let making = [run("Round 1", false), run("Round 2", true)];
+        assert_eq!(run_to_reveal(&making, &[run("Round 1", false), run("Round 2", false)]), Some(1), "a finished round was not shown");
+        // Past the right edge: scrolled so its end shows; already in view:
+        // not moved; past the left edge: scrolled back to its start.
+        assert_eq!(scroll_to_show(0.0, 900.0, 1100.0, 800.0), 1100.0 - 800.0 + INSET);
+        assert_eq!(scroll_to_show(100.0, 200.0, 400.0, 800.0), 100.0);
+        assert_eq!(scroll_to_show(500.0, 200.0, 400.0, 800.0), 200.0 - INSET);
+        // A tab's first frame records its runs and moves nothing: only what
+        // appears or finishes later brings the strip to it.
+        let mut strip = Strip::default();
+        let rounds = |labels: &[&str]| Film {
+            groups: labels.iter().map(|label| protocol::FilmGroup { label: label.to_string(), count: 1, menu: Vec::new() }).collect(),
+            ..film(&vec![(160, 90); labels.len()])
+        };
+        let (ctx, rect) = (egui::Context::default(), Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 80.0)));
+        let draw = |strip: &mut Strip, tab: &str, film: &Film| {
+            let mut output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| strip.show(ui, tab, film, rect, false, false, &mut Vec::new()));
+            });
+            output.textures_delta.clear();
+            strip.scroll
+        };
+        let many = rounds(&["Round 1", "Round 2", "Round 3", "Round 4", "Round 5"]);
+        assert_eq!(draw(&mut strip, "1", &many), 0.0, "opening a tab scrolled its strip");
+        assert_eq!(draw(&mut strip, "2", &rounds(&["Round 1"])), 0.0);
+        let more = rounds(&["Round 1", "Round 2", "Round 3", "Round 4", "Round 5", "Round 6"]);
+        assert!(draw(&mut strip, "1", &more) > 0.0, "a new round past the edge was not brought into view");
+    }
     use protocol::Thumbnail;
 
     fn film(sizes: &[(u32, u32)]) -> Film {

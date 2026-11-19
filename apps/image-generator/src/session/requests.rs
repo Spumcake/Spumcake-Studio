@@ -22,7 +22,7 @@ impl Session {
             // opened from, its bottom-most linked layer's, as its output, so
             // the host finds that take's round; never kept, and never in
             // place of a real run's output or on a step.
-            let opened = super::publish::all_links(&image.gallery.frame().doc).into_iter().next();
+            let opened = super::in_use::all_links(&image.gallery.frame().doc).into_iter().next();
             if let Some(path) = opened.map(|path| as_in_project(project.as_deref(), &path)) {
                 for cell in cells.iter_mut().filter(|cell| cell.step.is_none() && cell.versions.is_empty() && cell.output.is_empty()) {
                     cell.output = vec![CellPart::Path { media_type: media_type_of(&path), path: path.clone(), role: None, field: None }];
@@ -50,12 +50,6 @@ impl Session {
         let image = &mut self.images[index];
         let seen = image.frame().uid;
         let order: Vec<String> = image.gallery.cells.iter().map(|own| own.id.clone()).collect();
-        // The artifact the cell's step publishes, as its newest round says
-        // it, kept with the cell while the program runs: it is the chain's,
-        // never the file's.
-        if let Some(artifact) = rounds.iter().rev().find_map(|round| round.artifact.clone()) {
-            image.gallery.artifacts.insert(cell.to_string(), artifact);
-        }
         for gone in image.rounds.set(cell, rounds, &order) {
             forget_files(&cache, &image.id, gone);
         }
@@ -269,20 +263,6 @@ impl Session {
         }
         self.page = Page::Prompt;
         out.extend(self.emit());
-    }
-
-    /// Ask the assistant to use this take: a prepared request naming the
-    /// take, put in the conversation's composer for the person to send, as
-    /// a take enters the chain only through the assistant.
-    pub(super) fn ask_about(&mut self, path: &str, out: &mut Vec<AppMessage>) {
-        let Some(image) = self.active_image() else {
-            return;
-        };
-        let Some(tile) = image.rounds.tile_of(path).map(|tile| &image.rounds.tiles[tile]) else {
-            return;
-        };
-        let text = format!("Put take {} of round {}, {path}, into the chain.", tile.take + 1, tile.number);
-        out.push(AppMessage::AskAssistant { text, items: vec![ItemRef { path: path.to_string(), item: None }] });
     }
 
     /// Edit: the take on a layer linked to its file, in a new image of the

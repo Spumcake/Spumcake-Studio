@@ -558,6 +558,13 @@ impl Session {
             HostMessage::SelectCell { tab, cell } => self.select_cell(&tab, cell, &mut out),
             HostMessage::CellBecameStep { tab, cell, step, artifact } => self.cell_became_step(&tab, &cell, &step, artifact, &mut out),
             HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
+            // Use this take answered: an error is said at the bottom left;
+            // the seal comes with the next `takes`.
+            HostMessage::TakeUsed { tab, error, .. } => {
+                if let Some(error) = error.filter(|error| !error.is_empty()) {
+                    out.push(deliver::notices(&tab, Some((error, protocol::NoticeState::Failed))));
+                }
+            }
             HostMessage::Preview { id, path, media_type } => {
                 let root = self.project.clone().unwrap_or_default();
                 out.push(crate::preview::preview(id, &path, &media_type, &root, &self.cache, &mut self.next_revision));
@@ -1105,7 +1112,7 @@ impl Session {
                 return;
             }
             // A take's menu.
-            "take_next_round" | "take_ask" | "take_edit" | "take_report" => {
+            "take_next_round" | "take_use" | "take_edit" | "take_report" => {
                 let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
                     return;
                 };
@@ -1114,8 +1121,8 @@ impl Session {
                         self.next_round(&path, out);
                         return;
                     }
-                    "take_ask" => {
-                        self.ask_about(&path, out);
+                    "take_use" => {
+                        self.use_take(&path, out);
                         return;
                     }
                     "take_report" => {

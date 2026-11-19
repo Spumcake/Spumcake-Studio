@@ -211,18 +211,31 @@ impl Session {
         }
     }
 
-    /// Ask the assistant to use this take: a prepared request naming the
-    /// take, put in the conversation's composer for the person to send, as
-    /// a take enters the chain only through the assistant.
-    pub(super) fn ask_about(&mut self, path: &str, out: &mut Vec<AppMessage>) {
-        let Some(tab) = self.active_tab() else {
+    /// Use this take: `use_take` for the take at `path`, with the cell's
+    /// item as `takes` names it, the tab's file and the cell, beside the
+    /// takes in use, replacing none, so it asks nothing first. The tab's
+    /// file is written first when it has none, so the item has a file.
+    pub(super) fn use_take(&mut self, path: &str, out: &mut Vec<AppMessage>) {
+        let index = self.active;
+        let Some(cell) = self.tabs.get(index).and_then(|tab| tab.rounds.tile_of(path).map(|tile| tab.rounds.tiles[tile].cell.clone())) else {
             return;
         };
-        let Some(tile) = tab.rounds.tile_of(path).map(|tile| &tab.rounds.tiles[tile]) else {
+        if self.tabs[index].path.is_none() {
+            self.tabs[index].dirty = true;
+        }
+        let file = match self.write_into_project(index) {
+            Ok(Some(file)) => file,
+            Ok(None) => return,
+            Err(reason) => {
+                out.push(super::deliver::notices(&self.tabs[index].id, Some((reason, protocol::NoticeState::Failed))));
+                return;
+            }
+        };
+        let Some(own) = self.relative(&file) else {
             return;
         };
-        let text = format!("Put take {} of round {}, {path}, into the chain.", tile.take + 1, tile.number);
-        out.push(AppMessage::AskAssistant { text, items: vec![ItemRef { path: path.to_string(), item: None }] });
+        let tab = self.tabs[index].id.clone();
+        out.push(AppMessage::UseTake { tab, cell: ItemRef { path: own, item: Some(cell) }, path: path.to_string() });
     }
 
     /// Edit: the take added to the gallery as a take of its own, linking
