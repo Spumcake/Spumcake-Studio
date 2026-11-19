@@ -135,7 +135,12 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
                     for (index, reference) in references.iter().enumerate() {
                         let text = |key: &str| reference.get(key).and_then(Value::as_str).unwrap_or("").to_string();
                         let path = if text("path").is_empty() { text("file") } else { text("path") };
-                        lines.push(Line::Reference { number: index + 1, path, label: text("role") });
+                        // A reference an earlier fix in the same plan replaces.
+                        let label = match reference.get(crate::runner::FIXED_BY).and_then(Value::as_str) {
+                            Some(artifact) => format!("{} · made by the fix of {artifact}", text("role")),
+                            None => text("role"),
+                        };
+                        lines.push(Line::Reference { number: index + 1, path, label });
                     }
                 }
             }

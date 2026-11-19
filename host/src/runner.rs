@@ -20,6 +20,7 @@
 use crate::workspace::{EndpointKind, Settings};
 use protocol::{Tool, ToolResult};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -28,6 +29,9 @@ use std::sync::{Arc, Mutex};
 pub(crate) const RUN_COMMAND: &str = "run_command";
 pub(crate) const SEND_REQUEST: &str = "send_request";
 pub(crate) const RERUN_STEP: &str = "rerun_step";
+/// The assistant's fix of the dependency chain, as the data model guide
+/// has it: every out-of-date step made again on one plan card.
+pub(crate) const FIX_CHAIN: &str = "fix_dependency_chain";
 pub(crate) const WEB_SEARCH: &str = "web_search";
 pub(crate) const FETCH_PAGE: &str = "fetch_page";
 pub(crate) const DOWNLOAD_FILE: &str = "download_file";
@@ -92,6 +96,20 @@ pub(crate) fn tools() -> Vec<Tool> {
                     "step": { "type": "string", "description": "With chain, the one step to make a take of, out of date or not." },
                     "fact": { "type": "string", "description": "A changed fact, as \"<element>: <fact>\", to rerun what it reaches." },
                     "artifact": { "type": "string", "description": "A changed artifact, as \"<element>: <role>\", to rerun what it reaches." },
+                    "stand_in": { "type": "boolean", "description": "Run it on the stand-in, which spends nothing." }
+                },
+                "required": ["pipeline"],
+                "additionalProperties": false
+            }),
+            implements: Vec::new(),
+        },
+        Tool {
+            name: FIX_CHAIN.into(),
+            description: "Fix the dependency chain: make again every step whose artifact is out of date and not ignored, in chain order, all on one plan card the user approves before anything is spent. A reference an earlier fix will replace is marked on the card. Each result is published at once as its artifact's next version, a fix, so it is a new iteration of the same asset. A later step runs only when its plan, made again after the fixes before it, differs from the approved one in nothing but those files; anything else stops the fix there and says why, and a new fix plans the rest.".into(),
+            input: json!({
+                "type": "object",
+                "properties": {
+                    "pipeline": { "type": "string", "description": "The pipeline's number, such as 002." },
                     "stand_in": { "type": "boolean", "description": "Run it on the stand-in, which spends nothing." }
                 },
                 "required": ["pipeline"],
@@ -354,7 +372,7 @@ pub(crate) enum Asking {
     Command { call: String, tool: String, argv: Vec<String>, why: String },
     /// One or more requests, each with its plan, each run with its own
     /// `--expect`.
-    Plans { call: String, tool: String, plans: Vec<Value>, runs: Vec<Vec<String>>, stand_in: bool },
+    Plans { call: String, tool: String, plans: Vec<Value>, runs: Vec<Vec<String>>, stand_in: bool, fix: Option<Fix> },
     /// A research request's searches, each a query and whether it searches
     /// images, asked for together with their cost.
     Searches { call: String, tool: String, searches: Vec<(String, bool)>, why: String },
@@ -368,6 +386,111 @@ impl Asking {
             Asking::Command { call, tool, .. } | Asking::Plans { call, tool, .. } | Asking::Searches { call, tool, .. } | Asking::Download { call, tool, .. } => (call, tool),
         }
     }
+}
+
+/// A fix of the dependency chain the user is asked to approve: each step
+/// to make again, in chain order, with the hash of its plan as shown.
+#[derive(Clone, Debug)]
+pub(crate) struct Fix {
+    scripts: PathBuf,
+    pipeline: String,
+    steps: Vec<FixStep>,
+}
+
+#[derive(Clone, Debug)]
+struct FixStep {
+    chain: String,
+    step: String,
+    artifact: String,
+    hash: String,
+}
+
+/// The mark on a reference an earlier fix in the same plan replaces.
+pub(crate) const FIXED_BY: &str = "fixed_by";
+
+/// A Skills script's command, as `resolve` makes it.
+fn skills_argv(scripts: &Path, script: &str, args: &[&str]) -> Vec<String> {
+    [String::from("python3"), scripts.join(script).display().to_string()].into_iter().chain(args.iter().map(|arg| arg.to_string())).collect()
+}
+
+/// What a Skills script printed, run in the project with its setup; an
+/// error with what it said when it failed.
+fn skills_run(argv: &[String], cwd: &Path, vars: &[(String, String)]) -> Result<String, String> {
+    let out = Command::new(&argv[0]).args(&argv[1..]).current_dir(cwd).envs(vars.iter().map(|(name, value)| (name.as_str(), value.as_str()))).output().map_err(|error| format!("Could not run {}: {error}", argv[1]))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// The steps to fix, in chain order: each step whose artifact Skills finds
+/// out of date and was not ignored, as `touches --json` lists them.
+fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<Vec<(String, String, String)>, String> {
+    let touches: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "pipeline.py", &["touches", pipeline, "--json"]), cwd, vars)?).map_err(|error| format!("What is out of date could not be read: {error}"))?;
+    let stale: Vec<&str> = touches.get("out_of_date").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str)).collect();
+    let query = "SELECT json_array(c.ord, s.ord, s.chain, s.name, s.artifact) FROM step s JOIN chain c ON c.name = s.chain WHERE s.artifact IS NOT NULL AND s.artifact != ''";
+    let mut steps: Vec<(i64, i64, String, String, String)> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, query, "--read-only"]), cwd, vars)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| {
+            let text = |index: usize| row.get(index).and_then(Value::as_str).map(String::from);
+            Some((row.get(0)?.as_i64().unwrap_or(99), row.get(1)?.as_i64().unwrap_or(99), text(2)?, text(3)?, text(4)?))
+        })
+        .filter(|(_, _, _, _, artifact)| stale.contains(&artifact.as_str()))
+        .collect();
+    steps.sort();
+    Ok(steps.into_iter().map(|(_, _, chain, step, artifact)| (chain, step, artifact)).collect())
+}
+
+/// Marks each reference of a plan that an earlier fix in the same plan
+/// replaces, by the artifact it names, with `FIXED_BY`.
+fn mark_fixed(plan: &mut Value, fixed: &[String]) {
+    for list in ["references", "inputs"] {
+        for reference in plan.get_mut(list).and_then(Value::as_array_mut).into_iter().flatten() {
+            if let Some(artifact) = reference.get("canon").and_then(Value::as_str).filter(|artifact| fixed.iter().any(|known| known == artifact)).map(String::from) {
+                reference[FIXED_BY] = json!(artifact);
+            }
+        }
+    }
+}
+
+/// Whether a later step's plan, made again after the fixes before it, is
+/// the approved one in all but the references marked `FIXED_BY`, each of
+/// which now names the file its fix published. Otherwise, what differs.
+fn same_but_fixed(approved: &Value, now: &Value, published: &HashMap<String, String>) -> Result<(), String> {
+    let left_out = ["hash", "estimate", "price_note", "price_hint", "references", "inputs"];
+    let rest = |plan: &Value| -> Value { plan.as_object().map(|fields| Value::Object(fields.iter().filter(|(key, _)| !left_out.contains(&key.as_str())).map(|(key, value)| (key.clone(), value.clone())).collect())).unwrap_or(Value::Null) };
+    if rest(approved) != rest(now) {
+        let differs = approved.as_object().into_iter().flatten().filter(|(key, value)| !left_out.contains(&key.as_str()) && now.get(key.as_str()) != Some(*value)).map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        return Err(format!("its {} changed", if differs.is_empty() { String::from("plan") } else { differs.join(", ") }));
+    }
+    for list in ["references", "inputs"] {
+        let (was, is) = (approved.get(list).and_then(Value::as_array).cloned().unwrap_or_default(), now.get(list).and_then(Value::as_array).cloned().unwrap_or_default());
+        if was.len() != is.len() {
+            return Err(format!("its {list} changed"));
+        }
+        for (was, is) in was.iter().zip(&is) {
+            let mut kept = was.clone();
+            if let Some(object) = kept.as_object_mut() {
+                object.remove(FIXED_BY);
+            }
+            match was.get(FIXED_BY).and_then(Value::as_str) {
+                Some(artifact) => {
+                    let wanted = published.get(artifact).ok_or_else(|| format!("{artifact} was not fixed first"))?;
+                    if is.get("file").and_then(Value::as_str) != Some(wanted.as_str()) {
+                        return Err(format!("its reference to {artifact} is not the fix just published"));
+                    }
+                    let strip = |reference: &Value| -> Value { reference.as_object().map(|fields| Value::Object(fields.iter().filter(|(key, _)| !["file", "path", "sha256", FIXED_BY].contains(&key.as_str())).map(|(key, value)| (key.clone(), value.clone())).collect())).unwrap_or(Value::Null) };
+                    if strip(was) != strip(is) {
+                        return Err(format!("its reference to {artifact} changed"));
+                    }
+                }
+                None if kept != *is => return Err(format!("its {list} changed")),
+                None => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Where a download's own record of its address, page, and licence is kept.
@@ -714,7 +837,7 @@ impl Runner {
                     if stand_in {
                         run.push(String::from("--stand-in"));
                     }
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in, fix: None })
                 });
             }
             RERUN_STEP => {
@@ -746,7 +869,34 @@ impl Runner {
                 return self.plan_later(call, move || {
                     let (plan, hash) = planned(&planning, &cwd, &vars, stand_in)?;
                     run.extend([String::from("--expect"), hash]);
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in, fix: None })
+                });
+            }
+            FIX_CHAIN => {
+                let pipeline = text("pipeline");
+                let Some(scripts) = env.scripts.clone() else { return Begun::Answered(failed(call, crate::skills_checkout::MISSING)) };
+                if let Err(reason) = plans_offline(&scripts.join("pipeline.py")) {
+                    return Begun::Answered(failed(call, reason));
+                }
+                let (cwd, vars, call_name, tool_name) = (folder.to_path_buf(), env.vars.clone(), call.to_string(), tool.to_string());
+                return self.plan_later(call, move || {
+                    let found = steps_to_fix(&scripts, &cwd, &vars, &pipeline)?;
+                    if found.is_empty() {
+                        return Err(String::from("Nothing is out of date, so there is nothing to fix."));
+                    }
+                    let (mut plans, mut steps, mut fixed) = (Vec::new(), Vec::new(), Vec::new());
+                    for (chain, step, artifact) in found {
+                        let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &chain, &step, "--plan", "--json"]);
+                        if stand_in {
+                            argv.push(String::from("--stand-in"));
+                        }
+                        let (mut plan, hash) = planned(&argv, &cwd, &vars, stand_in)?;
+                        mark_fixed(&mut plan, &fixed);
+                        plans.push(plan);
+                        steps.push(FixStep { chain, step, artifact: artifact.clone(), hash });
+                        fixed.push(artifact);
+                    }
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps }) })
                 });
             }
             _ => return Begun::Answered(failed(call, "No such tool.")),
@@ -847,6 +997,92 @@ impl Runner {
         self.tasks.push(Task { call: call.to_string(), done, stop });
     }
 
+    /// The approved fix of the dependency chain, run step by step: each
+    /// later step planned again and run only when it is the plan approved
+    /// but for the files the fixes before it made; each result published as
+    /// its artifact's next version with `--fixes`. Stop ends it before the
+    /// next step.
+    fn fix_chain(&mut self, call: &str, fix: Fix, approved: Vec<Value>, stand_in: bool) {
+        let (answered, cwd, vars) = (call.to_string(), self.cwd.clone(), self.env.clone());
+        self.spawn(call, move |stop| {
+            let Fix { scripts, pipeline, steps } = fix;
+            let mut published: HashMap<String, String> = HashMap::new();
+            let mut done: Vec<Value> = Vec::new();
+            let mut stopped: Option<String> = None;
+            for (index, step) in steps.iter().enumerate() {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    stopped = Some(String::from("the user stopped the fix"));
+                    break;
+                }
+                // A later step's plan as it is now, after the fixes before it.
+                let hash = if index == 0 {
+                    step.hash.clone()
+                } else {
+                    let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &step.chain, &step.step, "--plan", "--json"]);
+                    if stand_in {
+                        argv.push(String::from("--stand-in"));
+                    }
+                    match planned(&argv, &cwd, &vars, stand_in).and_then(|(plan, hash)| same_but_fixed(&approved[index], &plan, &published).map(|()| hash)) {
+                        Ok(hash) => hash,
+                        Err(reason) => {
+                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            break;
+                        }
+                    }
+                };
+                let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &step.chain, &step.step, "--json", "--expect", &hash]);
+                if stand_in {
+                    argv.push(String::from("--stand-in"));
+                }
+                let made = match skills_run(&argv, &cwd, &vars) {
+                    Ok(printed) => printed.lines().rev().find_map(|line| serde_json::from_str::<Value>(line.trim()).ok()).unwrap_or(Value::Null),
+                    Err(reason) => {
+                        stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                        break;
+                    }
+                };
+                if made.get("pending").is_some_and(|pending| !pending.is_null()) {
+                    stopped = Some(format!("{} / {} is still being made at its endpoint: collect it with request.py collect, then fix again", step.chain, step.step));
+                    break;
+                }
+                let Some(take) = made.get("files").and_then(Value::as_array).and_then(|files| files.first()).and_then(Value::as_str).map(String::from) else {
+                    stopped = Some(format!("{} / {} made no file", step.chain, step.step));
+                    break;
+                };
+                // Published at once as the artifact's next version, a fix,
+                // with what its step refers to.
+                let request = made.get("report").and_then(Value::as_str).and_then(|report| Path::new(report).file_stem()).map(|stem| stem.to_string_lossy().to_string());
+                let query = format!("SELECT refs FROM step WHERE chain='{}' AND name='{}'", step.chain.replace('\'', "''"), step.step.replace('\'', "''"));
+                let refs: Vec<Value> = skills_run(&skills_argv(&scripts, "pipeline.py", &["sql", &pipeline, &query, "--read-only"]), &cwd, &vars).ok().and_then(|printed| serde_json::from_str(printed.trim()).ok()).unwrap_or_default();
+                let mut args: Vec<String> = ["publish", &pipeline, &step.artifact, "--file", &take, "--chain", &step.chain, "--fixes"].iter().map(|arg| arg.to_string()).collect();
+                if let Some(request) = &request {
+                    args.extend([String::from("--request"), request.clone()]);
+                }
+                for reference in &refs {
+                    let text = |key: &str| reference.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+                    if !text("artifact").is_empty() {
+                        args.extend([String::from("--from"), text("artifact"), if text("role").is_empty() { String::from("input") } else { text("role") }]);
+                    }
+                }
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                if let Err(reason) = skills_run(&skills_argv(&scripts, "pipeline.py", &args), &cwd, &vars) {
+                    stopped = Some(format!("{}'s fix could not be published: {reason}", step.artifact));
+                    break;
+                }
+                published.insert(step.artifact.clone(), take.clone());
+                done.push(json!({ "artifact": step.artifact, "chain": step.chain, "step": step.step, "file": take }));
+            }
+            let mut output = json!({ "fixed": done });
+            if let Some(reason) = &stopped {
+                let left: Vec<&str> = steps.iter().skip(published.len()).map(|step| step.artifact.as_str()).collect();
+                output["stopped"] = json!(reason);
+                output["not_fixed"] = json!(left);
+                output["next"] = json!("Tell the user where it stopped and why. A new fix_dependency_chain plans the rest on a new card.");
+            }
+            ToolResult { call: answered, ok: stopped.is_none(), output, images: Vec::new() }
+        });
+    }
+
     /// The approved searches, run one after another.
     fn search(&mut self, call: &str, searches: Vec<(String, bool)>, key: String) {
         let answered = call.to_string();
@@ -921,6 +1157,10 @@ impl Runner {
             Asking::Command { argv, .. } => (vec![argv], false),
             // A step that runs a script, such as a builder, sends nothing to
             // a model, so Stop ends it as it ends any command.
+            Asking::Plans { fix: Some(fix), plans, stand_in, .. } => {
+                self.fix_chain(&call, fix, plans, stand_in);
+                return None;
+            }
             Asking::Plans { runs, stand_in, plans, .. } => (runs, !stand_in && plans.iter().any(|plan| plan.get("endpoint").is_some_and(|endpoint| !endpoint.is_null()))),
             Asking::Searches { searches, .. } => {
                 let Some(key) = self.search_key.take() else { return Some(failed(&call, "Brave Search has no key.")) };
@@ -1191,6 +1431,34 @@ mod tests {
             assert!(start.elapsed().as_secs() < 30, "the plan never came");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// Catches a fix's later step run on a plan that changed in more than
+    /// the file an earlier fix made, or one whose reference is not that
+    /// fix's file, and a step marked when it uses nothing being fixed.
+    #[test]
+    fn a_later_step_runs_only_as_approved_but_for_the_fixes() {
+        let mut approved = json!({
+            "endpoint": { "kind": "fal", "model": "m" }, "prompt": "The diner.", "hash": "h1",
+            "references": [{ "order": 1, "role": "image 1", "canon": "the diner: layout", "file": "library/layout.png", "sha256": "a" }, { "order": 2, "role": "image 2", "canon": "the cook: sheet", "file": "library/sheet.png", "sha256": "b" }],
+        });
+        mark_fixed(&mut approved, &[String::from("the diner: layout")]);
+        assert_eq!(approved["references"][0][FIXED_BY], "the diner: layout");
+        assert!(approved["references"][1].get(FIXED_BY).is_none(), "a reference nothing fixes was marked");
+        let published = HashMap::from([(String::from("the diner: layout"), String::from("library/layout-2.png"))]);
+        let mut now = json!({
+            "endpoint": { "kind": "fal", "model": "m" }, "prompt": "The diner.", "hash": "h2",
+            "references": [{ "order": 1, "role": "image 1", "canon": "the diner: layout", "file": "library/layout-2.png", "sha256": "c" }, { "order": 2, "role": "image 2", "canon": "the cook: sheet", "file": "library/sheet.png", "sha256": "b" }],
+        });
+        assert_eq!(same_but_fixed(&approved, &now, &published), Ok(()));
+        now["prompt"] = json!("The diner at night.");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "a changed prompt ran");
+        now["prompt"] = json!("The diner.");
+        now["references"][1]["sha256"] = json!("d");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "a reference no fix made changed and ran");
+        now["references"][1]["sha256"] = json!("b");
+        now["references"][0]["file"] = json!("library/someone-else.png");
+        assert!(same_but_fixed(&approved, &now, &published).is_err(), "a reference that is not the fix's file ran");
     }
 
     /// Catches a command that spends run as a plain command: the contract's
