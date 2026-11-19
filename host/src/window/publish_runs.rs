@@ -294,11 +294,12 @@ fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
 fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     // The mix is an asset of its own, made from the shot, as finishing is
     // and Last order's mixes are: "<shot>, mixed", made from the shot in
-    // the role of the shot. The shot's own asset in use is never replaced.
+    // the role Last order records. The shot's own asset in use is never
+    // replaced.
     let (shot, file) = (delivery.artifact.as_str(), delivery.file.as_str());
     let artifact = format!("{shot}, mixed");
     let artifact = artifact.as_str();
-    let made_from = sources_of(place, artifact, None, file, &[(shot.to_string(), String::from(THE_SHOT))])?;
+    let made_from = sources_of(place, artifact, None, file, &[(shot.to_string(), String::from(MIX_SOURCE_ROLE))])?;
     let chain = chain_of(place, shot)?;
     let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact, "--file", file];
     if let Some(chain) = &chain {
@@ -314,8 +315,9 @@ fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or_else(|| String::from("The film was published, but where it was delivered was not given."))
 }
 
-/// The role a mix names its shot in.
-const THE_SHOT: &str = "the shot";
+/// The role a mix names its shot in, exactly as Last order records it, so
+/// Claude Code and the finishing rule find Studio's mixes as they find its.
+const MIX_SOURCE_ROLE: &str = "the picture, untouched"; // Skills' stored spelling
 
 /// The chain an artifact belongs to: its step's, or its own row's.
 fn chain_of(place: &Place, artifact: &str) -> Result<Option<String>, String> {
@@ -1148,13 +1150,13 @@ mod tests {
         check_delivery(&place, &delivery(&mix)).unwrap();
         let output = deliver(&place, &delivery(&mix)).unwrap();
         assert!(output.starts_with("output/") && folder.join(&output).is_file(), "{output}");
-        // The mix is an asset of its own, made from the shot in the role of
-        // the shot, and the shot in use is left as it was.
+        // The mix is an asset of its own, made from the shot in the role Last
+        // order records, and the shot in use is left as it was.
         let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
         assert_eq!(canon.files.get("the line: take, mixed"), Some(&mix), "the film is not an asset of its own");
         assert_eq!(canon.files.get("the line: take"), Some(&take), "the delivery replaced the shot in use");
         let role = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the line: take, mixed' AND source='the line: take'", "--read-only"]);
-        assert_eq!(role.trim(), THE_SHOT);
+        assert_eq!(role.trim(), MIX_SOURCE_ROLE);
         // A mix of a take published again since is refused before its card.
         std::fs::write(folder.join("agent/take2.wav"), b"RIFF take again").unwrap();
         let take2 = last(skills("request.py", &["resource", "agent/take2.wav", "--name", "take-again"]));
