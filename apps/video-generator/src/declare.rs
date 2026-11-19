@@ -178,7 +178,9 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
             // Unverified when nothing records what it was made from. An
             // opened stack's tiles are numbered.
             let asset = tile.asset.as_ref();
-            let round = tile.iteration.is_none();
+            // The tile that stands for the asset: a round's, or an opened
+            // stack's latest, whose badge closes the stack again.
+            let round = tile.is_asset();
             let (name, caption) = match (tile.iteration, asset) {
                 (Some(at), Some(asset)) => (format!("Take {} · iteration {at} of {}", tile.take + 1, 1 + asset.iterations.len()), at.to_string()),
                 (None, Some(asset)) if asset.unverified => (format!("Take {}", tile.take + 1), String::from("Unverified")),
@@ -311,7 +313,7 @@ fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str, outl
     let mut deliver = row(crate::session::DELIVER, Action::with_arg("take_deliver", target.clone()));
     deliver.enabled = session.can_deliver(tab, path);
     // An opened stack's iteration starts a round or opens to edit.
-    if tile.iteration.is_some() {
+    if !tile.is_asset() {
         return vec![row("Next round from this", Action::with_arg("take_next_round", target.clone())), edit];
     }
     let mut rows = vec![

@@ -96,18 +96,23 @@ pub fn toolbar(session: &Session) -> Toolbar {
     // While the strip has the keyboard, these are its history's.
     let can_undo = image.is_some_and(Image::can_undo);
     let can_redo = image.is_some_and(Image::can_redo);
-    let mut export = button("floppy-disk", "Export as PNG", Action::new("export_png"), image.is_some(), false);
+    let mut export = button("share-ios", "Export as PNG", Action::new("export_png"), image.is_some(), false);
     if let ToolItem::Button { menu, .. } = &mut export {
         *menu = vec![row("Export PNG", Action::new("export_png")), row("Export JPEG", Action::new("export_jpeg"))];
     }
-    let mut items = vec![
-        button("folder", "Open (Ctrl+O)", Action::new("open"), true, false),
+    let mut items = vec![button("folder", "Open (Ctrl+O)", Action::new("open"), true, false)];
+    // Save, as ig-dependency-warning shows it, while the image is an edit
+    // of a take, which it saves as the take's next iteration.
+    if session.project.is_some() && session.edits_a_take() {
+        items.push(button("floppy-disk", "Save (Ctrl+S)", Action::new("save"), true, false));
+    }
+    items.extend([
         export,
         ToolItem::Separator,
         button("undo", "Undo (Ctrl+Z)", Action::new("undo"), can_undo, false),
         button("redo", "Redo (Ctrl+Shift+Z)", Action::new("redo"), can_redo, false),
         ToolItem::Separator,
-    ];
+    ]);
     for tool in ToolKind::ALL {
         let (icon, name, key) = tool_look(tool);
         items.push(button(
@@ -961,7 +966,9 @@ pub fn film(image: &Image) -> Film {
                 (None, Some(asset)) if asset.unverified => (format!("Take {}", tile.take + 1), String::from("Unverified")),
                 _ => (format!("Take {}", tile.take + 1), String::new()),
             };
-            let round = tile.iteration.is_none();
+            // The tile that stands for the asset: a round's, or an opened
+            // stack's latest, whose badge closes the stack again.
+            let round = tile.is_asset();
             FilmItem {
                 name,
                 thumbnail: rounds.thumbnail(tile),
@@ -1116,7 +1123,7 @@ mod tests {
         assert_eq!(
             kinds(&bar.items),
             [
-                "folder", "floppy-disk", "|", "undo", "redo", "|", "cursor-pointer", "square-dashed",
+                "folder", "share-ios", "|", "undo", "redo", "|", "cursor-pointer", "square-dashed",
                 "chat-bubble-empty", "crop", "color-picker", "bandage", "stamp", "brush*", "erase", "text",
                 "drag-hand-gesture", "search", "chat-bubble",
             ]

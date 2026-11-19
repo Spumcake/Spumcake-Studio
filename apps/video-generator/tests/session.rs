@@ -1589,7 +1589,7 @@ fn a_sound_is_previewed_with_its_waveform_and_cues() {
     program.send(in_project(&dir));
     program.send(HostMessage::Preview { id: "s1".into(), path: "takes/Rain.wav".into(), media_type: "audio/wav".into() });
     let (thumbnail, badge, cues, error) = program.wait("the sound's preview", |message| match message {
-        AppMessage::Previewed { id, thumbnail, badge, cues, error } if id == "s1" => Some((thumbnail.clone(), badge.clone(), cues.clone(), error.clone())),
+        AppMessage::Previewed { id, thumbnail, badge, cues, error, .. } if id == "s1" => Some((thumbnail.clone(), badge.clone(), cues.clone(), error.clone())),
         _ => None,
     });
     assert_eq!(error, None);

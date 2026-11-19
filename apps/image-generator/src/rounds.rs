@@ -74,6 +74,16 @@ impl Tile {
         self.file.as_ref().map(|file| file.path.as_str())
     }
 
+    /// Whether it stands for its asset: a round's tile, or, while the
+    /// asset's stack is open and it is out of its round, the stack's latest.
+    pub fn is_asset(&self) -> bool {
+        match (self.iteration, &self.asset) {
+            (None, _) => true,
+            (Some(at), Some(asset)) => at == 1 + asset.iterations.len(),
+            _ => false,
+        }
+    }
+
     /// Whether its frame holds something of the person's, such as notes,
     /// and so is kept while the program runs.
     fn keeps(&self) -> bool {
@@ -227,6 +237,12 @@ impl Rounds {
                 };
                 let mut stack = Vec::new();
                 for (take, file) in images.iter().enumerate() {
+                    // An opened stack takes its take out of its round, as
+                    // ig-iteration-stack-open shows.
+                    if self.open.as_deref() == Some(file.path.as_str()) && !file.iterations.is_empty() {
+                        stack.push((take, *file));
+                        continue;
+                    }
                     let latest = file.iterations.last().map_or(file.path.clone(), |iteration| iteration.file.clone());
                     tiles.push(Tile {
                         cell: cell.clone(),
@@ -239,9 +255,6 @@ impl Rounds {
                         pending: None,
                         frame: frames.remove(&latest),
                     });
-                    if self.open.as_deref() == Some(file.path.as_str()) && !file.iterations.is_empty() {
-                        stack.push((take, *file));
-                    }
                 }
                 for more in 0..waiting {
                     tiles.push(Tile {
@@ -358,11 +371,12 @@ impl Rounds {
         self.tiles.iter().position(|tile| tile.path() == Some(path))
     }
 
-    /// The round's tile of the asset one of whose files is at `path`: the
-    /// take itself, or any of its iterations.
+    /// The tile that stands for the asset one of whose files is at `path`,
+    /// the take itself or any of its iterations: its round's, or its opened
+    /// stack's latest.
     pub fn asset_of(&self, path: &str) -> Option<usize> {
         self.tiles.iter().position(|tile| {
-            tile.iteration.is_none()
+            tile.is_asset()
                 && tile.asset.as_ref().is_some_and(|asset| asset.path == path || asset.iterations.iter().any(|iteration| iteration.file == path))
         })
     }
@@ -506,14 +520,17 @@ impl Rounds {
         Some(canvas)
     }
 
-    /// The tiles of one round, in order, without an opened stack's.
+    /// The tiles of one round, in the order of its takes: an opened
+    /// stack's latest stands for its take.
     fn tiles_of(&self, cell: &str, request: &str) -> Vec<usize> {
-        (0..self.tiles.len())
+        let mut tiles: Vec<usize> = (0..self.tiles.len())
             .filter(|index| {
                 let tile = &self.tiles[*index];
-                tile.cell == cell && tile.request == request && tile.iteration.is_none()
+                tile.cell == cell && tile.request == request && tile.is_asset()
             })
-            .collect()
+            .collect();
+        tiles.sort_by_key(|index| self.tiles[*index].take);
+        tiles
     }
 
     /// Reads a take or a reference small, once.

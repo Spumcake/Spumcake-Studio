@@ -1476,7 +1476,8 @@ fn use_this_take_asks_the_host_to_use_it() {
 /// Catches a take drawn as a file rather than as its asset: a take with
 /// iterations shows its latest, as a stack with its count, its badge
 /// opening the iterations as a run "Take 1 · 2 iterations", numbered, the
-/// latest sealed while in use, and closing it again; an out-of-date take
+/// latest sealed while in use, the take out of its round meanwhile, and the
+/// latest's badge closing it again; an out-of-date take
 /// is outlined, and its menu adds Ignore, which sends `ignore_take`, and
 /// the assistant's fix, which puts it in the composer with the cell; a
 /// take nothing records is captioned Unverified, with no outline.
@@ -1524,6 +1525,10 @@ fn a_take_shows_its_asset_its_stack_and_its_outline() {
     let at = runs(&film).iter().take_while(|(label, _)| label != "Take 1 · 2 iterations").map(|(_, count)| count).sum::<usize>();
     let run: Vec<(&str, bool)> = film.items[at..at + 2].iter().map(|item| (item.caption.as_str(), item.mark.is_some())).collect();
     assert_eq!(run, [("1", false), ("2", true)], "the opened stack is not numbered with its latest sealed");
+    // The take is out of its round meanwhile, as ig-iteration-stack-open
+    // shows, and the stack's latest stands for it, its badge closing it.
+    assert_eq!(runs(&film)[0].1, 1, "the opened stack's take stayed in its round: {:?}", runs(&film));
+    assert!(film.items[at + 1].stack.is_some() && film.items[at].stack.is_none() && film.items[at].menu.iter().all(|row| row.label != "Use this take"));
     // The take itself, which no tile showed before, is read for its tile.
     assert!(!film.items[at].thumbnail.path.is_empty(), "the opened stack's first iteration has no thumbnail");
     program.command(&open.id, open.arg.clone().unwrap());
@@ -1547,6 +1552,11 @@ fn save_makes_an_edit_the_takes_next_iteration() {
     send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-1.png", true)])]);
     strip(&program, |film| !film.groups.is_empty());
     program.command("take_edit", json!({ "take": "library/r1-1.png" }));
+    // An edit of a take has Save on the toolbar, as ig-dependency-warning shows.
+    program.wait(|message| match message {
+        AppMessage::Toolbar(bar) => bar.items.iter().any(|item| matches!(item, protocol::ToolItem::Button { icon, action: Some(action), .. } if icon == "floppy-disk" && action.id == "save")).then_some(()),
+        _ => None,
+    });
     let saved_as = |program: &mut Program| {
         program.command("save", json!({}));
         until_pong(program).into_iter().find_map(|message| match message {

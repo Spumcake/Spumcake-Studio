@@ -382,7 +382,7 @@ impl Session {
     /// row's thumbnail, written for the host as a raw image, as every
     /// thumbnail is. An image has no words for its corner.
     pub(super) fn preview(&mut self, id: String, path: &str, media_type: &str) -> AppMessage {
-        let failed = |id: String, error: String| AppMessage::Previewed { id, thumbnail: None, badge: String::new(), cues: Vec::new(), error: Some(error) };
+        let failed = |id: String, error: String| AppMessage::Previewed { id, thumbnail: None, badge: String::new(), length: None, cues: Vec::new(), error: Some(error) };
         if !IMAGE_TYPES.contains(&media_type) {
             return failed(id, "Only PNG, JPEG, and WebP images are previewed here.".into());
         }
@@ -406,6 +406,7 @@ impl Session {
             id,
             thumbnail: Some(Thumbnail { path: file.display().to_string(), width, height, revision: self.next_revision }),
             badge: String::new(),
+            length: None,
             cues: Vec::new(),
             error: None,
         }
