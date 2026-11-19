@@ -398,6 +398,9 @@ pub(crate) struct Fix {
     /// What is out of date but made by no step, such as a mix filed by
     /// hand: named on the card as not fixed here.
     not_fixed: Vec<String>,
+    /// What a step makes from those, or from what is made from them: left
+    /// off the card, since remaking it would leave it out of date, and named.
+    waiting: Vec<String>,
 }
 
 impl Fix {
@@ -405,11 +408,22 @@ impl Fix {
     pub(crate) fn not_fixed(&self) -> &[String] {
         &self.not_fixed
     }
+
+    /// What is out of date that this fix leaves, made from what no step
+    /// makes.
+    pub(crate) fn waiting(&self) -> &[String] {
+        &self.waiting
+    }
 }
 
 /// The card's line naming what is out of date but made by no step.
 pub(crate) fn not_fixed_line(artifacts: &[String]) -> String {
     format!("Made by no step, so not fixed here: {}.", artifacts.join(", "))
+}
+
+/// The card's line naming what is made from those, and so left too.
+pub(crate) fn waiting_line(artifacts: &[String]) -> String {
+    format!("Made from what no step makes, so also left: {}.", artifacts.join(", "))
 }
 
 #[derive(Clone, Debug)]
@@ -443,7 +457,7 @@ fn skills_run(argv: &[String], cwd: &Path, vars: &[(String, String)]) -> Result<
 /// each is made from, so a step runs after every fix it refers to, and in
 /// chain order where that leaves a choice; and what is out of date but made
 /// by no step.
-fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<(Vec<(String, String, String)>, Vec<String>), String> {
+fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<(Vec<(String, String, String)>, Vec<String>, Vec<String>), String> {
     let touches: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "pipeline.py", &["touches", pipeline, "--json"]), cwd, vars)?).map_err(|error| format!("What is out of date could not be read: {error}"))?;
     let stale: Vec<&str> = touches.get("out_of_date").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str)).collect();
     let query = "SELECT json_array(c.ord, s.ord, s.chain, s.name, s.artifact, s.refs) FROM step s JOIN chain c ON c.name = s.chain WHERE s.artifact IS NOT NULL AND s.artifact != ''";
@@ -459,8 +473,24 @@ fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline:
         .collect();
     let made_by_a_step: Vec<String> = steps.iter().map(|step| step.artifact.clone()).collect();
     steps.retain(|step| stale.contains(&step.artifact.as_str()));
-    let not_fixed = stale.iter().filter(|artifact| !made_by_a_step.iter().any(|made| made == *artifact)).map(|artifact| artifact.to_string()).collect();
-    Ok((fix_order(steps), not_fixed))
+    let not_fixed: Vec<String> = stale.iter().filter(|artifact| !made_by_a_step.iter().any(|made| made == *artifact)).map(|artifact| artifact.to_string()).collect();
+    let (steps, waiting) = leave_waiting(steps, &not_fixed);
+    Ok((fix_order(steps), not_fixed, waiting))
+}
+
+/// The steps a fix can make whole, and the artifacts of those it leaves: a
+/// step made from what no step makes, or from what is made from that, would
+/// be paid for and still be out of date, so it waits.
+fn leave_waiting(mut steps: Vec<FixOrder>, not_fixed: &[String]) -> (Vec<FixOrder>, Vec<String>) {
+    let mut blocked: Vec<String> = not_fixed.to_vec();
+    let mut waiting = Vec::new();
+    loop {
+        let Some(index) = steps.iter().position(|step| step.uses.iter().any(|used| blocked.contains(used))) else { break };
+        let step = steps.remove(index);
+        blocked.push(step.artifact.clone());
+        waiting.push(step.artifact);
+    }
+    (steps, waiting)
 }
 
 /// A step to fix, with its place and the artifacts its references name.
@@ -954,12 +984,16 @@ impl Runner {
                 }
                 let (cwd, vars, call_name, tool_name) = (folder.to_path_buf(), env.vars.clone(), call.to_string(), tool.to_string());
                 return self.plan_later(call, move || {
-                    let (found, not_fixed) = steps_to_fix(&scripts, &cwd, &vars, &pipeline)?;
+                    let (found, not_fixed, waiting) = steps_to_fix(&scripts, &cwd, &vars, &pipeline)?;
                     if found.is_empty() && not_fixed.is_empty() {
                         return Err(String::from("Nothing is out of date, so there is nothing to fix."));
                     }
                     if found.is_empty() {
-                        return Err(not_fixed_line(&not_fixed));
+                        let mut said = not_fixed_line(&not_fixed);
+                        if !waiting.is_empty() {
+                            said = format!("{said} {}", waiting_line(&waiting));
+                        }
+                        return Err(said);
                     }
                     let (mut plans, mut steps, mut fixed) = (Vec::new(), Vec::new(), Vec::new());
                     for (chain, step, artifact) in found {
@@ -973,7 +1007,7 @@ impl Runner {
                         steps.push(FixStep { chain, step, artifact: artifact.clone(), hash });
                         fixed.push(artifact);
                     }
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed }) })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed, waiting }) })
                 });
             }
             _ => return Begun::Answered(failed(call, "No such tool.")),
@@ -1082,7 +1116,7 @@ impl Runner {
     fn fix_chain(&mut self, call: &str, fix: Fix, approved: Vec<Value>, stand_in: bool) {
         let (answered, cwd, vars) = (call.to_string(), self.cwd.clone(), self.env.clone());
         self.spawn(call, move |stop| {
-            let Fix { scripts, pipeline, steps, not_fixed } = fix;
+            let Fix { scripts, pipeline, steps, not_fixed, waiting } = fix;
             let mut published: HashMap<String, String> = HashMap::new();
             let mut done: Vec<Value> = Vec::new();
             let mut stopped: Option<String> = None;
@@ -1152,6 +1186,9 @@ impl Runner {
             let mut output = json!({ "fixed": done });
             if !not_fixed.is_empty() {
                 output["made_by_no_step"] = json!(not_fixed);
+            }
+            if !waiting.is_empty() {
+                output["made_from_what_no_step_makes"] = json!(waiting);
             }
             if let Some(reason) = &stopped {
                 let left: Vec<&str> = steps.iter().skip(published.len()).map(|step| step.artifact.as_str()).collect();
@@ -1803,6 +1840,8 @@ mod tests {
         harness("pipeline.py", &["step", "001", "the diner", "shot", "--order", "3", "--skill", "create-final-animation", "--endpoint", endpoint, "--template", "The shot.", "--refs", r#"[{"artifact": "the diner: keyframe", "role": "image 1"}]"#, "--artifact", "the diner: shot"]);
         // A step early in the chain made from a later one's artifact.
         harness("pipeline.py", &["step", "001", "the diner", "poster", "--order", "2", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The poster.", "--refs", r#"[{"artifact": "the diner: shot", "role": "image 1"}]"#, "--artifact", "the diner: poster"]);
+        // And one made from what no step makes, which a fix cannot make whole.
+        harness("pipeline.py", &["step", "001", "the diner", "card", "--order", "5", "--skill", "generate-keyframe", "--endpoint", endpoint, "--template", "The card.", "--refs", r#"[{"artifact": "the diner: mix", "role": "image 1"}]"#, "--artifact", "the diner: card"]);
         // Each step made and published as the method does by hand.
         let make = |step: &str, artifact: &str, from: Option<&str>| {
             let made: Value = serde_json::from_str(harness("pipeline.py", &["rerun", "001", "--step", "the diner", step, "--stand-in", "--json"]).lines().last().unwrap()).unwrap();
@@ -1824,6 +1863,7 @@ mod tests {
         std::fs::write(folder.join("agent/mix.png"), b"mix").unwrap();
         let mix = harness("request.py", &["resource", "agent/mix.png", "--name", "mix", "--from", &shot]).lines().last().unwrap().trim().to_string();
         harness("pipeline.py", &["publish", "001", "the diner: mix", "--file", &mix, "--chain", "the diner", "--from", "the diner: shot", "input"]);
+        make("card", "the diner: card", Some("the diner: mix"));
         // The sheet made again, so what was made from it is out of date.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         make("sheet", "the diner: sheet", None);
@@ -1838,6 +1878,7 @@ mod tests {
         let steps: Vec<&str> = fix.steps.iter().map(|step| step.step.as_str()).collect();
         assert_eq!(steps, ["keyframe", "shot", "poster"], "the card did not hold exactly what is out of date, each after what it is made from");
         assert_eq!(fix.not_fixed(), ["the diner: mix"], "what no step makes was dropped without a word");
+        assert_eq!(fix.waiting(), ["the diner: card"], "a step made from what no step makes was planned and would be paid for");
         assert_eq!(plans[1]["references"][0][FIXED_BY], "the diner: keyframe", "the shot's reference to the keyframe's fix was not marked");
         assert!(runner.answer(true).is_none());
         let start = std::time::Instant::now();
@@ -1851,7 +1892,7 @@ mod tests {
         assert!(answer.ok, "the fix stopped: {:?}", answer.output);
         let touches: Value = serde_json::from_str(&harness("pipeline.py", &["touches", "001", "--json"])).unwrap();
         let left: Vec<&str> = touches["out_of_date"].as_array().unwrap().iter().filter_map(|entry| entry["artifact"].as_str()).collect();
-        assert_eq!(left, ["the diner: mix"], "the chain is still out of date after its fix, past what no step makes");
+        assert_eq!(left, ["the diner: card", "the diner: mix"], "the chain is still out of date after its fix, past what no step makes");
         let log = std::fs::read_to_string(folder.join("pipeline/001/runs.jsonl")).unwrap();
         assert_eq!(log.lines().filter(|line| line.contains("\"fixes\"")).count(), 3, "the fixes were not published as fixes");
         let _ = std::fs::remove_dir_all(&folder);
