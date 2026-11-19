@@ -83,7 +83,7 @@ pub(crate) fn tools() -> Vec<Tool> {
         },
         Tool {
             name: RERUN_STEP.into(),
-            description: "Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step; publishing the take comes first.".into(),
+            description: "Make a take of a pipeline's step with pipeline.py rerun: the first that is out of date, the first a change reaches, or the one named. Its plan is shown to the user and runs only on their yes. It stops after that one step.".into(),
             input: json!({
                 "type": "object",
                 "properties": {
@@ -289,8 +289,8 @@ pub(crate) fn spends(argv: &[String]) -> bool {
     })
 }
 
-/// Whether a command publishes into canon, which only the publish card
-/// does. A command given to a shell is read as the words it runs.
+/// Whether a command publishes into canon, which only the cells do. A
+/// command given to a shell is read as the words it runs.
 pub(crate) fn publishes(argv: &[String]) -> bool {
     let words: Vec<String> = argv.iter().flat_map(|arg| arg.split_whitespace().map(|word| word.trim_matches(['"', '\'', ';']).to_string())).collect();
     words.windows(2).any(|pair| pair[0].ends_with("pipeline.py") && pair[1] == "publish")
@@ -688,7 +688,7 @@ impl Runner {
                     return Begun::Answered(failed(call, "This command spends money, so it is never run as a plain command. Send a request with send_request and its spec, or a step with rerun_step, so the user approves its plan."));
                 }
                 if publishes(&argv) {
-                    return Begun::Answered(failed(call, "Publishing goes through the publish card, never a plain command: put the take into the chain with publish_take."));
+                    return Begun::Answered(failed(call, "Canon follows from the cells; nothing is published by command."));
                 }
                 // A command that only reads runs at once, with no question.
                 if only_reads(&argv, env.scripts.as_deref(), folder) {
@@ -1270,7 +1270,7 @@ mod tests {
     /// shell, and a plan with no hash run unbound.
     #[test]
     fn a_spend_through_a_shell_and_a_plan_with_no_hash_are_refused() {
-        assert!(publishes(&argv(&["python3", "/s/scripts/pipeline.py", "publish", "002", "the diner: layout"])), "a publish ran past the publish card");
+        assert!(publishes(&argv(&["python3", "/s/scripts/pipeline.py", "publish", "002", "the diner: layout"])), "a publish ran as a command");
         assert!(publishes(&argv(&["sh", "-c", "python3 pipeline.py publish 002 x"])));
         assert!(!publishes(&argv(&["python3", "/s/scripts/pipeline.py", "touches", "002"])));
         assert!(spends(&argv(&["sh", "-c", "python3 /s/scripts/request.py run agent/spec.json"])));

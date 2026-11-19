@@ -26,9 +26,12 @@
 //!   card, answered `step_ran` with the take it made. It needs no assistant.
 
 use super::HostWindow;
-use super::publishing::{Asked, Asker, Card, Delivery};
+use super::publishing::{Asked, Card, Delivery};
+#[cfg(test)]
+use super::publishing::Asker;
 use crate::publish_card::PublishCardView;
 use crate::runner::ScriptEnv;
+use eframe::egui;
 use protocol::{CanonVersion, HostMessage};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -50,11 +53,52 @@ enum Done {
     Published(Asked, Result<(String, Option<u32>), String>),
 }
 
+/// A Save waiting on the warning `ig-dependency-warning` shows: the take,
+/// the file saved, and the warning's words.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IterationAsk {
+    app: usize,
+    tab: String,
+    cell: String,
+    path: String,
+    source: String,
+    /// "Take 3 is in use as a dependency, …".
+    pub warning: String,
+    /// "2 takes in Shot 12 and Shot 13 were made from it."
+    pub made_from: String,
+}
+
+/// What a take ask came to.
+enum TakeDone {
+    Used { app: usize, tab: String, cell: String, path: String, result: Result<String, String> },
+    Saved { app: usize, tab: String, cell: String, path: String, result: Result<Option<String>, String> },
+    Ignored { app: usize, tab: String, cell: String, path: String, result: Result<(), String> },
+    /// The asset is in use and other work was made from it.
+    Warn(IterationAsk),
+}
+
+/// The warning's title, as `ig-dependency-warning` shows it.
+const SAVE_ITERATION_TITLE: &str = "Save a new iteration?";
+const SAVE_ITERATION: &str = "Save iteration";
+/// A take Use cannot put in use, since no recipe's step makes it.
+const IN_NO_RECIPE: &str = "This take is in no recipe yet, so it cannot be put in use.";
+/// A step that names no artifact to publish a take as.
+const NO_ARTIFACT: &str = "Its step names no artifact to put the take in use as.";
+/// A take that is no asset's, so it has nothing to iterate or ignore.
+const NO_ASSET: &str = "This take is not one of the project's assets.";
+
 /// The publishing job running, if any, and the delivery the Deliver card
 /// shows.
 #[derive(Default)]
 pub(crate) struct Runs {
     working: Option<Receiver<Done>>,
+    /// What workspaces asked of their takes, each with its workspace, the
+    /// cell's id, and the cell's step, waiting their turn.
+    take_queue: std::collections::VecDeque<(usize, String, String, Option<protocol::StepRef>, String, crate::process::TakeAsk)>,
+    /// The take ask running, if any.
+    taking: Option<Receiver<TakeDone>>,
+    /// A Save on an asset other work was made from, waiting on the warning.
+    pub iteration_warning: Option<IterationAsk>,
     /// Checked, and waiting for the user's answer on the Deliver card.
     pub deliver_card: Option<Delivery>,
     /// Confirmed on the Deliver card, to carry out.
@@ -535,6 +579,173 @@ fn carry(place: &Place, card: &Card, commit: bool) -> Result<(String, Option<u32
     Ok((file, Some(version)))
 }
 
+/// The take's number in its round, as the filmstrip counts it: its place
+/// among its report's outputs.
+fn take_number(place: &Place, path: &str) -> Option<usize> {
+    let shown: Value = serde_json::from_str(&place.script("request.py", &["show", path]).ok()?).ok()?;
+    let outputs = shown.get("outputs").and_then(Value::as_array)?;
+    outputs.iter().position(|output| output.as_str() == Some(path)).map(|index| index + 1)
+}
+
+/// The project's assets, read through Skills' own scripts.
+fn assets_of(place: &Place) -> Result<Vec<crate::assets::Asset>, String> {
+    crate::assets::read_assets(&place.scripts, &place.folder, &place.vars, &place.pipeline)
+}
+
+/// The asset whose take, or one of whose iterations, is at `path`.
+fn asset_at(assets: Vec<crate::assets::Asset>, path: &str) -> Result<crate::assets::Asset, String> {
+    assets.into_iter().find(|asset| asset.files().any(|file| file == path)).ok_or_else(|| String::from(NO_ASSET))
+}
+
+/// Ignore: the take's artifact kept as it is, with Skills' own `keep`, so
+/// Claude Code reads it as kept too.
+fn ignore_take(place: &Place, path: &str) -> Result<(), String> {
+    let asset = asset_at(assets_of(place)?, path)?;
+    let Some(artifact) = asset.artifact.filter(|_| asset.in_use) else { return Ok(()) };
+    place.script("pipeline.py", &["keep", &place.pipeline, &artifact, "--reason", protocol::IGNORED_REASON]).map(|_| ())
+}
+
+/// Use this take: the asset of the take at `path`, at its latest
+/// iteration, published as its own step's artifact, beside the cell's
+/// assets already in use. A take whose step's
+/// artifact holds another take already gets a step of its own at the same
+/// place, the next alternative, as Generate again makes one. Returns the
+/// artifact.
+fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::StepRef>, path: &str) -> Result<String, String> {
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+    // The step its report names, or else the cell's.
+    let named = request_of(place, path)
+        .and_then(|request| place.script("request.py", &["show", &request]).ok())
+        .and_then(|shown| serde_json::from_str::<Value>(&shown).ok())
+        .and_then(|record| Some(protocol::StepRef { chain: record.get("chain")?.as_str()?.to_string(), step: record.get("step")?.as_str()?.to_string() }));
+    let step = named.or(cell_step).ok_or_else(|| String::from(IN_NO_RECIPE))?;
+    let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned().ok_or_else(|| String::from(NO_ARTIFACT))?;
+    // The asset is put in use at its latest iteration, canon as the guide
+    // has it; one already in use stays as it is.
+    let asset = asset_at(assets_of(place)?, path)?;
+    if let Some(in_use) = asset.artifact.clone().filter(|_| asset.in_use) {
+        return Ok(in_use);
+    }
+    let latest = asset.canonical().to_string();
+    let holds = canon.files.get(&artifact).filter(|file| canon.published.contains(*file));
+    let artifact = match holds {
+        None => artifact,
+        Some(_) => alternative_step(place, &canon, &step, &artifact)?,
+    };
+    let asked = Asked::Publish { asker: super::publishing::Asker::Workspace { app, tab: tab.to_string() }, artifact: artifact.clone(), source: latest, from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+    let view = prepare(place, &asked)?;
+    carry(place, &Card { asked, view }, false)?;
+    Ok(artifact)
+}
+
+/// A new step at `step`'s place, the next alternative, `"<step>, N"`,
+/// with its prompt, references, and settings as they stand and its own
+/// artifact, `"<element>: <role>, N"`. Returns the artifact.
+fn alternative_step(place: &Place, canon: &crate::prompt_page::Canon, step: &protocol::StepRef, artifact: &str) -> Result<String, String> {
+    let read: Value = serde_json::from_str(&place.script("pipeline.py", &["step", &place.pipeline, &step.chain, &step.step, "--show"])?).map_err(|error| format!("The step could not be read: {error}"))?;
+    let text = |key: &str| read.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let order = read.get("ord").and_then(Value::as_i64).ok_or("The step has no place in its chain.")?.to_string();
+    let base = crate::prompt_page::alternative_of(&step.step).0.to_string();
+    let n = (2..).find(|n| !canon.step_orders.contains_key(&(step.chain.clone(), format!("{base}, {n}")))).unwrap_or(2);
+    let (name, artifact) = (format!("{base}, {n}"), format!("{}, {n}", crate::prompt_page::alternative_of(artifact).0));
+    let template = text("template");
+    let template = if template.starts_with('@') { format!("@{}", crate::prompt_page::write_template(&place.folder, &template)?) } else { template };
+    let (skill, endpoint, refs) = (text("skill"), text("endpoint"), text("refs"));
+    let mut args: Vec<&str> = vec!["step", &place.pipeline, &step.chain, &name, "--order", &order, "--artifact", &artifact];
+    for (flag, value) in [("--skill", &skill), ("--endpoint", &endpoint), ("--template", &template), ("--refs", &refs)] {
+        if !value.is_empty() {
+            args.extend([flag, value.as_str()]);
+        }
+    }
+    place.script("pipeline.py", &args)?;
+    Ok(artifact)
+}
+
+/// Whether a Save on the asset at `path` waits on the warning: the asset is
+/// in use and other work in use was made from it. Returns the warning's
+/// words when it does.
+fn iteration_warning(place: &Place, path: &str) -> Result<Option<(String, String)>, String> {
+    let assets = assets_of(place)?;
+    let asset = asset_at(assets.clone(), path)?;
+    let Some(artifact) = asset.artifact.clone().filter(|_| asset.in_use) else { return Ok(None) };
+    let reached: Value = serde_json::from_str(&place.script("pipeline.py", &["touches", &place.pipeline, "--artifact", &artifact, "--json"])?).map_err(|error| format!("What uses it could not be read: {error}"))?;
+    let reached: Vec<&str> = reached.get("artifacts").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).filter(|reached| *reached != artifact).collect();
+    let made: Vec<&crate::assets::Asset> = assets.iter().filter(|other| other.in_use && other.artifact.as_deref().is_some_and(|other| reached.contains(&other))).collect();
+    if made.is_empty() {
+        return Ok(None);
+    }
+    // Each cell once, by its chain and place, named as its step is, with
+    // its chain when two chains have a step of the same name.
+    let mut cells: Vec<(Option<(String, i64)>, String, String)> = Vec::new();
+    for other in &made {
+        let step = other.artifact.as_deref().and_then(|artifact| artifact.split_once(": ").map(|(_, role)| crate::prompt_page::alternative_of(role).0.to_string())).unwrap_or_default();
+        let chain = other.cell.as_ref().map(|(chain, _)| chain.clone()).unwrap_or_default();
+        if !step.is_empty() && !cells.iter().any(|(cell, name, _)| (other.cell.is_some() && *cell == other.cell) || (other.cell.is_none() && *name == step)) {
+            cells.push((other.cell.clone(), step, chain));
+        }
+    }
+    let cells: Vec<String> = cells
+        .iter()
+        .map(|(_, name, chain)| if cells.iter().filter(|(_, other, _)| other == name).count() > 1 && !chain.is_empty() { format!("{name} in {chain}") } else { name.clone() })
+        .collect();
+    let take = take_number(place, &asset.first).map_or_else(|| String::from("This take"), |number| format!("Take {number}"));
+    let warning = format!("{take} is in use as a dependency, and new iterations would break canonical consistency.");
+    let cells = match cells.as_slice() {
+        [] => String::from("other cells"),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let made_from = if made.len() == 1 { format!("1 take in {cells} was made from it.") } else { format!("{} takes in {cells} were made from it.", made.len()) };
+    Ok(Some((warning, made_from)))
+}
+
+/// Save in a workspace: `source` filed as the next iteration of the asset at
+/// `path`, from its latest iteration and with what that iteration was made
+/// from, and, while the asset is in use, published as its artifact's next
+/// version, naming the artifact itself, so Skills records it as an edit.
+/// Studio commits nothing. Returns the file filed.
+fn save_iteration(place: &Place, path: &str, source: &str) -> Result<Option<String>, String> {
+    let asset = asset_at(assets_of(place)?, path)?;
+    let latest = asset.canonical().to_string();
+    let in_use = asset.artifact.clone().filter(|_| asset.in_use);
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+    // What the latest iteration was made from, so the new one keeps it: its
+    // version's sources while it is in use, or else what its own step and
+    // its take's report name, so a later Use can publish it.
+    let sources: Vec<(String, String)> = match (&in_use, &asset.artifact) {
+        (Some(artifact), _) => version_sources(place, artifact, &latest).unwrap_or_default(),
+        (None, Some(artifact)) => sources_of(place, artifact, request_of(place, &asset.first).as_deref(), &asset.first, &[]).unwrap_or_default(),
+        (None, None) => Vec::new(),
+    }
+    .into_iter()
+    .filter(|(name, _)| canon.files.contains_key(name))
+    .collect();
+    let stem = Path::new(source).file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_else(|| String::from("iteration"));
+    let mut printed = Err(String::new());
+    for n in 1..10 {
+        let name = if n == 1 { stem.clone() } else { format!("{stem}-{n}") };
+        let mut args: Vec<&str> = vec!["resource", source, "--name", name.as_str(), "--iterates", latest.as_str()];
+        for (name, _) in &sources {
+            args.extend(["--from", canon.files[name].as_str()]);
+        }
+        printed = place.script("request.py", &args);
+        if !printed.as_ref().is_err_and(|error| error.contains("refusing to overwrite")) {
+            break;
+        }
+    }
+    let printed = printed.map_err(|error| format!("The iteration could not be filed: {error}"))?;
+    let filed = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or("The iteration was filed, but its new name was not given.")?;
+    if let Some(artifact) = &in_use {
+        let chain = chain_of(place, artifact)?.unwrap_or_default();
+        let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact.as_str(), "--file", filed.as_str(), "--chain", chain.as_str(), "--from", artifact.as_str(), "iteration"];
+        for (name, role) in &sources {
+            args.extend(["--from", name.as_str(), role.as_str()]);
+        }
+        place.script("pipeline.py", &args)?;
+    }
+    Ok(Some(filed))
+}
+
 impl HostWindow {
     /// Where publishing runs: the open project's folder, scripts,
     /// and living pipeline.
@@ -542,33 +753,6 @@ impl HostWindow {
         let (folder, env): (PathBuf, ScriptEnv) = self.project_scripts()?;
         let pipeline = crate::prompt_page::living_pipeline(&folder)?;
         Some(Place { scripts: env.scripts?, vars: env.vars, folder, pipeline })
-    }
-
-    /// The assistant's `publish_take`: a take published as a canon
-    /// artifact through the same publish card a workspace's publish shows.
-    /// Its answer comes on the call when the card is answered.
-    pub(super) fn publish_take(&mut self, call: String, input: &Value) -> Option<protocol::ToolResult> {
-        let text = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let (artifact, take) = (text("artifact"), text("take"));
-        if artifact.is_empty() || take.is_empty() {
-            return Some(protocol::ToolResult { call, ok: false, output: serde_json::json!({ "error": "Name the take's file and the canon artifact, \"<element>: <role>\", it is published as." }), images: Vec::new() });
-        }
-        let with = input.get("with").and_then(Value::as_array).map(|with| with.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default();
-        let sources = input
-            .get("from")
-            .and_then(Value::as_array)
-            .map(|from| {
-                from.iter()
-                    .filter_map(|source| {
-                        let artifact = source.get("artifact").and_then(Value::as_str)?.trim().to_string();
-                        let role = source.get("role").and_then(Value::as_str).unwrap_or("").trim().to_string();
-                        (!artifact.is_empty()).then_some((artifact, role))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.publishing.asked.push_back(Asked::Publish { asker: Asker::Assistant { call }, artifact, source: take, from: Vec::new(), with, sources });
-        None
     }
 
     /// The user's answer on the Deliver card: a yes carries it out, a
@@ -626,8 +810,130 @@ impl HostWindow {
 
     /// Called each frame: a job's answer when it ends, and the next job when
     /// none runs and no card waits for the user.
+    /// Takes each workspace's asks of its takes into the queue, each with
+    /// its cell's step, and runs the next when none is running.
+    fn run_take_asks(&mut self) {
+        let mut asked = Vec::new();
+        for (app, started) in self.apps.iter_mut().enumerate() {
+            asked.extend(started.running.declared.take_asks.drain(..).map(|ask| (app, ask)));
+        }
+        for (app, (tab, cell, path, ask)) in asked {
+            let id = cell.item.clone().unwrap_or_default();
+            let step = self.panel_cell(app, &tab, &id).and_then(|cell| cell.step);
+            self.publish_runs.take_queue.push_back((app, tab, id, step, path, ask));
+        }
+        if let Some(taking) = &self.publish_runs.taking {
+            match taking.try_recv() {
+                Ok(done) => {
+                    self.publish_runs.taking = None;
+                    self.take_done(done);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.publish_runs.taking = None,
+            }
+        }
+        if self.publish_runs.iteration_warning.is_some() {
+            return;
+        }
+        let Some((app, tab, cell, step, path, ask)) = self.publish_runs.take_queue.pop_front() else { return };
+        let Some(place) = self.publish_place() else {
+            let error = Some(String::from("This project has no pipeline yet."));
+            self.send(app, match ask {
+                crate::process::TakeAsk::Use => HostMessage::TakeUsed { tab, path, artifact: None, error },
+                crate::process::TakeAsk::SaveIteration { .. } => HostMessage::IterationSaved { tab, path, file: None, error },
+                crate::process::TakeAsk::Ignore => HostMessage::TakeIgnored { tab, path, error },
+            });
+            return;
+        };
+        self.start_take(place, app, tab, cell, step, path, ask, false);
+    }
+
+    /// Runs one take ask on its own thread. A Save already past its warning
+    /// is `warned`.
+    #[allow(clippy::too_many_arguments)]
+    fn start_take(&mut self, place: Place, app: usize, tab: String, cell: String, step: Option<protocol::StepRef>, path: String, ask: crate::process::TakeAsk, warned: bool) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let done = match ask {
+                crate::process::TakeAsk::Use => {
+                    let result = use_take(&place, app, &tab, step, &path);
+                    TakeDone::Used { app, tab, cell, path, result }
+                }
+                crate::process::TakeAsk::Ignore => {
+                    let result = ignore_take(&place, &path);
+                    TakeDone::Ignored { app, tab, cell, path, result }
+                }
+                crate::process::TakeAsk::SaveIteration { source } => match (warned, iteration_warning(&place, &path)) {
+                    (false, Ok(Some((warning, made_from)))) => TakeDone::Warn(IterationAsk { app, tab, cell, path, source, warning, made_from }),
+                    (false, Err(error)) => TakeDone::Saved { app, tab, cell, path, result: Err(error) },
+                    _ => {
+                        let result = save_iteration(&place, &path, &source);
+                        TakeDone::Saved { app, tab, cell, path, result }
+                    }
+                },
+            };
+            let _ = sender.send(done);
+            ctx.request_repaint();
+        });
+        self.publish_runs.taking = Some(receiver);
+    }
+
+    /// A take ask's answer to its workspace, then the cell's takes as they
+    /// now stand.
+    fn take_done(&mut self, done: TakeDone) {
+        let cell = match done {
+            TakeDone::Used { app, tab, cell, path, result } => {
+                let (artifact, error) = match result {
+                    Ok(artifact) => (Some(artifact), None),
+                    Err(error) => (None, Some(error)),
+                };
+                self.send(app, HostMessage::TakeUsed { tab, path, artifact, error });
+                cell
+            }
+            TakeDone::Saved { app, tab, cell, path, result } => {
+                let (file, error) = match result {
+                    Ok(file) => (file, None),
+                    Err(error) => (None, Some(error)),
+                };
+                self.send(app, HostMessage::IterationSaved { tab, path, file, error });
+                cell
+            }
+            TakeDone::Ignored { app, tab, cell, path, result } => {
+                self.send(app, HostMessage::TakeIgnored { tab, path, error: result.err() });
+                cell
+            }
+            TakeDone::Warn(ask) => {
+                self.publish_runs.iteration_warning = Some(ask);
+                return;
+            }
+        };
+        self.send_rounds(&cell);
+    }
+
+    /// The warning before a Save on an asset other work was made from, as
+    /// `ig-dependency-warning` shows it: Save iteration goes ahead, Cancel
+    /// answers with no file and no error.
+    pub(super) fn show_iteration_warning(&mut self, ctx: &egui::Context) {
+        let Some(ask) = self.publish_runs.iteration_warning.clone() else { return };
+        let Some(answer) = crate::plan_card::ask(ctx, SAVE_ITERATION_TITLE, &[ask.warning.clone(), ask.made_from.clone()], SAVE_ITERATION) else { return };
+        self.publish_runs.iteration_warning = None;
+        if !answer {
+            self.send(ask.app, HostMessage::IterationSaved { tab: ask.tab, path: ask.path, file: None, error: None });
+            return;
+        }
+        match self.publish_place() {
+            Some(place) => {
+                let IterationAsk { app, tab, cell, path, source, .. } = ask;
+                self.start_take(place, app, tab, cell, None, path, crate::process::TakeAsk::SaveIteration { source }, true);
+            }
+            None => self.send(ask.app, HostMessage::IterationSaved { tab: ask.tab, path: ask.path, file: None, error: Some(String::from("This project has no pipeline yet.")) }),
+        }
+    }
+
     pub(super) fn run_publishing(&mut self) {
         self.take_step_runs();
+        self.run_take_asks();
         if let Some(working) = &self.publish_runs.working {
             match working.try_recv() {
                 Ok(done) => {
@@ -874,29 +1180,29 @@ mod tests {
         assert!(run("git", &["status", "--porcelain", "--", "pipeline", file.as_str()]).trim().is_empty(), "the publish was not committed");
         assert_eq!(versions(&place, "the diner: layout").unwrap().len(), 1);
 
-        // The assistant's take of a step that refers to the layout records
+        // A take of a step that refers to the layout records
         // it, with its role, as publishing it by hand does.
         skills("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", r#"{"kind": "fal", "model": "stand-in"}"#, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: layout", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
         std::fs::create_dir_all(folder.join("agent")).unwrap();
         std::fs::write(folder.join("agent/keyframe.json"), skills("pipeline.py", &["fill", "001", "the diner", "keyframe"])).unwrap();
         skills("request.py", &["run", "agent/keyframe.json", "--stand-in"]);
         let take = std::fs::read_dir(folder.join("library")).unwrap().flatten().map(|entry| format!("library/{}", entry.file_name().to_string_lossy())).next().unwrap();
-        let by_assistant = |artifact: &str, source: &str| {
-            let asked = Asked::Publish { asker: Asker::Assistant { call: String::from("c1") }, artifact: artifact.into(), source: source.into(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+        let publish_as = |artifact: &str, source: &str| {
+            let asked = Asked::Publish { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: artifact.into(), source: source.into(), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
             let view = prepare(&place, &asked).unwrap();
             carry(&place, &Card { asked, view }, false)
         };
-        by_assistant("the diner: keyframe", &take).unwrap();
+        publish_as("the diner: keyframe", &take).unwrap();
         let recorded = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: keyframe' AND source='the diner: layout'", "--read-only"]);
         assert_eq!(recorded.trim(), "image 1", "the take's made_from was lost");
 
-        // A take whose step lists nothing records what the assistant names,
+        // A take whose step lists nothing records the sources named with it,
         // as the skill has the agent pass it by hand.
         skills("pipeline.py", &["step", "001", "the diner", "sound bed", "--order", "4", "--skill", "generate-sound", "--artifact", "the diner: sound bed"]);
         std::fs::write(folder.join("agent/bed.wav"), b"RIFF").unwrap();
         let bed = skills("request.py", &["resource", "agent/bed.wav", "--name", "bed", "--from", &take]).lines().last().unwrap().trim().to_string();
         let bed_asked = Asked::Publish {
-            asker: Asker::Assistant { call: String::from("c2") },
+            asker: Asker::Workspace { app: 0, tab: String::from("1") },
             artifact: String::from("the diner: sound bed"),
             source: bed,
             from: Vec::new(),
@@ -906,9 +1212,9 @@ mod tests {
         let view = prepare(&place, &bed_asked).unwrap();
         carry(&place, &Card { asked: bed_asked, view }, false).unwrap();
         let named = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
-        assert_eq!(named.trim(), "the beat it scores", "a source the assistant named was lost");
+        assert_eq!(named.trim(), "the beat it scores", "a source named with it was lost");
         // A revert to the bed keeps the source named when it was published.
-        let revert = Asked::Revert { asker: Asker::Assistant { call: String::from("c3") }, artifact: String::from("the diner: sound bed"), file: skills("pipeline.py", &["sql", "001", "SELECT file FROM artifact WHERE id='the diner: sound bed'", "--read-only"]).trim().to_string() };
+        let revert = Asked::Revert { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: String::from("the diner: sound bed"), file: skills("pipeline.py", &["sql", "001", "SELECT file FROM artifact WHERE id='the diner: sound bed'", "--read-only"]).trim().to_string() };
         let view = prepare(&place, &revert).unwrap();
         carry(&place, &Card { asked: revert, view }, false).unwrap();
         let kept = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the diner: sound bed' AND source='the diner: keyframe'", "--read-only"]);
@@ -923,8 +1229,87 @@ mod tests {
         let view = prepare(&place, &asked(vec![String::from("work/Layout.ipx")])).unwrap();
         assert_eq!(view.version, 2);
         carry(&place, &Card { asked: asked(vec![String::from("work/Layout.ipx")]), view }, false).unwrap();
-        let refused = by_assistant("the diner: floor plan", &plan);
+        let refused = publish_as("the diner: floor plan", &plan);
         assert!(refused.as_ref().is_err_and(|error| error.contains("refused")), "a take made from an old input was published: {refused:?}");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches the take answers drifting from Skills' own scripts: a take
+    /// put in use not published as its step's artifact; a second take of
+    /// the same step replacing the first rather than standing beside it; a
+    /// Save on an asset other work was made from going ahead without the
+    /// warning, or filed as anything but its next iteration; what was made
+    /// from it not outlined after; and Ignore not clearing the outline.
+    #[test]
+    fn takes_are_used_iterated_and_ignored_with_the_real_scripts() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("take-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests", "work", "agent"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let skills = |script: &str, args: &[&str]| {
+            let out = Command::new("python3").arg(scripts.join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        skills("pipeline.py", &["new", "001"]);
+        skills("pipeline.py", &["element", "001", "the diner", "--kind", "place"]);
+        skills("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);
+        skills("pipeline.py", &["step", "001", "the diner", "layout", "--order", "1", "--skill", "build-previs", "--artifact", "the diner: layout"]);
+        skills("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", r#"{"kind": "fal", "model": "stand-in"}"#, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: layout", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
+        let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
+        // The layout, filed and published from a workspace's file.
+        std::fs::write(folder.join("work/layout.png"), b"\x89PNG\r\n\x1a\nlayout").unwrap();
+        let asked = Asked::Publish { asker: Asker::Workspace { app: 0, tab: String::from("1") }, artifact: String::from("the diner: layout"), source: String::from("work/layout.png"), from: Vec::new(), with: Vec::new(), sources: Vec::new() };
+        let view = prepare(&place, &asked).unwrap();
+        let (layout, _) = carry(&place, &Card { asked, view }, false).unwrap();
+        // Two takes of the keyframe's step, made with the stand-in.
+        let take = |known: &[String]| {
+            let name = format!("keyframe-{}", known.len() + 1);
+            std::fs::write(folder.join("agent/keyframe.json"), skills("pipeline.py", &["fill", "001", "the diner", "keyframe", "--name", &name])).unwrap();
+            skills("request.py", &["run", "agent/keyframe.json", "--stand-in"]);
+            std::fs::read_dir(folder.join("library")).unwrap().flatten().map(|entry| format!("library/{}", entry.file_name().to_string_lossy())).find(|file| !known.contains(file)).unwrap()
+        };
+        let first = take(&[]);
+        let step = protocol::StepRef { chain: String::from("the diner"), step: String::from("keyframe") };
+        assert_eq!(use_take(&place, 0, "1", Some(step.clone()), &first), Ok(String::from("the diner: keyframe")));
+        let second = take(std::slice::from_ref(&first));
+        assert_eq!(use_take(&place, 0, "1", Some(step), &second), Ok(String::from("the diner: keyframe, 2")), "a second take replaced the first");
+        let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
+        assert_eq!(canon.files.get("the diner: keyframe"), Some(&first), "the first take left use");
+        assert_eq!(canon.files.get("the diner: keyframe, 2"), Some(&second));
+        // A Save on the layout, which both keyframes were made from.
+        let (warning, made_from) = iteration_warning(&place, &layout).unwrap().expect("a Save on a dependency gave no warning");
+        assert!(warning.ends_with("is in use as a dependency, and new iterations would break canonical consistency."), "{warning}");
+        assert_eq!(made_from, "2 takes in keyframe were made from it.");
+        std::fs::write(folder.join("work/layout-edit.png"), b"\x89PNG\r\n\x1a\nedited").unwrap();
+        let filed = save_iteration(&place, &layout, "work/layout-edit.png").unwrap().expect("nothing was filed");
+        let assets = assets_of(&place).unwrap();
+        let layout_asset = assets.iter().find(|asset| asset.first == layout).expect("the layout lost its asset");
+        assert_eq!(layout_asset.canonical(), filed, "the Save was not the layout's next iteration");
+        let history = skills("pipeline.py", &["history", "001", "the diner: layout", "--json"]);
+        assert!(history.contains(&filed), "the iteration was not published as the layout's next version");
+        let keyframe = assets.iter().find(|asset| asset.first == first).unwrap();
+        assert!(keyframe.outlined, "what was made from the layout was not outlined: {keyframe:?}");
+        // A third take, edited before it is used: Use puts in use its edit,
+        // its latest iteration, never the take as first made; and Use again
+        // on an asset in use makes no new step.
+        let third = take(&[first.clone(), second.clone()]);
+        std::fs::write(folder.join("work/third-edit.png"), b"\x89PNG\r\n\x1a\nthird edit").unwrap();
+        let edit = save_iteration(&place, &third, "work/third-edit.png").unwrap().unwrap();
+        let used = use_take(&place, 0, "1", Some(protocol::StepRef { chain: String::from("the diner"), step: String::from("keyframe") }), &third).unwrap();
+        let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
+        assert_eq!(canon.files.get(&used), Some(&edit), "Use left the take's edit out of canon");
+        let steps = skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step WHERE chain='the diner'", "--read-only"]);
+        assert_eq!(use_take(&place, 0, "1", None, &third), Ok(used.clone()));
+        assert_eq!(skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step WHERE chain='the diner'", "--read-only"]), steps, "Use on an asset in use made a new step");
+        // Ignore clears the first keyframe's outline, and not the second's.
+        ignore_take(&place, &first).unwrap();
+        let assets = assets_of(&place).unwrap();
+        assert!(!assets.iter().find(|asset| asset.first == first).unwrap().outlined, "Ignore left the outline");
+        assert!(assets.iter().find(|asset| asset.first == second).unwrap().outlined, "Ignore cleared another take's outline");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
