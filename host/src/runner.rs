@@ -637,11 +637,12 @@ fn same_but_fixed(approved: &Value, now: &Value, published: &HashMap<String, Str
 }
 
 /// Whether a request still at its endpoint was sent as its step's plan is
-/// now: the same prompt, and the same files referred to in order, so its
-/// take, once collected, is the step's own.
+/// now: the same prompt, the same files referred to in order, and the same
+/// model and settings, so its take, once collected, is the step's own.
 fn sent_as_planned(spec: &Value, plan: &Value) -> bool {
     let files = |value: &Value| -> Vec<Value> { value.get("references").and_then(Value::as_array).into_iter().flatten().map(|reference| reference.get("file").cloned().unwrap_or(Value::Null)).collect() };
-    spec.get("prompt") == plan.get("prompt") && files(spec) == files(plan)
+    let endpoint = |value: &Value, key: &str| value.pointer(&format!("/endpoint/{key}")).cloned().unwrap_or(Value::Null);
+    spec.get("prompt") == plan.get("prompt") && files(spec) == files(plan) && endpoint(spec, "model") == endpoint(plan, "model") && endpoint(spec, "settings") == endpoint(plan, "settings")
 }
 
 /// A request still at its endpoint, collected with `request.py collect`,
@@ -1694,6 +1695,9 @@ mod tests {
         assert!(sent_as_planned(&spec, &plan));
         let republished = json!({ "prompt": "The shot.", "references": [{ "order": 1, "file": "library/layout-2.png", "sha256": "b" }] });
         assert!(!sent_as_planned(&spec, &republished), "a request sent from a layout published again since was to be collected");
+        let mut remodelled = plan.clone();
+        remodelled["endpoint"] = json!({ "kind": "fal", "model": "another", "settings": {} });
+        assert!(!sent_as_planned(&spec, &remodelled), "a request sent to another model than the step names now was to be collected");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
