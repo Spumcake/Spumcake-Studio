@@ -72,6 +72,9 @@ pub(crate) enum SettingsChoice {
         key: Option<String>,
     },
     DeleteEndpoint(String),
+    /// An endpoint's token prices, as its form's Prices card holds them,
+    /// replacing those it had.
+    SavePrices { endpoint: String, prices: Vec<crate::workspace::TokenPrice> },
     SaveSkill(SkillSetting),
     /// The assistant's endpoint, beside the Discussion skill, by id.
     ChooseAssistantEndpoint(String),
@@ -104,6 +107,10 @@ pub(crate) struct EndpointForm {
     pub key: String,
     pub has_key: bool,
     pub error: Option<String>,
+    /// The Prices card's fields, by model: text in, image in, and image
+    /// out, in dollars a million tokens, as typed. Filled from the saved
+    /// prices when the card first shows.
+    pub prices: Vec<(String, [String; 3])>,
 }
 
 impl Default for EndpointForm {
@@ -118,6 +125,7 @@ impl Default for EndpointForm {
             key: String::new(),
             has_key: false,
             error: None,
+            prices: Vec::new(),
         }
     }
 }
@@ -127,6 +135,13 @@ const SKILLS_PAGE_LINE: &str = "Each skill's cell chooses where its prompts go."
 /// The endpoint form's row for what an endpoint is for, as the owner
 /// approved on 2026-11-17.
 const ENDPOINT_DESCRIPTION: &str = "Description";
+/// The Prices card on an OpenAI-compatible endpoint's form.
+const PRICES: &str = "Prices";
+const PRICES_LINE: &str = "Dollars a million tokens, as the service publishes them";
+const PRICES_ROW_LINE: &str = "Text in, image in, image out";
+const PRICE_HINTS: [&str; 3] = ["Text in", "Image in", "Image out"];
+const NOT_A_PRICE: &str = "A price is a number of dollars, such as 5 or 0.25.";
+const PRICE_W: f32 = 84.0;
 const ENDPOINT_DESCRIPTION_LINE: &str = "What it is for, which the assistant reads";
 /// A skill's page's line, now that a skill's cell chooses its endpoint and
 /// model, as the owner approved on 2026-11-17.
@@ -287,6 +302,7 @@ impl SettingsPanel {
             key: String::new(),
             has_key,
             error: None,
+            prices: Vec::new(),
         };
         self.go(Page::EndpointForm);
     }
@@ -325,6 +341,9 @@ pub(crate) struct Env<'a> {
     pub uses_file: bool,
     /// Where new projects go, as General shows it.
     pub projects_root: String,
+    /// The models the skills name for OpenAI's own service, each with its
+    /// name: an OpenAI-compatible endpoint's Prices card lists them.
+    pub token_models: Vec<(String, String)>,
 }
 
 /// A model's name as a row shows it: its listed name without the maker,
@@ -960,6 +979,36 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
     row_text(ui, rows[4], rows[4].left() + PAD, key_rect.left() - 8.0, "API key", where_kept);
     let hint = if form.has_key { "Saved. Type to replace it" } else if form.kind == EndpointKind::Openrouter { "Required" } else { "Optional" };
     field(ui, key_rect, "endpoint-key", &mut form.key, false, true, hint);
+    // An OpenAI-compatible endpoint's models priced by their tokens, which
+    // no list gives: the user copies their prices from the service.
+    let priced = editing && form.kind == EndpointKind::Openai && !env.token_models.is_empty();
+    if priced {
+        if form.prices.is_empty() {
+            let id = form.editing.clone().unwrap_or_default();
+            let shown = |value: Option<f64>| value.map(|value| value.to_string()).unwrap_or_default();
+            form.prices = env
+                .token_models
+                .iter()
+                .map(|(model, _)| {
+                    let saved = env.settings.token_prices.iter().find(|price| price.endpoint == id && price.model == *model);
+                    (model.clone(), [shown(saved.and_then(|price| price.input_text)), shown(saved.and_then(|price| price.input_image)), shown(saved.and_then(|price| price.output_image))])
+                })
+                .collect();
+        }
+        gap(ui, 16.0);
+        let rows = card(ui, env.token_models.len() + 1);
+        row_text(ui, rows[0], rows[0].left() + PAD, rows[0].right() - PAD, PRICES, PRICES_LINE);
+        for (row, (model, name)) in rows[1..].iter().zip(&env.token_models) {
+            let Some((_, fields)) = form.prices.iter_mut().find(|(priced, _)| priced == model) else { continue };
+            let width = PRICE_W * 3.0 + 16.0;
+            row_text(ui, *row, row.left() + PAD, row.right() - PAD - width - 8.0, name, PRICES_ROW_LINE);
+            for (index, (field_text, hint)) in fields.iter_mut().zip(PRICE_HINTS).enumerate() {
+                let right = row.right() - PAD - (2 - index) as f32 * (PRICE_W + 8.0);
+                let rect = Rect::from_min_size(pos2(right - PRICE_W, row.center().y - CONTROL_H / 2.0), vec2(PRICE_W, CONTROL_H));
+                field(ui, rect, &format!("price-{model}-{index}"), field_text, false, false, hint);
+            }
+        }
+    }
     if let Some(error) = &form.error {
         gap(ui, 10.0);
         ui.label(egui::RichText::new(error.as_str()).font(ts::small()).color(ts::FAILED));
@@ -995,7 +1044,18 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
             panel.endpoint_form.error = Some(String::from("An endpoint needs a name and an address."));
             return;
         }
+        let prices = match (priced, &form.editing) {
+            (true, Some(id)) => match token_prices(id, &form.prices) {
+                Ok(prices) => Some(SettingsChoice::SavePrices { endpoint: id.clone(), prices }),
+                Err(error) => {
+                    panel.endpoint_form.error = Some(error);
+                    return;
+                }
+            },
+            _ => None,
+        };
         let key = Some(form.key.trim().to_string()).filter(|key| !key.is_empty());
+        choices.extend(prices);
         choices.push(SettingsChoice::SaveEndpoint {
             id: form.editing.clone(),
             kind: form.kind,
@@ -1007,6 +1067,26 @@ fn endpoint_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, ch
         env.probes.clear_form();
         panel.go(Page::Endpoints);
     }
+}
+
+/// The Prices card's fields as prices, a field left empty unknown; or why
+/// one is not a price.
+fn token_prices(endpoint: &str, fields: &[(String, [String; 3])]) -> Result<Vec<crate::workspace::TokenPrice>, String> {
+    let price = |text: &str| -> Result<Option<f64>, String> {
+        let text = text.trim().trim_start_matches('$');
+        if text.is_empty() {
+            return Ok(None);
+        }
+        text.parse::<f64>().ok().filter(|price| price.is_finite() && *price >= 0.0).map(Some).ok_or_else(|| String::from(NOT_A_PRICE))
+    };
+    let mut prices = Vec::new();
+    for (model, [text_in, image_in, image_out]) in fields {
+        let (input_text, input_image, output_image) = (price(text_in)?, price(image_in)?, price(image_out)?);
+        if input_text.is_some() || input_image.is_some() || output_image.is_some() {
+            prices.push(crate::workspace::TokenPrice { endpoint: endpoint.to_string(), model: model.clone(), input_text, input_image, output_image });
+        }
+    }
+    Ok(prices)
 }
 
 /// The endpoint choices a skill or level offers, and which is chosen.
@@ -1468,6 +1548,21 @@ fn level_form(ui: &mut egui::Ui, panel: &mut SettingsPanel, env: &mut Env, choic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a price typed with its dollar sign refused, a word taken as
+    /// a price, a negative one kept, and a model with no prices saved as
+    /// priced at nothing.
+    #[test]
+    fn a_price_is_a_number_of_dollars() {
+        let fields = vec![(String::from("gpt-image-2.6-sunburst"), [String::from("$5"), String::from("10"), String::from(" 40.5 ")]), (String::from("unpriced"), [String::new(), String::new(), String::new()])];
+        let prices = token_prices("images", &fields).unwrap();
+        assert_eq!(prices.len(), 1, "a model with no prices was saved");
+        assert_eq!((prices[0].input_text, prices[0].input_image, prices[0].output_image), (Some(5.0), Some(10.0), Some(40.5)));
+        for wrong in ["five", "-1"] {
+            let fields = vec![(String::from("m"), [String::from(wrong), String::new(), String::new()])];
+            assert_eq!(token_prices("images", &fields), Err(String::from(NOT_A_PRICE)), "{wrong} was taken as a price");
+        }
+    }
 
     /// Catches a search that hides the page a row lives on.
     #[test]
