@@ -662,7 +662,7 @@ mod tests {
         }
         let model = "gpt-image-2.6-sunburst";
         std::fs::write(skill.join("SKILL.md"), "---\nname: generate-keyframe\ndescription: Make keyframes.\n---\n").unwrap();
-        std::fs::write(skill.join("models.json"), json!([{ "service": "openai", "model": model, "name": "OpenAI GPT-Image-2.6 Sunburst", "tokens": { "per_image_in": 2160, "per_image_out": { "1536x864 high": 1078 } } }]).to_string()).unwrap();
+        std::fs::write(skill.join("models.json"), json!([{ "service": "openai", "model": model, "name": "OpenAI GPT-Image-2.6 Sunburst", "tokens": { "per_image_in": 1296, "per_image_out": { "1536x864 high": 1078, "1344x768 high": 983 } } }]).to_string()).unwrap();
         let plan = json!({
             "endpoint": { "kind": "openai-image-edit", "model": model, "settings": { "size": "1536x864", "quality": "high" } },
             "prompt": "p".repeat(400),
@@ -678,12 +678,12 @@ mod tests {
         settings["token_prices"] = json!([{ "endpoint": "images", "model": model, "input_text": 5.0, "input_image": 8.0, "output_image": 30.0 }]);
         std::fs::write(data.join("settings.json"), settings.to_string()).unwrap();
         assert!(!needs_prices(&data, &plan), "a card with prices set still pointed to Settings");
-        // 400 characters at a quarter token each, two images at 2160
+        // 400 characters at a quarter token each, two images at 1296
         // tokens each, and one image made at 1078 tokens: 100 × $5 +
-        // 4320 × $8 + 1078 × $30, a million tokens each.
+        // 2592 × $8 + 1078 × $30, a million tokens each.
         let mut filled = plan.clone();
         fill_from_token_prices(&data, &folder, &mut filled);
-        assert_eq!(filled["estimate"], json!(format!("about $0.07 · {FROM_YOUR_PRICES}")), "a project with no requests yet was not estimated");
+        assert_eq!(filled["estimate"], json!(format!("about $0.054 · {FROM_YOUR_PRICES}")), "a project with no requests yet was not estimated");
         let _ = std::fs::remove_dir_all(&root);
     }
 
