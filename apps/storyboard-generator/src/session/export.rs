@@ -65,8 +65,8 @@ impl Session {
     }
 
     /// The animatic's step made `storyboard`'s animatic as `take`, a file
-    /// in the project, which the publish card now offers: it is the
-    /// animatic's file from now on, as an export's is.
+    /// in the project that joins the step's gallery: it is the animatic's
+    /// file from now on, as an export's is.
     pub(crate) fn step_exported(&mut self, storyboard: draw::document::DrawingId, take: &str, sources: Vec<(String, String)>) {
         let bytes = self.project.as_ref().and_then(|project| std::fs::read(project.join(take)).ok()).unwrap_or_default();
         if let Some(record) = self.storyboards.iter_mut().find(|record| record.id() == storyboard) {

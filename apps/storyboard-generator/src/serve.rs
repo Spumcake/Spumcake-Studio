@@ -81,7 +81,7 @@ struct Sent {
 /// One Storyboard Generator session behind the protocol. `run` feeds it standard
 /// input; a test can feed it the same messages in-process.
 pub struct Server {
-    session: Session,
+    pub(crate) session: Session,
     chrome: Chrome,
     waiting: Option<(String, Waiting)>,
     next_request: u64,
@@ -408,10 +408,8 @@ impl Server {
             | HostMessage::CellBecameStep { .. }
             | HostMessage::View3dCamera { .. }
             | HostMessage::View3dPicked { .. } | HostMessage::History { .. } | HostMessage::TransportTime { .. } | HostMessage::Delivered { .. }
-            | HostMessage::TouchesRead { .. } => {}
-            HostMessage::Published { artifact, file, error, .. } => {
-                self.session.published(&artifact, &file, error.as_deref());
-            }
+            | HostMessage::TouchesRead { .. }
+            | HostMessage::Published { .. } => {}
             HostMessage::CanonRows { id, rows, error } => self.session.canon_rows(&id, &rows, error.as_deref()),
             HostMessage::Filed { id, file, error } => self.session.filed(&id, &file, error.as_deref()),
             HostMessage::StepEdited { id, error } => self.session.step_edited(&id, error.as_deref()),
@@ -1047,9 +1045,6 @@ impl Server {
             self.sent.timeline = Some(timeline);
         }
         self.notice_updates(&mut out);
-        for (artifact, source, from) in self.session.take_publishes() {
-            out.push(AppMessage::Publish { tab: tab.clone(), artifact, source, from, with: Vec::new() });
-        }
         out.extend(self.session.take_outgoing());
         let stage = crate::sheet::stage(self.session.active_storyboard(), tab);
         let stage = self.session.keyed_stage(stage);

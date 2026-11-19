@@ -40,6 +40,18 @@ enum Entry {
 }
 
 impl Entry {
+    /// The films it holds show `new` where they showed `old`.
+    fn repath(&mut self, old: &str, new: &str) {
+        match self {
+            Entry::Draw { .. } => {}
+            Entry::Film { before, after, .. } => {
+                before.repath(old, new);
+                after.repath(old, new);
+            }
+            Entry::Batch(entries) => entries.iter_mut().for_each(|entry| entry.repath(old, new)),
+        }
+    }
+
     fn at(&self) -> Option<View> {
         match self {
             Entry::Draw { at, .. } | Entry::Film { at, .. } => Some(*at),
@@ -78,9 +90,13 @@ pub struct Record {
     /// The project's assembly this storyboard was opened from or last saved
     /// as, with each time as read.
     assembly: Option<crate::assembly::Read>,
-    /// Holds published as rough boards before the storyboard read any
-    /// animatic, as a new film's are until its first save takes them.
-    loose_boards: Vec<crate::assembly::RoughBoard>,
+    /// Drawn holds filed before the storyboard read any animatic, as a new
+    /// film's are until its first save takes them.
+    loose_boards: Vec<crate::assembly::FiledHold>,
+    /// What its image keys and sounds show, by canon: each file placed, by
+    /// the canon artifact it is an iteration of, so the timeline follows the
+    /// artifact's latest iteration.
+    artifacts: std::collections::BTreeMap<String, String>,
     id: DrawingId,
     name: String,
     generated_name: String,
@@ -126,6 +142,7 @@ impl Record {
             exported: None,
             assembly: None,
             loose_boards: Vec::new(),
+            artifacts: std::collections::BTreeMap::new(),
             id,
             generated_name: name.clone(),
             name,
@@ -227,14 +244,46 @@ impl Record {
         }
     }
 
-    pub fn loose_boards(&self) -> &[crate::assembly::RoughBoard] {
+    pub fn loose_boards(&self) -> &[crate::assembly::FiledHold] {
         &self.loose_boards
     }
 
     /// Kept beside the film, as what it read is.
-    pub fn set_loose_boards(&mut self, boards: Vec<crate::assembly::RoughBoard>) {
+    pub fn set_loose_boards(&mut self, boards: Vec<crate::assembly::FiledHold>) {
         if self.loose_boards != boards {
             self.loose_boards = boards;
+            self.dirty = true;
+        }
+    }
+
+    /// An artifact it shows has a later iteration, `new`, in place
+    /// of `old`: the film shows it, and so does every film its undo and redo
+    /// would bring back, so undo never shows an earlier iteration. Not an
+    /// undo step. True when the film changed.
+    pub fn follow_iteration(&mut self, old: &str, new: &str) -> bool {
+        let changed = self.film.repath(old, new);
+        for entry in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            entry.repath(old, new);
+        }
+        if let Some(artifact) = self.artifacts.remove(old) {
+            self.artifacts.insert(new.to_string(), artifact);
+            self.dirty = true;
+        }
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
+    /// Each file it shows, by the canon artifact it is.
+    pub fn artifacts(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.artifacts
+    }
+
+    /// Kept beside the film, as what it read is.
+    pub fn set_artifacts(&mut self, artifacts: std::collections::BTreeMap<String, String>) {
+        if self.artifacts != artifacts {
+            self.artifacts = artifacts;
             self.dirty = true;
         }
     }

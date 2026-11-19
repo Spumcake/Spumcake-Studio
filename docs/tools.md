@@ -2,7 +2,7 @@
 
 Every tool Spumcake Studio's assistant can be offered, as the host and each workspace declare them. This file is written from the code by `UPDATE_TOOL_CATALOGUE=1 cargo test -p inpainter tool_catalogue`, and a check fails while it is out of date; do not edit it by hand. A workspace's tools also take `tab`, the tab they act on, which the host adds. Besides the tools below, each skill a person makes in Settings is offered as a tool of its own, in the host's "Your skills" group.
 
-118 tools.
+116 tools.
 
 ## The host
 
@@ -121,14 +121,12 @@ Make and time the film's clips and its sound, and inside a clip its layers, keyf
 - **`storyboard-generator__clips__trim_sound`**: Set where a sound starts on the film, where it starts inside its own sound, and its length, as dragging its edges and its page do. Takes `sound` (integer, required), `at` (integer), `from` (integer), `length` (integer).
 - **`storyboard-generator__clips__set_sound_volume`**: Set a sound's volume, as its page does. Takes `sound` (integer, required), `volume` (number, required).
 - **`storyboard-generator__clips__delete_sound`**: Take a sound off its track. Its file stays where it is in the project. Takes `sound` (integer, required).
-- **`storyboard-generator__clips__publish_sound`**: Offer a placed sound on the publish card as canon, under the film and named after its file, as Publish sound does, so the animatic can use it. The user approves it on the publish card. A sound already canon has nothing to publish. Takes `sound` (integer, required).
 - **`storyboard-generator__clips__set_listening_volume`**: Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step. Takes `volume` (number, required).
 - **`storyboard-generator__clips__read_sound`**: How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound. Takes `end` (integer, required), `start` (integer, required).
-- **`storyboard-generator__clips__export_animatic`**: Export the animatic: the project's animatic step makes it again, as build-animatic does, after the timing is saved when it differs, and its take is offered for publishing. Returns the step at once; list_items says when it is done. Takes nothing.
+- **`storyboard-generator__clips__export_animatic`**: Export the animatic: the project's animatic step makes it again, as build-animatic does, after its drawn holds are filed and the timing is saved when it differs; its video joins the step's gallery as a take, and nothing is published. Returns the step at once; list_items says when it is done. Takes nothing.
 - **`storyboard-generator__clips__list_items`**: Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed. Takes nothing.
 - **`storyboard-generator__clips__insert_image_key`**: Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does. Takes `image` (string, required).
-- **`storyboard-generator__clips__publish_hold`**: Publish the open clip's hold under the playhead, drawing and all, as its rough board, as Publish hold does, so the animatic can use it. The user approves it on the publish card. Takes nothing.
-- **`storyboard-generator__clips__save_timing`**: Save the storyboard's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published. Takes nothing.
+- **`storyboard-generator__clips__save_timing`**: Save the storyboard's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, or the bed is muted. Drawn holds are filed as plain files first, never published. Takes nothing.
 - **`storyboard-generator__clips__follow_retime`**: Take the timing the project's animatic step now names, after it was retimed in another tool, as one undo step, as Follow does. Takes nothing.
 - **`storyboard-generator__clips__render_again`**: Render an item again from what made it: the animatic's step runs again. Takes `item` (string, required).
 

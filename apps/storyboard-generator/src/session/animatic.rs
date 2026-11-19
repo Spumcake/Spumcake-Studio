@@ -1,12 +1,13 @@
 //! The storyboard as the project's animatic, in every project, organized the
 //! way the Last order benchmark is: opening the animatic from its assembly
-//! file, saving the film's timing as a new one, image keys, and holds
-//! published as rough boards. Filing a file into the project and pointing
-//! the animatic's step at it are the host's, through Spumcake-Skills'
-//! scripts; this keeps what the storyboard read and what it would write.
+//! file, saving the film's timing as a new one, image keys, and drawn holds
+//! filed as plain files, never published, so the timing can name them.
+//! Filing a file into the project and pointing the animatic's step at it
+//! are the host's, through Spumcake-Skills' scripts; this keeps what the
+//! storyboard read and what it would write.
 
 use super::Session;
-use crate::assembly::{Assembly, Hold, Notes, RoughBoard};
+use crate::assembly::{Assembly, Hold, Notes, FiledHold};
 use crate::film::Clip;
 use crate::record::Record;
 use draw::document::DrawingId;
@@ -29,13 +30,6 @@ pub(crate) fn hold_stamp(record: &Record, clip: &Clip, start: u32) -> String {
         })
         .collect();
     protocol::fingerprint(Value::Array(shown).to_string().as_bytes())
-}
-
-/// A hold's rough board, as `build-animatic` names it, under the film as
-/// Last order names a shot's images: "Last order: rough board, Shot 2",
-/// as the owner approved on 2026-11-17.
-pub fn rough_board(film: &str, shot: &str) -> String {
-    format!("{film}: rough board, {shot}")
 }
 
 impl Session {
@@ -148,8 +142,8 @@ impl Session {
     }
 
     /// A clip's holds, each with the image it would be saved as: an image
-    /// key's image alone, or the rough board it was published as; none
-    /// while it has drawing that is not published.
+    /// key's image alone, or the file its drawing was filed as; none while
+    /// it has drawing not filed yet.
     pub(crate) fn holds_of(&self, clip: u64) -> Vec<Hold> {
         let record = self.active_storyboard();
         let Some(clip) = record.film().clip(clip) else {
@@ -194,14 +188,14 @@ impl Session {
 
     /// The host filed the saved timing of `storyboard` as `path`: the
     /// storyboard reads it as what it last saved, keeping the holds it
-    /// published. False when the storyboard was closed.
+    /// filed. False when the storyboard was closed.
     pub fn timing_saved(&mut self, storyboard: DrawingId, assembly: Assembly, notes: &Notes, path: &str, fingerprint: &str) -> bool {
         let Some(index) = self.index_of(storyboard) else {
             return false;
         };
         let record = &mut self.storyboards[index];
         let was = record.assembly().cloned();
-        // What it published before it read any animatic is kept from now
+        // What it filed before it read any animatic is kept from now
         // with what it read.
         let mut boards = was.as_ref().map(|read| read.boards.clone()).unwrap_or_default();
         boards.extend(record.loose_boards().iter().cloned());
@@ -213,15 +207,14 @@ impl Session {
     }
 
     /// A hold of a clip of `storyboard`, from its frame `frame`, showing
-    /// what `stamp` stamps, was published as a rough board whose file is
-    /// `file`.
-    pub fn hold_published(&mut self, storyboard: DrawingId, clip: u64, frame: u32, stamp: &str, file: &str) {
+    /// what `stamp` stamps, was filed as `file`.
+    pub fn hold_filed_as(&mut self, storyboard: DrawingId, clip: u64, frame: u32, stamp: &str, file: &str) {
         let Some(index) = self.index_of(storyboard) else {
             return;
         };
         let record = &mut self.storyboards[index];
-        let board = RoughBoard { clip, frame, file: file.to_string(), stamp: stamp.to_string() };
-        // Before it read any animatic, as a new film's storyboard, the board
+        let board = FiledHold { clip, frame, file: file.to_string(), stamp: stamp.to_string() };
+        // Before it read any animatic, as a new film's storyboard, the hold
         // is kept on the storyboard itself.
         let Some(mut read) = record.assembly().cloned() else {
             let mut boards = record.loose_boards().to_vec();
@@ -249,38 +242,37 @@ impl Session {
         (gain_db > 0.0 && playing.volume >= 1.0).then_some(gain_db)
     }
 
-    /// Publish hold: the hold of the open clip under the playhead, composited
-    /// as the export draws it, written as a PNG in `work/`, and asked to
-    /// be published as its rough board, made from the images its keys
-    /// show. The storyboard in `work/` is never named as an input. Returns
-    /// the artifact asked for, or why not.
-    pub fn publish_hold(&mut self) -> Result<String, String> {
+    /// The drawn holds of the active storyboard not filed yet, as they are
+    /// now: each clip's, with the hold.
+    pub(crate) fn holds_to_file(&self) -> Vec<(u64, Hold)> {
+        let clips: Vec<u64> = self.film().clips.iter().map(|clip| clip.id).collect();
+        clips.into_iter().flat_map(|clip| self.holds_of(clip).into_iter().filter(|hold| hold.image.is_none() && !hold.blank).map(move |hold| (clip, hold))).collect()
+    }
+
+    /// Writes a hold, composited as the export draws it, as an RGB PNG in
+    /// `work/`: its path there, relative to the project, the images under
+    /// its drawing, and its stamp.
+    fn write_hold(&mut self, clip_id: u64, hold: &Hold) -> Result<(String, Vec<String>, String, std::path::PathBuf), String> {
         let project = self.project.clone().ok_or("No project is open.")?;
-        let nothing = || "that hold has nothing to publish".to_string();
-        let view = self.view();
-        let clip_id = view.clip.ok_or_else(nothing)?;
-        let holds = self.holds_of(clip_id);
-        let hold = holds.iter().rev().find(|hold| hold.start <= view.frame).ok_or_else(nothing)?.clone();
+        let nothing = || "that hold has nothing to file".to_string();
         let clip = self.film().clip(clip_id).ok_or_else(nothing)?.clone();
-        let tracks = Vec::new();
-        let mut plan = crate::export::plan(self.active_storyboard(), tracks, Some(project.as_path()));
+        let mut plan = crate::export::plan(self.active_storyboard(), Vec::new(), Some(project.as_path()));
         let shown = *plan.frames.get((clip.start + hold.start) as usize).ok_or_else(nothing)?;
         let pixels = crate::export::pixels(&mut crate::look::Looker::new(), &mut plan, shown);
         // Written in `work/`, the setup's own folder, which the host files
-        // into the project with `request.py resource` before publishing.
-        let folder = project.join("work");
+        // into the project with `request.py resource`.
+        let folder = project.join(super::WORK);
         std::fs::create_dir_all(&folder).map_err(|error| crate::store::reason(&error))?;
-        let base = format!("{}-{}-rough-board-{}", self.active_id().get(), clip.name.replace(' ', "-").to_lowercase(), hold.start + 1);
+        let base = format!("{}-{}-hold-{}", self.active_id().get(), clip.name.replace(' ', "-").to_lowercase(), hold.start + 1);
         let name = (1..1000).map(|n| if n == 1 { format!("{base}.png") } else { format!("{base}-{n}.png") }).find(|name| !folder.join(name).exists()).unwrap_or_else(|| format!("{base}.png"));
         // As RGB, as keyframes are: `assemble.py` joins its frames with
         // ffmpeg's concat, which cuts the video short where one frame's
         // pixel format differs from the others'.
         let rgb: Vec<u8> = pixels.chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
-        let image = image::RgbImage::from_raw(plan.size.0, plan.size.1, rgb).ok_or("that hold has nothing to publish")?;
+        let image = image::RgbImage::from_raw(plan.size.0, plan.size.1, rgb).ok_or_else(nothing)?;
         image.save(folder.join(&name)).map_err(|error| error.to_string())?;
-        let source = format!("work/{name}");
         // Its inputs are the images under its drawing, such as the canon
-        // keyframe, so `touches` follows keyframe to rough board.
+        // keyframe, so `touches` follows a keyframe to the hold drawn on it.
         let mut from: Vec<String> = Vec::new();
         for image in clip.layers.iter().filter(|layer| !layer.folder && clip.shows(layer)).filter_map(|layer| layer.image_at(hold.start)) {
             if !from.iter().any(|seen| seen == image) {
@@ -288,39 +280,71 @@ impl Session {
             }
         }
         let stamp = hold_stamp(self.active_storyboard(), &clip, hold.start);
-        let artifact = rough_board(&self.film_name(), &clip.name);
-        self.publishing.insert(artifact.clone(), (self.active_id(), clip_id, hold.start, stamp, folder.join(&name)));
-        self.to_publish.push((artifact.clone(), source, from));
-        Ok(artifact)
+        Ok((format!("{}/{name}", super::WORK), from, stamp, folder.join(&name)))
     }
 
-    /// The publishes asked for since the last call, for the host.
-    pub fn take_publishes(&mut self) -> Vec<(String, String, Vec<String>)> {
-        std::mem::take(&mut self.to_publish)
-    }
-
-    /// The host's answer to a publish: a hold asked for is now its rough
-    /// board's file, or a card says why not.
-    pub fn published(&mut self, artifact: &str, file: &str, error: Option<&str>) {
-        // Whatever was published, a hold or a sound, the animatic can name it.
-        if error.is_none() && !file.is_empty() {
-            self.note_published(artifact, file);
+    /// Files each drawn hold not filed yet as a plain file, never
+    /// published, so the save can name it: true when any was sent, and the
+    /// save waits for them, then runs again, with the export when
+    /// `then_export` is given.
+    pub(crate) fn file_drawn_holds(&mut self, then_export: Option<Vec<(String, String)>>) -> Result<bool, String> {
+        if !self.hold_filing.is_empty() {
+            return Err("The timing is already being saved.".to_string());
         }
-        let Some((storyboard, clip, frame, stamp, written)) = self.publishing.remove(artifact) else {
+        let holds = self.holds_to_file();
+        if holds.is_empty() {
+            return Ok(false);
+        }
+        let storyboard = self.active_id();
+        let mut asks = Vec::new();
+        for (clip, hold) in &holds {
+            let (path, from, stamp, written) = self.write_hold(*clip, hold)?;
+            asks.push((path, from, stamp, written, *clip, hold.start));
+        }
+        for (path, from, stamp, written, clip, frame) in asks {
+            let id = self.next_request();
+            self.hold_filing.insert(id.clone(), (storyboard, clip, frame, stamp, written));
+            self.outgoing.push(protocol::AppMessage::FileResource { tab: storyboard.get().to_string(), path, from, id: Some(id) });
+        }
+        self.after_filing = Some((storyboard, then_export));
+        Ok(true)
+    }
+
+    /// The host filed a drawn hold: kept as the file the hold was filed as,
+    /// and once every hold is filed the save goes on. A hold that could not
+    /// be filed stops the save, with a card saying why.
+    pub(crate) fn hold_filed(&mut self, id: &str, file: &str, error: Option<&str>) {
+        let Some((storyboard, clip, frame, stamp, written)) = self.hold_filing.remove(id) else {
             return;
         };
-        // Filed, or not wanted: the copy in work/ has done its work.
+        // Filed, or not: the copy in `work/` has done its work.
         let _ = std::fs::remove_file(&written);
-        if let Some(error) = error {
-            self.keep_failed(self.next_notice, "Hold not published", error);
-            self.next_notice += 1;
+        if let Some(error) = error.or(file.is_empty().then_some("The project did not say where it filed the hold.")) {
+            self.hold_filing.clear();
+            let export = self.after_filing.take().is_some_and(|(_, export)| export.is_some());
+            self.timing_refused(error);
+            if export {
+                self.step_export_failed(error);
+            }
             return;
         }
-        // Cancelled on the publish card: nothing was published.
-        if file.is_empty() {
+        self.hold_filed_as(storyboard, clip, frame, &stamp, file);
+        if !self.hold_filing.is_empty() {
             return;
         }
-        self.hold_published(storyboard, clip, frame, &stamp, file);
+        let Some((storyboard, then_export)) = self.after_filing.take() else {
+            return;
+        };
+        if self.active_id() != storyboard {
+            self.activate(storyboard);
+        }
+        let saved = match then_export {
+            Some(_) => self.export_by_step().map(|_| ()),
+            None => self.save_timing(),
+        };
+        if let Err(reason) = saved {
+            self.timing_refused(&reason);
+        }
     }
 
     /// An image's path in the project, from a path a dialog or a tool
@@ -443,25 +467,27 @@ mod tests {
     }
 
     #[test]
-    fn drawing_over_a_keyframe_waits_for_its_board() {
+    fn drawing_over_a_keyframe_waits_for_its_hold_to_be_filed() {
         let (mut session, _) = opened("drawn");
         let second = session.film().clips[1].id;
         session.enter_clip(second);
         stroke(&mut session, 100.0);
         session.leave_clip();
-        assert_eq!(session.timing(Some(8.0)).unwrap_err(), "Shot 2 has drawing that is not published yet. Publish it first.");
+        assert_eq!(session.timing(Some(8.0)).unwrap_err(), "Shot 2 has drawing that is not filed yet.");
+        assert_eq!(session.holds_to_file().len(), 1);
         let stamp = stamp_of(&session, second);
-        session.hold_published(session.active_id(), second, 0, &stamp, "library/shot-2-rough-board.png");
+        session.hold_filed_as(session.active_id(), second, 0, &stamp, "prompts/resources/shot-2-hold-1.png");
         let (saved, _) = session.timing(Some(8.0)).unwrap();
-        assert_eq!(saved.frames[1].image, "library/shot-2-rough-board.png");
-        // Drawn on again, the board is out of date until it is published again.
+        assert_eq!(saved.frames[1].image, "prompts/resources/shot-2-hold-1.png");
+        assert!(session.holds_to_file().is_empty());
+        // Drawn on again, the hold is filed again at the next save.
         session.enter_clip(second);
         stroke(&mut session, 200.0);
         session.leave_clip();
-        assert_eq!(session.timing(Some(8.0)).unwrap_err(), "Shot 2 has drawing that is not published yet. Publish it first.");
-        // Undo takes that stroke back, and the board is the hold's again.
+        assert_eq!(session.holds_to_file().len(), 1);
+        // Undo takes that stroke back, and the filed file is the hold's again.
         session.undo().unwrap();
-        assert_eq!(session.timing(Some(8.0)).unwrap().0.frames[1].image, "library/shot-2-rough-board.png");
+        assert_eq!(session.timing(Some(8.0)).unwrap().0.frames[1].image, "prompts/resources/shot-2-hold-1.png");
         // Undo takes the first stroke back, and the hold is the keyframe's again.
         session.undo().unwrap();
         let (saved, _) = session.timing(Some(8.0)).unwrap();
@@ -496,8 +522,8 @@ mod tests {
     }
 
     #[test]
-    fn holds_are_published_and_sounds_are_filed_into_the_project() {
-        let (mut session, _) = opened("skills");
+    fn holds_and_sounds_are_filed_into_the_project_and_never_published() {
+        let mut session = from_its_step("skills");
         // The project's film, as its canon names it.
         session.film_element = Some("Last order".to_string());
         let dir = session.project().unwrap().to_path_buf();
@@ -506,7 +532,7 @@ mod tests {
         assert_eq!(session.film().sound(take).unwrap().1.file, "library/2026-11-12_20-03-otis-line-1.wav");
         assert!(!dir.join("sounds").exists());
         // One from outside is copied into work/ and filed through the host,
-        // then placed where it was filed.
+        // then placed where it was filed, and nothing is published.
         let outside = std::env::temp_dir().join(format!("storyboard-animatic-outside-{}.wav", std::process::id()));
         std::fs::write(&outside, wav_bytes(RATE, &clicks(24, &[]))).unwrap();
         session.start_import(outside.clone());
@@ -515,56 +541,59 @@ mod tests {
         };
         assert_eq!(path, format!("work/{}", outside.file_name().unwrap().to_string_lossy()));
         assert!(dir.join(&path).is_file());
-        std::fs::create_dir_all(dir.join("prompts/resources")).unwrap();
         std::fs::copy(&outside, dir.join("prompts/resources/2026-11-17_10-00-outside.wav")).unwrap();
         session.filed(&id, "prompts/resources/2026-11-17_10-00-outside.wav", None);
-        // Filed, it is offered as canon under the film, after its file.
-        let Some(protocol::AppMessage::Publish { artifact, source, .. }) = session.take_outgoing().pop() else {
-            panic!("the sound was not offered for publishing");
-        };
-        let stem = outside.file_stem().unwrap().to_string_lossy().into_owned();
-        assert_eq!(artifact, crate::session::sound::sound_artifact(&session.film_name(), &stem));
-        assert_eq!(source, "prompts/resources/2026-11-17_10-00-outside.wav");
-        // Placed under the name it had outside, so Publish sound offers it
-        // again under the same artifact, after a Cancel on the card.
+        assert!(session.take_outgoing().is_empty(), "a filed sound was published");
         let started = std::time::Instant::now();
         while !session.poll_imports() && started.elapsed() < std::time::Duration::from_secs(5) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let placed = session.film().sounds().find(|(_, clip)| clip.file == "prompts/resources/2026-11-17_10-00-outside.wav").map(|(_, clip)| clip.id).unwrap();
-        assert_eq!(session.publish_sound(placed).unwrap(), artifact);
-        let Some(protocol::AppMessage::Publish { artifact: again, source, .. }) = session.take_outgoing().pop() else {
-            panic!("Publish sound offered nothing");
-        };
-        assert_eq!((again, source.as_str()), (artifact.clone(), "prompts/resources/2026-11-17_10-00-outside.wav"));
-        // A take already in the project, after its own file; once it is
-        // canon, it has nothing to publish.
-        assert_eq!(session.publish_sound(take).unwrap(), "Last order: 2026-11-12_20-03-otis-line-1, sound");
-        session.published("Last order: 2026-11-12_20-03-otis-line-1, sound", "library/2026-11-12_20-03-otis-line-1.wav", None);
-        assert!(session.is_canon("library/2026-11-12_20-03-otis-line-1.wav"));
-        assert!(session.publish_sound(take).unwrap_err().starts_with("that sound is already canon"));
+        assert!(session.film().sounds().any(|(_, clip)| clip.file == "prompts/resources/2026-11-17_10-00-outside.wav"));
         assert!(!dir.join(&path).exists(), "the copy in work/ was kept");
-        // Drawing over a keyframe, then Publish hold: a PNG, asked to be published.
+        // Drawing over a keyframe, then Save timing: the hold is written as
+        // a PNG in work/ and filed first, made from the keyframe under it.
         let second = session.film().clips[1].id;
         session.enter_clip(second);
         stroke(&mut session, 100.0);
-        assert_eq!(session.publish_hold().unwrap(), "Last order: rough board, Shot 2");
-        let asked = session.take_publishes();
-        assert_eq!(asked.len(), 1);
-        assert!(asked[0].1.starts_with("work/") && dir.join(&asked[0].1).is_file(), "the hold was not written as a PNG in work/");
-        // Made from the keyframe under it, never from the storyboard in work/.
-        assert_eq!(asked[0].2, ["library/2026-11-14_16-04-keyframe-the-bell.png"]);
-        // The host's answer makes it the hold's image.
-        session.published("Last order: rough board, Shot 2", "prompts/resources/2026-11-17_10-00-shot-2-rough-board.png", None);
         session.leave_clip();
-        let (saved, _) = session.timing(Some(8.0)).unwrap();
-        assert_eq!(saved.frames[1].image, "prompts/resources/2026-11-17_10-00-shot-2-rough-board.png");
+        session.save_timing().unwrap();
+        let Some(protocol::AppMessage::FileResource { path, from, id: Some(id), .. }) = session.take_outgoing().pop() else {
+            panic!("the drawn hold was not asked to be filed");
+        };
+        assert!(path.starts_with("work/") && dir.join(&path).is_file(), "the hold was not written as a PNG in work/");
+        assert_eq!(from, ["library/2026-11-14_16-04-keyframe-the-bell.png"]);
+        assert!(session.exporting_by_step() == false && session.saving.is_none());
+        // Filed, the save goes on, naming the filed file by its file.
+        session.filed(&id, "prompts/resources/2026-11-17_10-00-shot-2-hold-1.png", None);
+        assert!(!dir.join(&path).exists(), "the copy in work/ was kept");
+        let Some(protocol::AppMessage::RunSkillScript { .. }) = session.take_outgoing().pop() else {
+            panic!("the save did not go on once the hold was filed");
+        };
+        let saving = session.saving.as_ref().unwrap();
+        assert_eq!(saving.assembly.frames[1].image, "prompts/resources/2026-11-17_10-00-shot-2-hold-1.png");
+        assert_eq!(saving.refs[1], serde_json::json!({ "file": "prompts/resources/2026-11-17_10-00-shot-2-hold-1.png", "role": "frame, 3.0 to 4.2 s" }));
         // Nothing was made outside the project's own folders.
         assert!(!dir.join("sounds").exists() && !dir.join("exports").exists());
     }
 
     #[test]
-    fn the_export_runs_the_step_and_offers_its_take() {
+    fn a_hold_that_cannot_be_filed_stops_the_save() {
+        let mut session = from_its_step("unfiled");
+        let second = session.film().clips[1].id;
+        session.enter_clip(second);
+        stroke(&mut session, 100.0);
+        session.leave_clip();
+        session.save_timing().unwrap();
+        let Some(protocol::AppMessage::FileResource { id: Some(id), .. }) = session.take_outgoing().pop() else {
+            panic!("the drawn hold was not asked to be filed");
+        };
+        session.filed(&id, "", Some("request.py could not file it"));
+        assert!(session.take_outgoing().is_empty() && session.saving.is_none());
+        assert!(session.kept_notices.iter().any(|notice| notice.text == "Timing not saved" && notice.detail == "request.py could not file it"));
+    }
+
+    #[test]
+    fn the_export_runs_the_step_and_its_take_joins_the_gallery() {
         let mut session = from_its_step("export-step");
         // Untouched: the step runs at once.
         let step = session.start_export().unwrap();
@@ -581,10 +610,8 @@ mod tests {
         let dir = session.project().unwrap().to_path_buf();
         std::fs::write(dir.join("library/2026-11-17_10-01-animatic.mp4"), b"video").unwrap();
         session.step_ran(&id, Some("library/2026-11-17_10-01-animatic.mp4"), None);
-        let Some(protocol::AppMessage::Publish { artifact, source, .. }) = session.take_outgoing().pop() else {
-            panic!("the take was not offered for publishing");
-        };
-        assert_eq!((artifact.as_str(), source.as_str()), ("Last order: animatic", "library/2026-11-17_10-01-animatic.mp4"));
+        // The take joins the step's gallery; nothing is published.
+        assert!(session.take_outgoing().is_empty(), "the take was published");
         assert!(session.kept_notices.iter().any(|notice| notice.text == "Animatic video exported" && notice.detail == "library/2026-11-17_10-01-animatic.mp4"));
         // The take is the animatic's file now, for list_items and renders.
         assert_eq!(session.animatic_state()["state"], "done");
@@ -753,9 +780,9 @@ mod tests {
         assert!(session.film().sound(read.bed).is_some() && read.voices.iter().all(|voice| session.film().sound(*voice).is_some()));
         // Saved untouched, it is the retimed assembly.
         assert_eq!(session.timing(Some(8.0)).unwrap().0, retimed);
-        // A board published after Follow is kept through undo and redo.
+        // A hold filed after Follow is kept through undo and redo.
         let stamp = stamp_of(&session, first);
-        session.hold_published(session.active_id(), first, 0, &stamp, "library/board.png");
+        session.hold_filed_as(session.active_id(), first, 0, &stamp, "library/board.png");
         // One undo takes the film and the timing it read back.
         session.undo().unwrap();
         assert_eq!(*session.film(), before);
@@ -925,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_film_keeps_its_published_holds_until_its_first_save() {
+    fn a_new_film_keeps_its_filed_holds_until_its_first_save() {
         let dir = project("new-film-boards");
         let mut session = Session::new();
         session.set_project(&dir);
@@ -934,9 +961,9 @@ mod tests {
         stroke(&mut session, 100.0);
         session.leave_clip();
         assert!(session.active_storyboard().assembly().is_none());
-        // Published before it read any animatic: kept on the storyboard.
+        // Filed before it read any animatic: kept on the storyboard.
         let stamp = stamp_of(&session, clip);
-        session.hold_published(session.active_id(), clip, 0, &stamp, "prompts/resources/board.png");
+        session.hold_filed_as(session.active_id(), clip, 0, &stamp, "prompts/resources/board.png");
         assert_eq!(session.active_storyboard().loose_boards().len(), 1);
         assert_eq!(session.holds_of(clip)[0].image.as_deref(), Some("prompts/resources/board.png"));
         // Kept in its file, as it is.
@@ -951,6 +978,55 @@ mod tests {
         session.timing_saved(session.active_id(), saved, &notes, "prompts/resources/first.json", "f");
         assert!(session.active_storyboard().loose_boards().is_empty());
         assert_eq!(session.active_storyboard().assembly().unwrap().boards.len(), 1);
+    }
+
+    /// Answers the canon read `check_retimed` sent for the project's
+    /// current files with `rows`, "file\u{1f}artifact" each.
+    fn answer_artifacts(session: &mut Session, rows: &[(&str, &str)]) {
+        session.last_check = None;
+        session.check_retimed(std::time::Instant::now());
+        let rows: Vec<Value> = rows.iter().map(|(file, artifact)| Value::String(format!("{file}\u{1f}{artifact}"))).collect();
+        for message in session.take_outgoing() {
+            if let protocol::AppMessage::ReadCanon { id, query } = message
+                && query.contains("FROM artifact")
+            {
+                session.canon_rows(&id, &rows, None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_timeline_shows_each_artifact_s_latest_iteration() {
+        let (mut session, _) = opened("iterations");
+        let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+        let second = session.film().clips[1].id;
+        // Read as canon, the keyframe and the take are noted as their
+        // artifacts; nothing changes.
+        answer_artifacts(&mut session, &[(bell, "Last order: keyframe, the bell"), ("library/2026-11-12_20-03-otis-line-1.wav", "Otis: the line, voice take")]);
+        assert_eq!(session.active_storyboard().artifacts().get(bell).map(String::as_str), Some("Last order: keyframe, the bell"));
+        let before = session.film().clone();
+        // An edit that is an undo step, so undo would bring back the film
+        // as it was before.
+        session.resize_clip(second, true, 2);
+        // The keyframe gets a new iteration, saved in the image workspace or
+        // in Claude Code: the timeline shows it by itself, with no undo step.
+        let newer = "prompts/resources/2026-11-19_09-00-keyframe-the-bell.png";
+        answer_artifacts(&mut session, &[(newer, "Last order: keyframe, the bell"), ("library/2026-11-12_20-03-otis-line-1.wav", "Otis: the line, voice take")]);
+        assert!(session.film().files().contains(newer) && !session.film().files().contains(bell));
+        assert_eq!(session.active_storyboard().artifacts().get(newer).map(String::as_str), Some("Last order: keyframe, the bell"));
+        // Undo takes the resize back, never the iteration.
+        session.undo().unwrap();
+        assert!(session.film().files().contains(newer) && !session.film().files().contains(bell));
+        assert_eq!(session.film().clips.len(), before.clips.len());
+        // The take, not changed, is where it was.
+        assert!(session.film().files().contains("library/2026-11-12_20-03-otis-line-1.wav"));
+        // Kept in its file, the artifacts come back as they are.
+        let path = session.project().unwrap().join("work/iterations.smx");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::store::write_smx(&path, session.active_storyboard(), "iterations").unwrap();
+        let mut ids = draw::document::Allocator::new();
+        let reopened = crate::store::read_smx(&path).unwrap().into_record(&mut ids, &[]);
+        assert_eq!(reopened.artifacts(), session.active_storyboard().artifacts());
     }
 
     #[test]

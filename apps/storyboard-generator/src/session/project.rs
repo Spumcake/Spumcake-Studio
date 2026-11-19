@@ -216,7 +216,7 @@ fn steps_of(rows: &[Value]) -> Vec<AnimaticStep> {
 }
 
 impl Session {
-    fn next_request(&mut self) -> String {
+    pub(crate) fn next_request(&mut self) -> String {
         let id = format!("canon-{}", self.next_notice);
         self.next_notice += 1;
         id
@@ -273,13 +273,43 @@ impl Session {
             self.step_export_failed("The project did not answer.");
         }
         let has_step = self.active_storyboard().assembly().is_some_and(|read| read.step.is_some());
-        let asking = self.canon_asked.values().any(|asked| matches!(asked, Asked::Check(_)));
-        if self.project.is_none() || !has_step || asking || self.is_playing() || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
+        let asking = self.canon_asked.values().any(|asked| matches!(asked, Asked::Check(_) | Asked::Artifacts));
+        if self.project.is_none() || asking || self.is_playing() || self.last_check.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
             return;
         }
         self.last_check = Some(now);
-        let storyboard = self.active_id();
-        self.ask_canon(STEPS, Asked::Check(storyboard));
+        // Each artifact the storyboards show, at its latest
+        // iteration, edited in its own workspace or anywhere else.
+        self.ask_canon(ARTIFACTS, Asked::Artifacts);
+        if has_step {
+            let storyboard = self.active_id();
+            self.ask_canon(STEPS, Asked::Check(storyboard));
+        }
+    }
+
+    /// Each storyboard shows each artifact it shows at its latest
+    /// iteration: a file that is canon is noted as its artifact, and a
+    /// file whose artifact now has another current file gives way to it.
+    /// Not an undo step, and never while the film plays.
+    pub(crate) fn follow_iterations(&mut self) {
+        if self.is_playing() {
+            return;
+        }
+        let (canon_files, canon_now) = (&self.canon_files, &self.canon_now);
+        for record in &mut self.storyboards {
+            let mut artifacts = record.artifacts().clone();
+            for file in record.film().files() {
+                if let (false, Some(artifact)) = (artifacts.contains_key(&file), canon_files.get(&file)) {
+                    artifacts.insert(file, artifact.clone());
+                }
+            }
+            record.set_artifacts(artifacts.clone());
+            for (file, artifact) in artifacts {
+                if let Some(latest) = canon_now.get(&artifact).filter(|latest| **latest != file) {
+                    record.follow_iteration(&file, latest);
+                }
+            }
+        }
     }
 
     /// The host's answer to a canon read.
@@ -307,11 +337,16 @@ impl Session {
                 }
             }
             Asked::Artifacts => {
+                // Earlier files stay known as their artifacts, so a file
+                // placed before a new iteration still follows it.
+                self.canon_now.clear();
                 for text in rows.iter().filter_map(row_text) {
                     if let Some((file, artifact)) = text.split_once(SEPARATOR) {
                         self.canon_files.insert(file.to_string(), artifact.to_string());
+                        self.canon_now.insert(artifact.to_string(), file.to_string());
                     }
                 }
+                self.follow_iterations();
             }
             Asked::Open => {
                 let steps = steps_of(rows);
@@ -329,6 +364,7 @@ impl Session {
                     self.next_notice += 1;
                     self.keep_failed(id, "Animatic not opened", &reason);
                 }
+                self.follow_iterations();
             }
             Asked::Check(storyboard) => {
                 let Some(read) = self.index_of(storyboard).and_then(|index| self.storyboards[index].assembly().cloned()) else {
@@ -433,16 +469,16 @@ impl Session {
         if self.saving.is_some() {
             return Err("The timing is already being saved.".to_string());
         }
+        // Drawn holds are filed as plain files first; the save runs again
+        // once they are.
+        if self.file_drawn_holds(None)? {
+            return Ok(());
+        }
         // The canon length when the project has one; else the length the
         // animatic had, which is canon too.
         let (assembly, notes) = self.timing(Some(read.assembly.length))?;
-        let mut files = self.canon_files.clone();
-        for board in &read.boards {
-            if let Some(artifact) = self.published_files.get(&board.file) {
-                files.insert(board.file.clone(), artifact.clone());
-            }
-        }
-        let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned())?;
+        let files = self.canon_files.clone();
+        let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned());
         // Skills' writer writes and files it, so its format stays Skills'.
         let id = self.next_request();
         self.outgoing.push(AppMessage::RunSkillScript {
@@ -469,9 +505,12 @@ impl Session {
         // are all read, whatever order the host answered in, so a step or
         // an element already there is never recorded over.
         let orders = self.chain_orders.filter(|_| self.film_read && self.steps_read).ok_or("The project's animatic step is not known yet.")?;
+        if self.file_drawn_holds(None)? {
+            return Ok(());
+        }
         let (assembly, notes) = self.timing(None)?;
         let files = self.canon_files.clone();
-        let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned())?;
+        let refs = crate::assembly::refs(&assembly, |file| files.get(file).cloned());
         let film = self.film_name();
         let step = AnimaticStep {
             chain: ANIMATIC_CHAIN.to_string(),
@@ -497,9 +536,10 @@ impl Session {
     }
 
     /// Export animatic video: the animatic is made by running its step
-    /// again, as `build-animatic` makes it, after saving
-    /// the timing when it differs. The take is then offered for publishing
-    /// on the publish card. Returns the step being run.
+    /// again, as `build-animatic` makes it, after saving the timing when it
+    /// differs, and filing its drawn holds first. Its video joins the
+    /// step's gallery as a take; nothing is published. Returns the step
+    /// being run.
     pub(crate) fn export_by_step(&mut self) -> Result<String, String> {
         if self.active_storyboard().assembly().is_none() && self.steps.is_empty() {
             return Err("This project has no animatic yet.".to_string());
@@ -510,13 +550,18 @@ impl Session {
         if self.saving.is_some() {
             return Err("The timing is already being saved.".to_string());
         }
+        let sources = self.export_sources();
+        // Drawn holds not filed yet are filed first; the export runs again
+        // once they are, and then saves.
+        if self.file_drawn_holds(Some(sources.clone()))? {
+            return Ok(step.key());
+        }
         // A retime made elsewhere is not what the storyboard shows, so the
         // storyboard's timing is saved over it first.
         let differs = match self.timing(Some(read.assembly.length)) {
             Ok((assembly, _)) => assembly != read.assembly || self.retimed().is_some(),
             Err(reason) => return Err(reason),
         };
-        let sources = self.export_sources();
         if differs {
             self.save_timing()?;
             if let Some(saving) = self.saving.as_mut() {
@@ -531,7 +576,7 @@ impl Session {
     /// Whether Export animatic video is running the animatic's step, or
     /// saving the timing before it.
     pub(crate) fn exporting_by_step(&self) -> bool {
-        self.stepping.is_some() || self.saving.as_ref().is_some_and(|saving| saving.then_export.is_some())
+        self.stepping.is_some() || self.saving.as_ref().is_some_and(|saving| saving.then_export.is_some()) || self.after_filing.as_ref().is_some_and(|(_, export)| export.is_some())
     }
 
     /// Asks the host to run the animatic's step again.
@@ -541,8 +586,8 @@ impl Session {
         self.stepping = Some(Stepping { id, storyboard, step, sources, since: Instant::now() });
     }
 
-    /// The host ran the animatic's step: its take is offered for publishing
-    /// as the step's artifact, and the export's card says where it is.
+    /// The host ran the animatic's step: its take joins the step's gallery,
+    /// never published here, and the export's card says where it is.
     pub fn step_ran(&mut self, id: &str, take: Option<&str>, error: Option<&str>) {
         let Some(stepping) = self.stepping.take_if(|stepping| stepping.id == id) else {
             return;
@@ -554,15 +599,6 @@ impl Session {
                 return;
             }
         };
-        if !stepping.step.artifact.is_empty() {
-            self.outgoing.push(AppMessage::Publish {
-                tab: stepping.storyboard.get().to_string(),
-                artifact: stepping.step.artifact.clone(),
-                source: take.clone(),
-                from: Vec::new(),
-                with: Vec::new(),
-            });
-        }
         self.step_exported(stepping.storyboard, &take, stepping.sources);
     }
 
@@ -586,7 +622,7 @@ impl Session {
         self.keep_failed(id, "Timing not saved", reason);
     }
 
-    /// Follow or Publish hold failed, by hand: a card says
+    /// Follow failed, by hand: a card says
     /// why, under `text`, or alone when there is none.
     pub fn failed_by_hand(&mut self, text: Option<&str>, reason: &str) {
         let id = self.next_notice;
@@ -597,9 +633,13 @@ impl Session {
         }
     }
 
-    /// The host filed a file: a sound brought in from outside, or the saved
-    /// timing, now pointed at by the step.
+    /// The host filed a file: a sound brought in from outside, a drawn
+    /// hold, or the saved timing, now pointed at by the step.
     pub fn filed(&mut self, id: &str, file: &str, error: Option<&str>) {
+        if self.hold_filing.contains_key(id) {
+            self.hold_filed(id, file, error);
+            return;
+        }
         if self.filing.contains_key(id) {
             self.sound_filed(id, file, error);
             return;
@@ -830,13 +870,6 @@ impl Session {
             "saved": saved.as_ref().map(|file| serde_json::json!({ "assembly": file, "step_uses_it": *file == read.path && self.retimed().is_none() })),
             "retimed_elsewhere": self.retimed(),
         }))
-    }
-
-    /// A published file and the artifact it is published as, from the
-    /// host's answer to a publish.
-    pub(crate) fn note_published(&mut self, artifact: &str, file: &str) {
-        self.published_files.insert(file.to_string(), artifact.to_string());
-        self.canon_files.insert(file.to_string(), artifact.to_string());
     }
 }
 

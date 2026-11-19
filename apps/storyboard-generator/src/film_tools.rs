@@ -78,14 +78,12 @@ pub fn group() -> ToolGroup {
             tool("trim_sound", "Set where a sound starts on the film, where it starts inside its own sound, and its length, as dragging its edges and its page do.", json!({ "sound": integer("The sound's id."), "at": integer("The film's frame it starts on, from 1."), "from": integer("The frame of its own sound it starts from, from 1."), "length": integer("Frames.") }), &["sound"]),
             tool("set_sound_volume", "Set a sound's volume, as its page does.", json!({ "sound": integer("The sound's id."), "volume": { "type": "number", "minimum": 0, "maximum": 1 } }), &["sound", "volume"]),
             tool("delete_sound", "Take a sound off its track. Its file stays where it is in the project.", json!({ "sound": integer("The sound's id.") }), &["sound"]),
-            tool("publish_sound", "Offer a placed sound on the publish card as canon, under the film and named after its file, as Publish sound does, so the animatic can use it. The user approves it on the publish card. A sound already canon has nothing to publish.", json!({ "sound": integer("The sound's id.") }), &["sound"]),
             tool("set_listening_volume", "Set how loud the film plays here, as the header's volume does. A listening aid: never in the export, and not an undo step.", json!({ "volume": { "type": "number", "minimum": 0, "maximum": 1 } }), &["volume"]),
             tool("read_sound", "How loud the film's sound is on each frame from start to end, 0 to 1, as it plays: every unmuted Sound track mixed. Use it to time clips and keys to the sound.", json!({ "start": integer("The film's first frame, from 1."), "end": integer("The film's last frame, from 1.") }), &["start", "end"]),
-            tool("export_animatic", "Export the animatic: the project's animatic step makes it again, as build-animatic does, after the timing is saved when it differs, and its take is offered for publishing. Returns the step at once; list_items says when it is done.", json!({}), &[]),
+            tool("export_animatic", "Export the animatic: the project's animatic step makes it again, as build-animatic does, after its drawn holds are filed and the timing is saved when it differs; its video joins the step's gallery as a take, and nothing is published. Returns the step at once; list_items says when it is done.", json!({}), &[]),
             tool("list_items", "Every item of the storyboard, by item reference: the cut, each clip's first and last frames and frames, and the animatic with whether it is exporting, done, or failed.", json!({}), &[]),
             tool("insert_image_key", "Make the open clip's active layer show an image of the project from the playhead: an image key, fitted to the clip's field, its drawing over it, as Insert image key… does.", json!({ "image": { "type": "string", "description": "The image's path in the project, such as library/keyframe.png." } }), &["image"]),
-            tool("publish_hold", "Publish the open clip's hold under the playhead, drawing and all, as its rough board, as Publish hold does, so the animatic can use it. The user approves it on the publish card.", json!({}), &[]),
-            tool("save_timing", "Save the storyboard's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, the bed is muted, or a hold's drawing is not published.", json!({}), &[]),
+            tool("save_timing", "Save the storyboard's timing as a new assembly and point the project's animatic step at it, as Save timing to the project does, so build-animatic assembles it. The user approves the step's edit. It refuses, saying why, when the length differs, the film has a gap, or the bed is muted. Drawn holds are filed as plain files first, never published.", json!({}), &[]),
             tool("follow_retime", "Take the timing the project's animatic step now names, after it was retimed in another tool, as one undo step, as Follow does.", json!({}), &[]),
             tool("render_again", "Render an item again from what made it: the animatic's step runs again.", json!({ "item": { "type": "string", "description": "The item's id, such as \"animatic\"." } }), &["item"]),
         ],
@@ -539,9 +537,6 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 sound_unlocked(session, sound)?;
                 changed(session.delete_sound(sound), "no such sound")?;
             }
-            "publish_sound" => {
-                made = json!({ "artifact": session.publish_sound(id(input, "sound")?)? });
-            }
             "set_listening_volume" => {
                 session.set_listening(input.get("volume").and_then(Value::as_f64).ok_or("volume is missing")?);
             }
@@ -554,7 +549,7 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
             }
             "export_animatic" => {
                 let step = session.start_export()?;
-                made = json!({ "step": step, "note": "The project's animatic step runs again, after the timing is saved when it differs; the user approves it on the plan card, then its take on the publish card. list_items says when it is done." });
+                made = json!({ "step": step, "note": "The project's animatic step runs again, after the timing is saved when it differs; the user approves it on the plan card. Its video joins the step's gallery as a take. list_items says when it is done." });
             }
             "list_items" => {
                 let path = session.animatic_state()["item"]["path"].as_str().map(str::to_string);
@@ -581,10 +576,6 @@ pub fn run(session: &mut Session, tool: &str, input: &Value) -> Outcome {
                 }
                 let image = session.image_in_project(std::path::Path::new(image))?;
                 changed(session.insert_image_key(&image), "that frame already shows that image")?;
-            }
-            "publish_hold" => {
-                in_clip(session)?;
-                made = json!({ "artifact": session.publish_hold()? });
             }
             "save_timing" => {
                 session.save_timing()?;

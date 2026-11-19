@@ -169,6 +169,33 @@ impl Film {
         take(&mut self.next_id)
     }
 
+    /// Every file the film shows, image keys' images and sounds alike.
+    pub fn files(&self) -> std::collections::BTreeSet<String> {
+        let images = self.clips.iter().flat_map(|clip| clip.layers.iter()).flat_map(|layer| layer.images.values().cloned());
+        let sounds = self.sound_tracks.iter().flat_map(|track| track.clips.iter()).map(|clip| clip.file.clone());
+        images.chain(sounds).collect()
+    }
+
+    /// Shows `new` wherever the film shows `old`, an image key's image or a
+    /// sound's file, as an artifact's latest iteration takes its
+    /// place. True when anything changed.
+    pub fn repath(&mut self, old: &str, new: &str) -> bool {
+        let mut changed = false;
+        for image in self.clips.iter_mut().flat_map(|clip| clip.layers.iter_mut()).flat_map(|layer| layer.images.values_mut()) {
+            if image == old {
+                *image = new.to_string();
+                changed = true;
+            }
+        }
+        for clip in self.sound_tracks.iter_mut().flat_map(|track| track.clips.iter_mut()) {
+            if clip.file == old {
+                clip.file = new.to_string();
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Frames from the start to the last clip's end.
     pub fn length(&self) -> u32 {
         self.clips.iter().map(|clip| clip.start + clip.length).max().unwrap_or(0)

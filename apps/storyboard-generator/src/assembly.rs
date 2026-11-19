@@ -132,42 +132,43 @@ pub struct Read {
     /// The bed's sound and each voice's sound.
     pub bed: u64,
     pub voices: Vec<u64>,
-    /// Holds published as rough boards.
-    pub boards: Vec<RoughBoard>,
+    /// Drawn holds filed as plain files, kept under "boards" as before.
+    pub boards: Vec<FiledHold>,
     /// The project's animatic step it came from, by chain and name.
     pub step: Option<(String, String)>,
 }
 
-/// A hold published as a rough board: by its clip and its first frame in
-/// the clip, with its file in the project, and a stamp of what the hold
-/// showed, so drawing on it again is seen as not published.
+/// A drawn hold filed into the project as a plain file, never published:
+/// by its clip and its first frame in the clip, with its file in the
+/// project, and a stamp of what the hold showed, so drawing on it again
+/// files it again at the next save.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RoughBoard {
+pub struct FiledHold {
     pub clip: u64,
     pub frame: u32,
     pub file: String,
     pub stamp: String,
 }
 
-impl RoughBoard {
+impl FiledHold {
     pub fn to_value(&self) -> Value {
         json!({ "clip": self.clip, "frame": self.frame, "file": self.file, "stamp": self.stamp })
     }
 
     pub fn from_value(board: &Value) -> Option<Self> {
-        Some(RoughBoard {
+        Some(FiledHold {
             clip: board.get("clip")?.as_u64()?,
             frame: board.get("frame")?.as_u64()? as u32,
             file: board.get("file")?.as_str()?.to_string(),
-            // A board kept with no stamp matches no hold, so it is
-            // published again before it is used.
+            // A hold kept with no stamp matches no hold, so it is filed
+            // again before it is used.
             stamp: board.get("stamp").and_then(Value::as_str).unwrap_or_default().to_string(),
         })
     }
 }
 
 impl Read {
-    /// `other`'s file and timing, keeping this one's step and rough boards,
+    /// `other`'s file and timing, keeping this one's step and filed holds,
     /// as undo and redo of a Follow do.
     pub fn take_timing(&mut self, other: &Read) {
         self.path = other.path.clone();
@@ -178,9 +179,9 @@ impl Read {
         self.voices = other.voices.clone();
     }
 
-    /// The rough board a hold was published as, while it shows what it
-    /// showed then.
-    pub fn board(&self, clip: u64, frame: u32, stamp: &str) -> Option<&RoughBoard> {
+    /// The file a drawn hold was filed as, while it shows what it showed
+    /// then.
+    pub fn board(&self, clip: u64, frame: u32, stamp: &str) -> Option<&FiledHold> {
         self.boards.iter().find(|board| board.clip == clip && board.frame == frame && board.stamp == stamp)
     }
 
@@ -192,7 +193,7 @@ impl Read {
             "clips": self.clips,
             "bed": self.bed,
             "voices": self.voices,
-            "boards": self.boards.iter().map(RoughBoard::to_value).collect::<Vec<_>>(),
+            "boards": self.boards.iter().map(FiledHold::to_value).collect::<Vec<_>>(),
             "step": self.step.as_ref().map(|(chain, name)| json!({ "chain": chain, "name": name })),
         })
     }
@@ -201,7 +202,7 @@ impl Read {
         let ids = |key: &str| -> Option<Vec<u64>> { value.get(key)?.as_array()?.iter().map(Value::as_u64).collect() };
         let mut boards = Vec::new();
         for board in value.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
-            boards.push(RoughBoard::from_value(&board)?);
+            boards.push(FiledHold::from_value(&board)?);
         }
         Some(Read {
             path: value.get("path")?.as_str()?.to_string(),
@@ -435,7 +436,7 @@ pub struct Notes {
 
 impl Notes {
     /// The storyboard's memory of an assembly it has just saved as `path`.
-    pub fn read(&self, assembly: Assembly, path: &str, fingerprint: &str, boards: Vec<RoughBoard>) -> Read {
+    pub fn read(&self, assembly: Assembly, path: &str, fingerprint: &str, boards: Vec<FiledHold>) -> Read {
         Read {
             path: path.to_string(),
             fingerprint: fingerprint.to_string(),
@@ -454,8 +455,8 @@ impl Notes {
 pub struct Hold {
     pub start: u32,
     pub length: u32,
-    /// The image it shows: an image key's alone, or the rough board it was
-    /// published as; none while it has drawing that is not published.
+    /// The image it shows: an image key's alone, or the file its drawing
+    /// was filed as; none while it has drawing not filed yet.
     pub image: Option<String>,
     /// It shows nothing: no drawing and no image key.
     pub blank: bool,
@@ -510,7 +511,7 @@ pub fn save(film: &Film, read: Option<&Read>, holds: impl Fn(u64) -> Vec<Hold>, 
                 if hold.blank {
                     return Err(blank_refusal(&clip.name));
                 }
-                return Err(format!("{} has drawing that is not published yet. Publish it first.", clip.name));
+                return Err(format!("{} has drawing that is not filed yet.", clip.name));
             };
             let start = clip.start + hold.start;
             let end = start + hold.length;
@@ -616,20 +617,23 @@ pub fn said_gain(gain_db: f64) -> String {
 /// The step's references for a saved assembly: each frame's artifact, the
 /// bed's, and each clip's, by role words as `build-animatic` writes them.
 /// `artifact_of` names the canon artifact a file is published as.
-pub fn refs(assembly: &Assembly, artifact_of: impl Fn(&str) -> Option<String>) -> Result<Vec<Value>, String> {
-    let artifact = |file: &str| artifact_of(file).ok_or_else(|| format!("{} is not published, so the project's animatic cannot use it.", file.rsplit('/').next().unwrap_or(file)));
+pub fn refs(assembly: &Assembly, artifact_of: impl Fn(&str) -> Option<String>) -> Vec<Value> {
+    // A canon file by its artifact; any other, such as a drawn hold filed
+    // as a plain file or a sound not yet used by a recipe, by its file, as
+    // Skills' step references take either.
+    let named = |file: &str, role: String| match artifact_of(file) {
+        Some(artifact) => json!({ "artifact": artifact, "role": role }),
+        None => json!({ "file": file, "role": role }),
+    };
     let mut out = Vec::new();
     for frame in &assembly.frames {
-        out.push(json!({ "artifact": artifact(&frame.image)?, "role": format!("frame, {} to {} s", said(frame.start), said(frame.end)) }));
+        out.push(named(&frame.image, format!("frame, {} to {} s", said(frame.start), said(frame.end))));
     }
-    out.push(json!({ "artifact": artifact(&assembly.bed.audio)?, "role": format!("sound bed, at {}", said_gain(assembly.bed.gain_db)) }));
+    out.push(named(&assembly.bed.audio, format!("sound bed, at {}", said_gain(assembly.bed.gain_db))));
     for clip in &assembly.clips {
-        out.push(json!({
-            "artifact": artifact(&clip.audio)?,
-            "role": format!("clip {} to {} s, laid at {} s, at {}", said(clip.from), said(clip.to), said(clip.at), said_gain(clip.gain_db)),
-        }));
+        out.push(named(&clip.audio, format!("clip {} to {} s, laid at {} s, at {}", said(clip.from), said(clip.to), said(clip.at), said_gain(clip.gain_db))));
     }
-    Ok(out)
+    out
 }
 
 /// The step's script with its assembly file replaced by `file`: the one
@@ -792,15 +796,16 @@ mod tests {
             )
         };
         // Untouched, the words are Last order's own.
-        let words: Vec<String> = refs(&last_order(), artifact_of).unwrap().iter().map(|r| r["role"].as_str().unwrap().to_string()).collect();
+        let words: Vec<String> = refs(&last_order(), artifact_of).iter().map(|r| r["role"].as_str().unwrap().to_string()).collect();
         assert_eq!(words, [
             "frame, 0.0 to 3.0 s", "frame, 3.0 to 4.2 s", "frame, 4.2 to 6.3 s", "frame, 6.3 to 8.0 s",
             "sound bed, at 0 dB", "clip 0.05 to 0.65 s, laid at 4.2 s, at 0 dB", "clip 2.05 to 3.35 s, laid at 4.8 s, at 0 dB",
         ]);
-        // A file nobody published refuses.
+        // A file nobody published, such as a drawn hold filed as a plain
+        // file, is named by its file.
         let mut unknown = last_order();
-        unknown.frames[1].image = "library/new.png".into();
-        assert_eq!(refs(&unknown, artifact_of).unwrap_err(), "new.png is not published, so the project's animatic cannot use it.");
+        unknown.frames[1].image = "prompts/resources/2026-11-18_10-00-shot-2-hold-1.png".into();
+        assert_eq!(refs(&unknown, artifact_of)[1], json!({ "file": "prompts/resources/2026-11-18_10-00-shot-2-hold-1.png", "role": "frame, 3.0 to 4.2 s" }));
         // The script is pointed at the new file, and nothing else changes.
         assert_eq!(named_in(SCRIPT).as_deref(), Some("prompts/resources/2026-11-14_16-07-animatic-assembly.json"));
         let moved = repoint(SCRIPT, "prompts/resources/2026-11-17_10-00-animatic-assembly.json").unwrap();
