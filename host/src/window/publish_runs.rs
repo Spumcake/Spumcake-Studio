@@ -34,6 +34,7 @@ use crate::runner::ScriptEnv;
 use eframe::egui;
 use protocol::{CanonVersion, HostMessage};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, channel};
@@ -739,29 +740,56 @@ fn iteration_warning(place: &Place, path: &str) -> Result<Option<(String, String
     if made.is_empty() {
         return Ok(None);
     }
-    // Each cell once, by its chain and place, named as its step is, with
-    // its chain when two chains have a step of the same name.
-    let mut cells: Vec<(Option<(String, i64)>, String, String)> = Vec::new();
+    // Each cell once, by its chain and place, named as its recipe shows it.
+    let titles: HashMap<String, String> = place.rows("SELECT name, title FROM chain")?.into_iter().filter_map(|row| Some((row.first()?.clone(), row.get(1).cloned().unwrap_or_default()))).collect();
+    let steps: Vec<Vec<String>> = place.rows("SELECT chain, ord, name FROM step")?;
+    let mut cells: Vec<(String, String)> = Vec::new();
+    let mut seen: Vec<(String, i64)> = Vec::new();
     for other in &made {
-        let step = other.artifact.as_deref().and_then(|artifact| artifact.split_once(": ").map(|(_, role)| crate::prompt_page::alternative_of(role).0.to_string())).unwrap_or_default();
-        let chain = other.cell.as_ref().map(|(chain, _)| chain.clone()).unwrap_or_default();
-        if !step.is_empty() && !cells.iter().any(|(cell, name, _)| (other.cell.is_some() && *cell == other.cell) || (other.cell.is_none() && *name == step)) {
-            cells.push((other.cell.clone(), step, chain));
+        let Some((chain, order)) = other.cell.clone() else {
+            // A cell with no place in a chain, by its artifact's own name.
+            if let Some(name) = other.artifact.as_deref().and_then(|artifact| artifact.split_once(": ").map(|(_, role)| crate::prompt_page::alternative_of(role).0.to_string())) {
+                if !cells.iter().any(|(_, known)| *known == name) {
+                    cells.push((String::new(), name));
+                }
+            }
+            continue;
+        };
+        if seen.contains(&(chain.clone(), order)) {
+            continue;
         }
+        seen.push((chain.clone(), order));
+        let step = steps.iter().filter(|row| row.first() == Some(&chain) && row.get(1).and_then(|at| at.trim().parse::<i64>().ok()) == Some(order)).filter_map(|row| row.get(2)).map(|name| crate::prompt_page::alternative_of(name).0.to_string()).min().unwrap_or_default();
+        let title = titles.get(&chain).filter(|title| !title.trim().is_empty()).cloned().unwrap_or(chain);
+        cells.push((title, step));
     }
-    let cells: Vec<String> = cells
-        .iter()
-        .map(|(_, name, chain)| if cells.iter().filter(|(_, other, _)| other == name).count() > 1 && !chain.is_empty() { format!("{name} in {chain}") } else { name.clone() })
-        .collect();
     let take = take_number(place, &asset.first).map_or_else(|| String::from("This take"), |number| format!("Take {number}"));
     let warning = format!("{take} is in use as a dependency, and new iterations would break canonical consistency.");
-    let cells = match cells.as_slice() {
-        [] => String::from("other cells"),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    };
+    let cells = cell_names(&cells);
     let made_from = if made.len() == 1 { format!("1 take in {cells} was made from it.") } else { format!("{} takes in {cells} were made from it.", made.len()) };
     Ok(Some((warning, made_from)))
+}
+
+/// The cells a warning names, as `ig-dependency-warning` does: each by its
+/// recipe's title, with its step only when the recipe has more than one of
+/// them here, joined with commas and "and", the first three and then
+/// "and N more". Each is `(recipe's title, step)`.
+fn cell_names(cells: &[(String, String)]) -> String {
+    let named: Vec<String> = cells
+        .iter()
+        .map(|(title, step)| match (title.is_empty(), cells.iter().filter(|(other, _)| other == title).count() > 1) {
+            (true, _) => step.clone(),
+            (false, true) if !step.is_empty() => format!("{title}: {step}"),
+            (false, _) => title.clone(),
+        })
+        .collect();
+    match named.as_slice() {
+        [] => String::from("other cells"),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second} and {third}"),
+        [first, second, third, rest @ ..] => format!("{first}, {second}, {third} and {} more", rest.len()),
+    }
 }
 
 /// Save in a workspace: `source` filed as the next iteration of the asset at
@@ -1357,7 +1385,7 @@ mod tests {
         // A Save on the layout, which both keyframes were made from.
         let (warning, made_from) = iteration_warning(&place, &layout).unwrap().expect("a Save on a dependency gave no warning");
         assert!(warning.ends_with("is in use as a dependency, and new iterations would break canonical consistency."), "{warning}");
-        assert_eq!(made_from, "2 takes in keyframe were made from it.");
+        assert_eq!(made_from, "2 takes in the diner were made from it.", "the two takes of one cell, a recipe with no title, were not named once by its chain");
         std::fs::write(folder.join("work/layout-edit.png"), b"\x89PNG\r\n\x1a\nedited").unwrap();
         let filed = save_iteration(&place, &layout, "work/layout-edit.png").unwrap().expect("nothing was filed");
         let assets = assets_of(&place).unwrap();
@@ -1404,6 +1432,18 @@ mod tests {
         assert!(!assets.iter().find(|asset| asset.first == first).unwrap().outlined, "Ignore left the outline");
         assert!(assets.iter().find(|asset| asset.first == second).unwrap().outlined, "Ignore cleared another take's outline");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches the warning naming cells by their steps' lowercase names, as
+    /// "start frame, from the pre-vis, final shot", rather than as their
+    /// recipes show them, "Shot 12 and Shot 13", or listing them all.
+    #[test]
+    fn a_warning_names_cells_as_their_recipes_do() {
+        let cell = |title: &str, step: &str| (title.to_string(), step.to_string());
+        assert_eq!(cell_names(&[cell("Shot 12", "keyframe"), cell("Shot 13", "keyframe")]), "Shot 12 and Shot 13");
+        assert_eq!(cell_names(&[cell("Shot 12", "keyframe"), cell("Shot 12", "final shot"), cell("Shot 13", "keyframe")]), "Shot 12: keyframe, Shot 12: final shot and Shot 13");
+        assert_eq!(cell_names(&[cell("A", ""), cell("B", ""), cell("C", ""), cell("D", ""), cell("E", "")]), "A, B, C and 2 more");
+        assert_eq!(cell_names(&[cell("", "the mix")]), "the mix");
     }
 
     /// Gives the scratch repository an identity of its own, so a commit
