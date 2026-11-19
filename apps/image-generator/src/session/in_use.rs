@@ -3,8 +3,8 @@
 //! none, so it asks nothing first; the host answers `take_used`, and a
 //! fresh `takes` brings its seal, `badge-check` on its tile, from `canon`.
 //! An error is said at the working area's bottom left; a success says
-//! nothing. Saving an image as a new iteration of an asset, and the
-//! outline on what was made from one, come later.
+//! nothing, and takes that error away. Saving an image as a new iteration
+//! of an asset, and the outline on what was made from one, come later.
 
 use super::*;
 use protocol::{Action, Notice, NoticeCorner, NoticeState};
@@ -38,10 +38,13 @@ impl Session {
 
     /// `take_used`: the host's answer to Use this take. An error is said as
     /// the failed notice; a success says nothing, as the seal comes with
-    /// the next `takes`.
+    /// the next `takes`, and takes away a refusal still shown.
     pub(super) fn take_used(&mut self, tab: &str, error: Option<String>, out: &mut Vec<AppMessage>) {
         if let Some(error) = error.filter(|error| !error.is_empty()) {
+            self.refused.insert(tab.to_string());
             out.push(notices(tab, Some(failed(&error))));
+        } else if self.refused.remove(tab) {
+            out.push(notices(tab, None));
         }
     }
 }

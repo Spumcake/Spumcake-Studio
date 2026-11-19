@@ -244,6 +244,9 @@ pub struct Session {
     cache: PathBuf,
     in_memory: bool,
     viewport: [f64; 2],
+    /// The tabs whose notice is a refused Use this take, which a later
+    /// success takes away.
+    refused: std::collections::HashSet<String>,
     file: Option<(String, Purpose)>,
     next_file: u64,
     /// Every image and thumbnail written gets the next revision, starting
@@ -309,6 +312,7 @@ impl Session {
             in_memory: memory.is_some(),
             cache: memory.unwrap_or_else(scratch_folder),
             viewport: FIRST_VIEWPORT,
+            refused: std::collections::HashSet::new(),
             file: None,
             next_file: 1,
             next_revision: seed,
@@ -560,9 +564,13 @@ impl Session {
             HostMessage::CellResult { cell, output, .. } => self.cell_result(&cell, &output, &mut out),
             // Use this take answered: an error is said at the bottom left;
             // the seal comes with the next `takes`.
+            // A refusal is said, and taken away by a later success.
             HostMessage::TakeUsed { tab, error, .. } => {
                 if let Some(error) = error.filter(|error| !error.is_empty()) {
+                    self.refused.insert(tab.clone());
                     out.push(deliver::notices(&tab, Some((error, protocol::NoticeState::Failed))));
+                } else if self.refused.remove(&tab) {
+                    out.push(deliver::notices(&tab, None));
                 }
             }
             HostMessage::Preview { id, path, media_type } => {
@@ -1106,8 +1114,9 @@ impl Session {
             }
             // A notice's close.
             "notice_close" => {
-                if let Some(tab) = self.active_tab() {
-                    out.push(deliver::notices(&tab.id, None));
+                if let Some(tab) = self.active_tab().map(|tab| tab.id.clone()) {
+                    self.refused.remove(&tab);
+                    out.push(deliver::notices(&tab, None));
                 }
                 return;
             }

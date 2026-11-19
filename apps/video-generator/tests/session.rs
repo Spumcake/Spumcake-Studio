@@ -2078,14 +2078,22 @@ fn use_this_take_asks_the_host_to_use_it() {
         _ => None,
     });
     assert_eq!((notice.text.as_str(), notice.state), ("The take could not be put in use.", protocol::NoticeState::Failed));
-    program.send(HostMessage::TakeUsed { tab: "1".into(), path: "takes/Dawn.mp4".into(), artifact: Some("shot 12: final".into()), error: None });
-    program.send(HostMessage::Ping);
-    let mut seen = Vec::new();
-    program.wait("pong", |message| {
-        seen.push(message.clone());
-        matches!(message, AppMessage::Pong).then_some(())
-    });
-    assert!(!seen.iter().any(|message| matches!(message, AppMessage::Notices { notices, .. } if !notices.is_empty())), "a take put in use said something");
+    // A success takes the refusal away, and after that says nothing.
+    let said = |program: &mut Program| {
+        program.send(HostMessage::TakeUsed { tab: "1".into(), path: "takes/Dawn.mp4".into(), artifact: Some("shot 12: final".into()), error: None });
+        program.send(HostMessage::Ping);
+        let mut seen = Vec::new();
+        program.wait("pong", |message| {
+            if let AppMessage::Notices { notices, .. } = message {
+                seen.push(notices.clone());
+            }
+            matches!(message, AppMessage::Pong).then_some(())
+        });
+        seen
+    };
+    let first = said(&mut program);
+    assert!(first.len() == 1 && first[0].is_empty(), "the refusal was not taken away: {first:?}");
+    assert!(said(&mut program).is_empty(), "a take put in use said something");
     drop(program);
     let _ = std::fs::remove_dir_all(&dir);
 }

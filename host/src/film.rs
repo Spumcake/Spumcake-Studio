@@ -132,17 +132,22 @@ pub(crate) struct Strip {
     seen: std::collections::HashMap<String, Vec<(String, bool)>>,
 }
 
-/// Each labelled run of `film`, by its label, with whether any of its
-/// places is still being made.
+/// Each labelled run of `film`, by its label and, after the first run of
+/// that label, its count among them, as two cells' rounds can be labelled
+/// alike, with whether any of its places is still being made.
 fn runs_seen(film: &Film, layout: &Layout) -> Vec<(String, bool)> {
-    layout
-        .spans
-        .iter()
-        .filter_map(|span| {
-            let group = film.groups.get(span.group?)?;
-            Some((group.label.clone(), film.items[span.start..span.end].iter().any(|item| item.pending.is_some())))
-        })
-        .collect()
+    let mut alike: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut runs = Vec::new();
+    for span in &layout.spans {
+        let Some(group) = span.group.and_then(|group| film.groups.get(group)) else {
+            continue;
+        };
+        let count = alike.entry(group.label.as_str()).or_default();
+        let key = if *count == 0 { group.label.clone() } else { format!("{} ({count})", group.label) };
+        *count += 1;
+        runs.push((key, film.items[span.start..span.end].iter().any(|item| item.pending.is_some())));
+    }
+    runs
 }
 
 /// The labelled run to bring into view: the last one that is new since
@@ -662,10 +667,9 @@ mod tests {
             ..film(&vec![(160, 90); labels.len()])
         };
         let (ctx, rect) = (egui::Context::default(), Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 80.0)));
+        crate::toolbar::install_fonts(&ctx);
         let draw = |strip: &mut Strip, tab: &str, film: &Film| {
-            let mut output = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| strip.show(ui, tab, film, rect, false, false, &mut Vec::new()));
-            });
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| strip.show(ui, tab, film, rect, false, false, &mut Vec::new()));
             output.textures_delta.clear();
             strip.scroll
         };
@@ -674,6 +678,16 @@ mod tests {
         assert_eq!(draw(&mut strip, "2", &rounds(&["Round 1"])), 0.0);
         let more = rounds(&["Round 1", "Round 2", "Round 3", "Round 4", "Round 5", "Round 6"]);
         assert!(draw(&mut strip, "1", &more) > 0.0, "a new round past the edge was not brought into view");
+        // Two cells' rounds labelled alike: the second cell's new round is
+        // its own, not the first cell's seen again.
+        let two = |second: &[&str]| {
+            let mut labels = vec!["Round 1", "Round 2"];
+            labels.extend_from_slice(second);
+            rounds(&labels)
+        };
+        let mut strip = Strip::default();
+        assert_eq!(draw(&mut strip, "1", &two(&["Round 1"])), 0.0);
+        assert!(draw(&mut strip, "1", &two(&["Round 1", "Round 2"])) > 0.0, "a second cell's new round was taken for the first cell's");
     }
     use protocol::Thumbnail;
 

@@ -310,6 +310,9 @@ pub struct Session {
     pub project: Option<PathBuf>,
     /// The files written for drafts, being filed.
     filings: Vec<filing::Filing>,
+    /// The tabs whose notice is a refused Use this take, which a later
+    /// success takes away.
+    refused: std::collections::HashSet<String>,
     /// Where images and thumbnails for the host are written, and whether
     /// it is a folder of this session's own in memory, which stays when a
     /// project is named.
@@ -371,6 +374,7 @@ impl Session {
             curve_point: None,
             project: None,
             filings: Vec::new(),
+            refused: std::collections::HashSet::new(),
             in_memory: memory.is_some(),
             display_failed: false,
             cache: memory.unwrap_or_else(scratch_folder),
@@ -1081,8 +1085,9 @@ impl Session {
             }
             // A notice's close mark.
             "notice_close" => {
-                if let Some(image) = self.active_image() {
-                    out.push(notices(&image.id, None));
+                if let Some(tab) = self.active_image().map(|image| image.id.clone()) {
+                    self.refused.remove(&tab);
+                    out.push(notices(&tab, None));
                 }
             }
             "film_open" => {
