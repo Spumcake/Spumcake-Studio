@@ -1299,8 +1299,11 @@ impl HostWindow {
                 )));
                 continue;
             };
+            // A path may name a part of its file after "#", such as one
+            // chain of the pipeline's canon.sql that a workspace opens as a
+            // tab; the file is what must still exist.
             if let Some(file_path) = &tab.path
-                && !Path::new(file_path).exists()
+                && !Path::new(file_path.split('#').next().unwrap_or(file_path)).exists()
             {
                 notes.push(note(format!(
                     "“{}” was left out: {file_path} no longer exists.",
