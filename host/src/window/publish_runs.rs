@@ -1354,7 +1354,7 @@ mod tests {
         };
         skills("pipeline.py", &["new", "001"]);
         skills("pipeline.py", &["element", "001", "the diner", "--kind", "place"]);
-        skills("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);
+        skills("pipeline.py", &["chain", "001", "the diner", "--order", "01", "--title", "Shot 12"]);
         skills("pipeline.py", &["step", "001", "the diner", "layout", "--order", "1", "--skill", "build-previs", "--artifact", "the diner: layout"]);
         skills("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "2", "--skill", "generate-keyframe", "--endpoint", r#"{"kind": "fal", "model": "stand-in"}"#, "--template", "The diner.", "--refs", r#"[{"artifact": "the diner: layout", "role": "image 1"}]"#, "--artifact", "the diner: keyframe"]);
         let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
@@ -1385,7 +1385,7 @@ mod tests {
         // A Save on the layout, which both keyframes were made from.
         let (warning, made_from) = iteration_warning(&place, &layout).unwrap().expect("a Save on a dependency gave no warning");
         assert!(warning.ends_with("is in use as a dependency, and new iterations would break canonical consistency."), "{warning}");
-        assert_eq!(made_from, "2 takes in the diner were made from it.", "the two takes of one cell, a recipe with no title, were not named once by its chain");
+        assert_eq!(made_from, "2 takes in Shot 12 were made from it.", "the two takes of one cell were not named once by their recipe's title");
         std::fs::write(folder.join("work/layout-edit.png"), b"\x89PNG\r\n\x1a\nedited").unwrap();
         let filed = save_iteration(&place, &layout, "work/layout-edit.png").unwrap().expect("nothing was filed");
         let assets = assets_of(&place).unwrap();
