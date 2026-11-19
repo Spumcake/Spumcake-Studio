@@ -559,6 +559,21 @@ pub(crate) fn rounds(folder: &Path, cell: &str, step: Option<&StepRef>, outputs:
         .collect()
 }
 
+/// Each take of the rounds as its asset stands: its iterations, the canon
+/// mark while it is in use with its artifact, and its outline or Unverified
+/// mark. A take that is no asset's first, such as an iteration made by a
+/// fix, keeps what its round gave it.
+pub(crate) fn fill_takes(rounds: &mut [Round], assets: &[crate::assets::Asset]) {
+    for take in rounds.iter_mut().flat_map(|round| round.takes.iter_mut()) {
+        let Some(asset) = assets.iter().find(|asset| asset.first == take.path) else { continue };
+        take.iterations = asset.iterations.clone();
+        take.canon = asset.in_use;
+        take.artifact = asset.artifact.clone().filter(|_| asset.in_use);
+        take.outlined = asset.outlined;
+        take.unverified = asset.unverified;
+    }
+}
+
 fn round_of(id: &str, record: &Value, state: RoundState, started: u64, outputs: &[String], error: Option<String>, report: Option<String>) -> Round {
     let model = record
         .pointer("/sent/model")
@@ -900,7 +915,14 @@ impl PromptPage {
             CellPart::Path { path, .. } => Some(path.clone()),
             _ => None,
         }).collect();
-        Some(rounds(folder, &cell.id, cell.step.as_ref(), &outputs, &canon, &mut self.reports))
+        let mut found = rounds(folder, &cell.id, cell.step.as_ref(), &outputs, &canon, &mut self.reports);
+        // Each take as its asset stands: its iterations, whether it is in
+        // use, and whether Skills finds it out of date.
+        if let Some(pipeline) = living_pipeline(folder) {
+            let touches = script(scripts, folder, setup, "pipeline.py", &["touches", &pipeline, "--json"]).ok().and_then(|printed| serde_json::from_str(&printed).ok()).unwrap_or(Value::Null);
+            fill_takes(&mut found, &crate::assets::assets(folder, &canon, &touches));
+        }
+        Some(found)
     }
 
     /// Saves a person's edit to a step's cell into the step, with
@@ -1157,6 +1179,26 @@ mod tests {
         let dusk = rounds(&folder, "dusk", None, &[String::from("library/dusk.png")], &Canon::default(), &mut Reports::default());
         assert_eq!(ids(dusk), ["dusk"], "an image made from another pulled in that one's family as its rounds");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a take shown without its iterations, with the canon mark
+    /// while not in use, or with an outline on an asset not in use.
+    #[test]
+    fn a_take_shows_its_asset() {
+        let take = |path: &str| protocol::TakeFile { path: path.into(), media_type: "image/png".into(), canon: true, iterations: Vec::new(), outlined: false, unverified: false, artifact: None };
+        let mut round: Round = serde_json::from_value(json!({ "request": "bell", "number": 1, "model": "m", "state": "done" })).unwrap();
+        round.takes = vec![take("library/bell.png"), take("library/bell-alt.png")];
+        let mut found = vec![round];
+        let edit = protocol::Iteration { file: "prompts/resources/bell-edit.png".into(), published: Some(1), fix: false };
+        let assets = [
+            crate::assets::Asset { first: "library/bell.png".into(), iterations: vec![edit.clone()], artifact: Some("Last order: keyframe, the bell".into()), in_use: true, outlined: true, ..Default::default() },
+            crate::assets::Asset { first: "library/bell-alt.png".into(), artifact: Some("Last order: keyframe, the bell, 2".into()), ..Default::default() },
+        ];
+        fill_takes(&mut found, &assets);
+        let (bell, alternative) = (&found[0].takes[0], &found[0].takes[1]);
+        assert_eq!(bell.iterations, [edit]);
+        assert!(bell.canon && bell.outlined && bell.artifact.as_deref() == Some("Last order: keyframe, the bell"));
+        assert!(!alternative.canon && !alternative.outlined && alternative.artifact.is_none(), "a take not in use was shown in use: {alternative:?}");
     }
 
     /// Catches Generate again naming a third alternative "<step>, 2, 2", or

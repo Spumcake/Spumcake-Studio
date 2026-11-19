@@ -21,9 +21,10 @@ use std::path::Path;
 pub(crate) struct Asset {
     /// The take it started as, relative to the project.
     pub first: String,
-    /// Its iterations after the first, oldest first. The last, or the first
-    /// when there are none, is canon.
-    pub iterations: Vec<String>,
+    /// Its iterations after the first, oldest first, each with when it was
+    /// published and whether it was a fix. The last, or the first when there
+    /// are none, is canon.
+    pub iterations: Vec<protocol::Iteration>,
     /// The chain and the place in it of the cell whose step makes it, or
     /// none for a take no step makes.
     pub cell: Option<(String, i64)>,
@@ -41,30 +42,31 @@ pub(crate) struct Asset {
 impl Asset {
     /// Its canonical iteration: its latest.
     pub(crate) fn canonical(&self) -> &str {
-        self.iterations.last().unwrap_or(&self.first)
+        self.iterations.last().map_or(self.first.as_str(), |iteration| iteration.file.as_str())
     }
 
     /// Every file it holds, the first take first.
     pub(crate) fn files(&self) -> impl Iterator<Item = &String> {
-        std::iter::once(&self.first).chain(&self.iterations)
+        std::iter::once(&self.first).chain(self.iterations.iter().map(|iteration| &iteration.file))
     }
 }
 
-/// Each file's iterations, by the file it iterates, oldest first: from
+/// Each file's iterations, by the file it iterates, oldest first, each as
+/// when it was filed or published, its file, and whether it was a fix: from
 /// `prompts/resources/records.jsonl` and every pipeline's `runs.jsonl`.
-fn iterations_of(folder: &Path) -> HashMap<String, Vec<(String, String)>> {
+fn iterations_of(folder: &Path) -> HashMap<String, Vec<(String, String, bool)>> {
     let lines = |path: &Path| std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).collect::<Vec<_>>();
     let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()).map(String::from);
-    let mut next: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let mut add = |of: String, file: String, at: String| {
+    let mut next: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+    let mut add = |of: String, file: String, at: String, fix: bool| {
         if of != file {
-            next.entry(of).or_default().push((at, file));
+            next.entry(of).or_default().push((at, file, fix));
         }
     };
     for record in lines(&folder.join("prompts/resources/records.jsonl")) {
         let of = record.get("iterates").and_then(|iterates| text(iterates, "file").or_else(|| iterates.as_str().map(String::from)));
         if let (Some(of), Some(file)) = (of, text(&record, "file")) {
-            add(of, file, text(&record, "at").unwrap_or_default());
+            add(of, file, text(&record, "at").unwrap_or_default(), false);
         }
     }
     for pipeline in std::fs::read_dir(folder.join("pipeline")).into_iter().flatten().flatten() {
@@ -73,14 +75,27 @@ fn iterations_of(folder: &Path) -> HashMap<String, Vec<(String, String)>> {
                 continue;
             }
             let Some(file) = text(&event, "file") else { continue };
-            for of in [text(&event, "edited_from"), text(&event, "fixes")].into_iter().flatten() {
-                add(of, file.clone(), text(&event, "at").unwrap_or_default());
+            let at = text(&event, "at").unwrap_or_default();
+            if let Some(of) = text(&event, "edited_from") {
+                add(of, file.clone(), at.clone(), false);
+            }
+            if let Some(of) = text(&event, "fixes") {
+                add(of, file.clone(), at, true);
             }
         }
     }
     for later in next.values_mut() {
         later.sort();
-        later.dedup();
+        // A file filed and then published as an iteration is one iteration,
+        // a fix when either says so.
+        let mut kept: Vec<(String, String, bool)> = Vec::new();
+        for (at, file, fix) in later.drain(..) {
+            match kept.iter_mut().find(|(_, known, _)| *known == file) {
+                Some(known) => known.2 |= fix,
+                None => kept.push((at, file, fix)),
+            }
+        }
+        *later = kept;
     }
     next
 }
@@ -91,7 +106,7 @@ fn iterations_of(folder: &Path) -> HashMap<String, Vec<(String, String)>> {
 /// started, then the files only canon names.
 pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset> {
     let next = iterations_of(folder);
-    let iterated: HashSet<&str> = next.values().flatten().map(|(_, file)| file.as_str()).collect();
+    let iterated: HashSet<&str> = next.values().flatten().map(|(_, file, _)| file.as_str()).collect();
     // Each take, with the step its report names.
     let mut takes: Vec<(String, String, Option<(String, String)>)> = Vec::new();
     for entry in std::fs::read_dir(folder.join("requests")).into_iter().flatten().flatten() {
@@ -129,11 +144,11 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             let mut iterations = Vec::new();
             let mut at = first.clone();
             let mut walked = HashSet::from([first.clone()]);
-            while let Some((_, newer)) = next.get(&at).and_then(|later| later.last()) {
+            while let Some((when, newer, fix)) = next.get(&at).and_then(|later| later.last()) {
                 if !walked.insert(newer.clone()) {
                     break;
                 }
-                iterations.push(newer.clone());
+                iterations.push(protocol::Iteration { file: newer.clone(), published: crate::prompt_page::epoch(when), fix: *fix });
                 at = newer.clone();
             }
             let mut asset = Asset { first, iterations, ..Asset::default() };
@@ -221,7 +236,9 @@ mod tests {
         let firsts: Vec<&str> = found.iter().map(|asset| asset.first.as_str()).collect();
         assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/layout.png"], "an iteration became an asset, or a document was taken for one");
         let bell = &found[0];
-        assert_eq!(bell.iterations, ["prompts/resources/bell-edit.png", "library/bell-3.png"]);
+        let files: Vec<&str> = bell.iterations.iter().map(|iteration| iteration.file.as_str()).collect();
+        assert_eq!(files, ["prompts/resources/bell-edit.png", "library/bell-3.png"]);
+        assert_eq!(bell.iterations.iter().map(|iteration| iteration.fix).collect::<Vec<_>>(), [false, true], "the fix was not marked as one");
         assert_eq!(bell.canonical(), "library/bell-3.png");
         assert!(bell.in_use && bell.outlined, "the bell's keyframe in use was not outlined: {bell:?}");
         assert_eq!(bell.cell, Some((String::from("the animatic"), 3)));
