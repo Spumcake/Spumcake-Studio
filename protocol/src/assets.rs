@@ -23,11 +23,20 @@ pub const ITERATES: &str = "iterates";
 /// Where a project keeps the records of what it filed, relative to it.
 pub const RESOURCE_RECORDS: &str = "prompts/resources/records.jsonl";
 
+/// One iteration of a file: when it was filed or published, its file, and
+/// whether it was a fix, made again because it was out of date.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Iterated {
+    pub at: String,
+    pub file: String,
+    pub fix: bool,
+}
+
 /// Each file, by the files filed or published as its iterations, oldest
 /// first, and each iteration by the file it iterates.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Iterations {
-    next: HashMap<String, Vec<(String, String)>>,
+    next: HashMap<String, Vec<Iterated>>,
     before: HashMap<String, String>,
 }
 
@@ -40,7 +49,7 @@ impl Iterations {
             // The iterated file, as Skills writes it, or a plain path.
             let of = record.get(ITERATES).and_then(|iterates| text(iterates, "file").or_else(|| iterates.as_str()));
             if let (Some(of), Some(file)) = (of, text(&record, "file")) {
-                found.add(of, file, text(&record, "at").unwrap_or_default());
+                found.add(of, file, text(&record, "at").unwrap_or_default(), false);
             }
         }
         for event in run_logs.iter().flat_map(|log| json_lines(log)) {
@@ -50,22 +59,46 @@ impl Iterations {
             let Some(file) = text(&event, "file") else {
                 continue;
             };
-            for of in [text(&event, "edited_from"), text(&event, "fixes")].into_iter().flatten() {
-                found.add(of, file, text(&event, "at").unwrap_or_default());
+            let at = text(&event, "at").unwrap_or_default();
+            if let Some(of) = text(&event, "edited_from") {
+                found.add(of, file, at, false);
+            }
+            if let Some(of) = text(&event, "fixes") {
+                found.add(of, file, at, true);
             }
         }
         for later in found.next.values_mut() {
-            later.sort();
-            later.dedup();
+            later.sort_by(|a, b| (&a.at, &a.file).cmp(&(&b.at, &b.file)));
+            // A file filed and then published as an iteration is one
+            // iteration, at its first, and a fix when either says so.
+            let mut kept: Vec<Iterated> = Vec::new();
+            for next in later.drain(..) {
+                match kept.iter_mut().find(|known| known.file == next.file) {
+                    Some(known) => known.fix |= next.fix,
+                    None => kept.push(next),
+                }
+            }
+            *later = kept;
         }
         found
     }
 
-    fn add(&mut self, of: &str, file: &str, at: &str) {
+    fn add(&mut self, of: &str, file: &str, at: &str, fix: bool) {
         if of != file {
-            self.next.entry(of.to_string()).or_default().push((at.to_string(), file.to_string()));
+            self.next.entry(of.to_string()).or_default().push(Iterated { at: at.to_string(), file: file.to_string(), fix });
             self.before.insert(file.to_string(), of.to_string());
         }
+    }
+
+    /// The files filed or published as iterations of `file` itself, oldest
+    /// first, each once.
+    pub fn next(&self, file: &str) -> &[Iterated] {
+        self.next.get(file).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every file that iterates another, with the file it iterates.
+    pub fn iterated(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.before.iter().map(|(file, of)| (file.as_str(), of.as_str()))
     }
 
     /// The latest iteration of `file`: its newest iteration's latest, and
@@ -75,7 +108,7 @@ impl Iterations {
         let mut seen = HashSet::new();
         while seen.insert(at.clone()) {
             match self.next.get(&at).and_then(|later| later.last()) {
-                Some((_, newer)) => at = newer.clone(),
+                Some(newer) => at = newer.file.clone(),
                 None => break,
             }
         }
@@ -102,12 +135,12 @@ impl Iterations {
         let mut stack = vec![self.first(file)];
         let mut seen: HashSet<String> = stack.iter().cloned().collect();
         let mut at = stack[0].clone();
-        while let Some((_, newer)) = self.next.get(&at).and_then(|later| later.last()) {
-            if !seen.insert(newer.clone()) {
+        while let Some(newer) = self.next.get(&at).and_then(|later| later.last()) {
+            if !seen.insert(newer.file.clone()) {
                 break;
             }
-            stack.push(newer.clone());
-            at = newer.clone();
+            stack.push(newer.file.clone());
+            at = newer.file.clone();
         }
         stack
     }
@@ -154,5 +187,14 @@ mod tests {
         assert_eq!(found.first("prompts/resources/take-3.png"), "library/take.png");
         assert_eq!(found.stack("prompts/resources/take-2.png"), ["library/take.png", "prompts/resources/take-2.png", "prompts/resources/take-3.png"]);
         assert_eq!(found.stack("library/line-take-4.png"), ["library/line-take-4.png"]);
+        // Each iteration once, a fix marked.
+        assert_eq!(found.next("prompts/resources/bell-2.png"), [Iterated { at: "2026-11-19T11:00:00Z".into(), file: "library/bell-3.png".into(), fix: true }]);
+        assert!(!found.next("library/bell.png")[0].fix);
+        // Filed as an iteration, then published as one: one iteration.
+        let filed_then_published = Iterations::from_text(
+            &lines(&[serde_json::json!({ "at": "2026-11-19T10:00:00Z", "file": "prompts/resources/bell-edit.png", ITERATES: { "file": "library/bell.png", "sha256": "a1" } })]),
+            &[&lines(&[serde_json::json!({ "event": "publish", "at": "2026-11-19T10:00:01Z", "file": "prompts/resources/bell-edit.png", "edited_from": "library/bell.png" })])],
+        );
+        assert_eq!(filed_then_published.next("library/bell.png").len(), 1);
     }
 }
