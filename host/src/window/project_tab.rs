@@ -47,7 +47,7 @@ impl HostWindow {
                 // A library file's report is the report of the request that
                 // filed it, found from the file's name.
                 PanelEvent::OpenReport(named) if named.contains('/') => {
-                    let filed = crate::project_panel::request_of(&named, |id| folder.join("requests").join(format!("{id}.html")).is_file());
+                    let filed = crate::project_panel::request_of(&named, |id| crate::report::page_of(&folder, id).is_ok());
                     match filed {
                         Some(request) => self.open_report(&request),
                         None => self.tell(String::from("No request filed this file, so there is no report to show.")),
@@ -62,20 +62,22 @@ impl HostWindow {
         }
     }
 
-    /// Shows a request's report as the card. A report whose record cannot
-    /// be read says why, and its page opens with the system's opener.
+    /// Shows a request's report as the card, from `requests/` or, for
+    /// research, `sources/`. A report whose record cannot be read says why,
+    /// and its page opens with the system's opener.
     pub(super) fn show_report(&mut self, request: &str) {
-        let page = match self.report_page(request) {
-            Ok(page) => page,
+        let Some(folder) = self.project.as_ref().map(|project| project.folder.clone()) else {
+            return self.tell(String::from("No project is open, so there is no report to show."));
+        };
+        let path = match crate::report::page_of(&folder, request) {
+            Ok(path) => path,
             Err(reason) => return self.tell(reason),
         };
-        let Some(folder) = self.project.as_ref().map(|project| project.folder.clone()) else { return };
-        let path = format!("requests/{request}.html");
         let report = match Report::read(&folder, &path) {
             Ok(report) => report,
             Err(reason) => {
                 self.tell(reason);
-                self.ctx.open_url(egui::OpenUrl::new_tab(page.display().to_string()));
+                self.ctx.open_url(egui::OpenUrl::new_tab(folder.join(&path).display().to_string()));
                 return;
             }
         };

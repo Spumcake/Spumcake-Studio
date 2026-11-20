@@ -2154,6 +2154,7 @@ dependencies = [
  "draw",
  "eframe",
  "iconflow",
+ "image",
  "keyring",
  "kurbo",
  "libc",
