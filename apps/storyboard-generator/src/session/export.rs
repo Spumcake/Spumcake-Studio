@@ -20,6 +20,7 @@ impl Session {
             return Err("An export is already under way.".to_string());
         }
         self.kept_notices.retain(|notice| notice.id != CARD);
+        self.export_outcome = None;
         if let Some(reason) = self.export_refusal() {
             self.export_failed(&reason);
             return Err(reason);
@@ -61,13 +62,21 @@ impl Session {
 
     /// The animatic's step could not make the animatic.
     pub(crate) fn step_export_failed(&mut self, reason: &str) {
+        self.export_outcome = Some(Err(reason.to_string()));
         self.export_failed(reason);
     }
 
+    /// How the last export ended, once: the filed video, or why there is
+    /// none. The tool that asked for the export answers with it.
+    pub fn take_export_outcome(&mut self) -> Option<Result<String, String>> {
+        self.export_outcome.take()
+    }
+
     /// The animatic's step made `storyboard`'s animatic as `take`, a file
-    /// in the project, which the publish card now offers: it is the
-    /// animatic's file from now on, as an export's is.
+    /// in the project, a new video of its own: it is the animatic's
+    /// file from now on, as an export's is.
     pub(crate) fn step_exported(&mut self, storyboard: draw::document::DrawingId, take: &str, sources: Vec<(String, String)>) {
+        self.export_outcome = Some(Ok(take.to_string()));
         let bytes = self.project.as_ref().and_then(|project| std::fs::read(project.join(take)).ok()).unwrap_or_default();
         if let Some(record) = self.storyboards.iter_mut().find(|record| record.id() == storyboard) {
             record.set_exported(Some(crate::export::Exported { file: take.to_string(), bytes: protocol::fingerprint(&bytes), sources }));
@@ -100,8 +109,8 @@ impl Session {
         })
     }
 
-    /// The animatic as a file for another workspace's cell: the step's take
-    /// itself, where it is in the project.
+    /// The animatic as a file for another workspace's cell: the exported
+    /// video itself, where it is in the project.
     pub fn render_animatic(&self) -> Result<(String, String), String> {
         let project = self.project.as_deref().ok_or("No project is open.")?;
         let exported = self.active_storyboard().exported().ok_or("The animatic has not been exported yet.")?;

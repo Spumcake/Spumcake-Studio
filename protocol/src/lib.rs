@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+mod assets;
+pub mod canon;
 mod cell;
 mod declare;
 mod items;
@@ -14,6 +16,7 @@ mod timeline;
 mod tools;
 mod transport;
 mod view3d;
+pub use assets::*;
 pub use cell::*;
 pub use declare::*;
 pub use items::*;
