@@ -50,14 +50,14 @@ pub(crate) fn service_name(kind: &str) -> String {
 }
 
 /// One setting as the card says it: a finishing's target as the
-/// conventions guide words it, "To 60 fps" and "To 3840 × 2160", since
-/// an upscale always reaches 3840 wide; any other by its name and value,
-/// a number with no more places than it needs.
+/// conventions guide words it, "To 60 fps" and "To 4K", since an upscale
+/// is named 4K and its exact size depends on its source; any other by its
+/// name and value, a number with no more places than it needs.
 fn setting_words(name: &str, value: &Value) -> String {
     let number = |value: &Value| value.as_f64().map(|number| if number.fract() == 0.0 { format!("{number:.0}") } else { format!("{:.3}", number).trim_end_matches('0').to_string() });
     match name {
         "target_fps" => format!("To {} fps", number(value).unwrap_or_else(|| value.to_string())),
-        "upscale_factor" => String::from("To 3840 × 2160"),
+        "upscale_factor" => String::from("To 4K"),
         _ => format!("{name} {}", value.as_str().map(String::from).or_else(|| number(value)).unwrap_or_else(|| value.to_string())),
     }
 }
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn a_finishings_settings_read_as_its_target() {
         assert_eq!(setting_words("target_fps", &serde_json::json!(60)), "To 60 fps");
-        assert_eq!(setting_words("upscale_factor", &serde_json::json!(2.857142857142857)), "To 3840 × 2160");
+        assert_eq!(setting_words("upscale_factor", &serde_json::json!(2.857142857142857)), "To 4K");
         assert_eq!(setting_words("seed", &serde_json::json!(1114)), "seed 1114");
         assert_eq!(setting_words("strength", &serde_json::json!(0.3333333)), "strength 0.333");
         assert_eq!(setting_words("size", &serde_json::json!("1536x864")), "size 1536x864");
