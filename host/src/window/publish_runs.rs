@@ -294,13 +294,14 @@ fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
 /// Returns the file in `output/`.
 fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     // The mix is an asset of its own, made from the shot, as finishing is
-    // and Last order's mixes are: "<shot>, mixed", made from the shot in
-    // the role Last order records. The shot's own asset in use is never
-    // replaced.
+    // and Last order's mixes are: "<shot>, mixed", made from the shot in a
+    // role that says how its picture was finished, as Last order's 60 fps
+    // mix records it. The shot's own asset in use is never replaced.
     let (shot, file) = (delivery.artifact.as_str(), delivery.file.as_str());
     let artifact = format!("{shot}, mixed");
     let artifact = artifact.as_str();
-    let made_from = sources_of(place, artifact, None, file, &[(shot.to_string(), String::from(MIX_SOURCE_ROLE))])?;
+    let role = mix_source_role(place, shot, file);
+    let made_from = sources_of(place, artifact, None, file, &[(shot.to_string(), role)])?;
     let chain = chain_of(place, shot)?;
     let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact, "--file", file];
     if let Some(chain) = &chain {
@@ -316,9 +317,40 @@ fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or_else(|| String::from("The film was published, but where it was delivered was not given."))
 }
 
-/// The role a mix names its shot in, exactly as Last order records it, so
-/// Claude Code and the finishing rule find Studio's mixes as they find its.
-const MIX_SOURCE_ROLE: &str = "the picture, untouched"; // Skills' stored spelling
+/// The role a mix names its shot in, as Last order records it, so Claude
+/// Code and the finishing rule find Studio's mixes as they find its: the
+/// shot as it is, or how it was finished first.
+const MIX_SOURCE: &str = "the picture"; // Skills' stored spelling
+const UNTOUCHED: &str = "untouched";
+
+/// The role the mix at `file` names `shot` in: from the video its record
+/// says it was mixed from, back through each finishing request that made
+/// it, to the shot's own file, each finishing in turn as Last order words
+/// it, "retimed to 60 fps", "upscaled to 4K"; or "untouched".
+fn mix_source_role(place: &Place, shot: &str, file: &str) -> String {
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline).unwrap_or_default();
+    let shot_file = canon.files.get(shot).cloned().unwrap_or_default();
+    let picture = record_inputs(place, file).unwrap_or_default().into_iter().find(|input| crate::prompt_page::media_type(input).starts_with("video/"));
+    let mut finished: Vec<String> = Vec::new();
+    let mut at = picture.unwrap_or_default();
+    for _ in 0..8 {
+        if at.is_empty() || at == shot_file {
+            break;
+        }
+        let Some(record) = place.script("request.py", &["show", &at]).ok().and_then(|shown| serde_json::from_str::<Value>(&shown).ok()) else { break };
+        let settings = record.pointer("/endpoint/settings").cloned().unwrap_or(Value::Null);
+        if let Some(fps) = settings.get("target_fps").and_then(Value::as_f64) {
+            finished.push(format!("retimed to {fps:.0} fps"));
+        }
+        if settings.get("upscale_factor").is_some() {
+            finished.push(String::from("upscaled to 4K"));
+        }
+        let Some(source) = record.get("references").and_then(Value::as_array).and_then(|references| references.iter().find(|reference| reference.get("field").and_then(Value::as_str) == Some("video_url"))).and_then(|reference| reference.get("file").and_then(Value::as_str)) else { break };
+        at = source.to_string();
+    }
+    finished.reverse();
+    if finished.is_empty() { format!("{MIX_SOURCE}, {UNTOUCHED}") } else { format!("{MIX_SOURCE}, {}", finished.join(", then ")) }
+}
 
 /// The chain an artifact belongs to: its step's, or its own row's.
 fn chain_of(place: &Place, artifact: &str) -> Result<Option<String>, String> {
@@ -1187,7 +1219,7 @@ mod tests {
         assert_eq!(canon.files.get("the line: take, mixed"), Some(&mix), "the film is not an asset of its own");
         assert_eq!(canon.files.get("the line: take"), Some(&take), "the delivery replaced the shot in use");
         let role = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the line: take, mixed' AND source='the line: take'", "--read-only"]);
-        assert_eq!(role.trim(), MIX_SOURCE_ROLE);
+        assert_eq!(role.trim(), format!("{MIX_SOURCE}, {UNTOUCHED}"), "the mix of a shot as it is did not name it untouched");
         // A mix of a take published again since is refused before its card.
         std::fs::write(folder.join("agent/take2.wav"), b"RIFF take again").unwrap();
         let take2 = last(skills("request.py", &["resource", "agent/take2.wav", "--name", "take-again"]));
