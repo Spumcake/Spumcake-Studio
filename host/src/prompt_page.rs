@@ -182,7 +182,14 @@ fn references(cell: &Cell) -> Vec<(String, Option<String>, Option<String>)> {
 /// The user's endpoint for a model whose cell names none, as a workspace
 /// cannot know the user's endpoints: the one whose kind is the service the
 /// model's workflow skill names for it in its `models.json`.
-pub(crate) fn endpoint_for(settings: &Settings, skills: &[crate::skills_setup::Skill], model: &str) -> Option<String> {
+pub(crate) fn endpoint_for(settings: &Settings, skills: &[crate::skills_setup::Skill], model: &str, skill: Option<&str>) -> Option<String> {
+    // The step's skill's own route first, its page's "Runs on", which the
+    // user chose: a stand-in or an OpenAI-compatible address of their own.
+    if let Some(route) = skill.and_then(|skill| settings.skill_routes.get(skill))
+        && settings.endpoint(&route.endpoint).is_some()
+    {
+        return Some(route.endpoint.clone());
+    }
     let service = crate::prices::local_service(skills, model)?.to_lowercase();
     settings
         .endpoints
@@ -195,12 +202,12 @@ pub(crate) fn endpoint_for(settings: &Settings, skills: &[crate::skills_setup::S
         .map(|endpoint| endpoint.id.clone())
 }
 
-/// The endpoint a cell runs on: its own, or else the one its model's
-/// service names.
-pub(crate) fn cell_endpoint(settings: &Settings, cell: &Cell) -> Option<String> {
+/// The endpoint a cell runs on: its own, or else its step's skill's route,
+/// or else the one its model's service names.
+pub(crate) fn cell_endpoint(settings: &Settings, cell: &Cell, skill: Option<&str>) -> Option<String> {
     cell.endpoint.clone().or_else(|| {
         let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&settings.skill_folders));
-        endpoint_for(settings, &skills, cell.model.as_deref()?)
+        endpoint_for(settings, &skills, cell.model.as_deref().unwrap_or(""), skill)
     })
 }
 
@@ -209,7 +216,7 @@ const SOUND_ON_FAL: &str = "Sound is made only through fal.ai.";
 
 /// The kind of request `request.py` makes for a cell on this endpoint.
 fn request_kind(settings: &Settings, cell: &Cell) -> Result<&'static str, String> {
-    let endpoint = cell_endpoint(settings, cell).and_then(|id| settings.endpoint(&id).cloned()).ok_or("This cell has no endpoint. Choose one for it.")?;
+    let endpoint = cell_endpoint(settings, cell, None).and_then(|id| settings.endpoint(&id).cloned()).ok_or("This cell has no endpoint. Choose one for it.")?;
     let image = cell.kind == protocol::IMAGE_KIND;
     let video = cell.kind == protocol::VIDEO_KIND;
     let sound = cell.kind == protocol::SOUND_KIND;
@@ -840,10 +847,9 @@ impl PromptPage {
 
     /// What the card shows of a declared cell.
     pub(crate) fn card(&mut self, folder: &Path, scripts: &Path, setup: &[(String, String)], settings: &Settings, declared: &Cell, at: &ItemRef) -> CardView {
-        let shown = match &declared.step {
-            Some(step) => self.step(folder, scripts, setup, step).map(|read| step_cell(declared, &read, &self.canon)),
-            None => None,
-        };
+        let read = declared.step.as_ref().and_then(|step| self.step(folder, scripts, setup, step));
+        let skill = read.as_ref().and_then(|read| read.get("skill").and_then(Value::as_str).map(String::from));
+        let shown = read.as_ref().map(|read| step_cell(declared, read, &self.canon));
         self.refresh(folder, scripts, setup);
         let cell = shown.clone().unwrap_or_else(|| declared.clone());
         // The cost is worked out from the spec the run would send.
@@ -851,7 +857,7 @@ impl PromptPage {
             Some(_) => None,
             None => draft_spec(settings, &cell, at).ok(),
         };
-        let service = cell_endpoint(settings, &cell).and_then(|id| settings.endpoint(&id).map(|endpoint| endpoint.name.clone())).unwrap_or_default();
+        let service = cell_endpoint(settings, &cell, skill.as_deref()).and_then(|id| settings.endpoint(&id).map(|endpoint| endpoint.name.clone())).unwrap_or_default();
         let (scripts, folder, setup, id) = (scripts.to_path_buf(), folder.to_path_buf(), setup.to_vec(), cell.id.clone());
         let step = declared.step.clone();
         let cost = self.costs.line(&cell, move || {
@@ -1054,10 +1060,16 @@ mod tests {
         let skill = crate::skills_setup::Skill { name: String::from("finish-shot"), description: String::new(), implements: Vec::new(), helps: Vec::new(), folder: folder.clone(), root: folder.clone() };
         let mut settings = Settings::default();
         settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("fal-1"), name: String::from("fal.ai"), kind: EndpointKind::Fal, address: String::from("https://fal.ai"), description: String::new() });
-        assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "topaz/upscale/video/precision").as_deref(), Some("fal-1"));
-        assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "other/model"), None, "a model no skill names took an endpoint");
+        assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "topaz/upscale/video/precision", None).as_deref(), Some("fal-1"));
+        assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "other/model", None), None, "a model no skill names took an endpoint");
         settings.endpoints.clear();
-        assert_eq!(endpoint_for(&settings, &[skill], "topaz/upscale/video/precision"), None, "a service the user has no endpoint for took one");
+        assert_eq!(endpoint_for(&settings, std::slice::from_ref(&skill), "topaz/upscale/video/precision", None), None, "a service the user has no endpoint for took one");
+        // A step's skill's route, an OpenAI-compatible stand-in the user
+        // chose on its page, comes before the address match.
+        settings.endpoints.push(crate::workspace::EndpointSetting { id: String::from("images"), name: String::from("Images"), kind: EndpointKind::Openai, address: String::from("http://127.0.0.1:9"), description: String::new() });
+        assert_eq!(endpoint_for(&settings, &[skill.clone()], "gpt-image-2.6-sunburst", Some("generate-keyframe")), None, "an address not OpenAI's was taken with no route");
+        settings.skill_routes.insert(String::from("generate-keyframe"), crate::workspace::SkillRoute { endpoint: String::from("images"), model: String::from("gpt-image-2.6-sunburst") });
+        assert_eq!(endpoint_for(&settings, &[skill], "gpt-image-2.6-sunburst", Some("generate-keyframe")).as_deref(), Some("images"), "the step's skill's route was passed over");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
