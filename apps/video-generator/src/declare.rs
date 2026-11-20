@@ -379,7 +379,8 @@ pub fn properties(session: &Session) -> Option<Properties> {
             page("Layers", 0, Some(Page::Layers)),
             page("Properties", 1, Some(Page::Properties)),
             page("Adjustments", 2, None),
-            page("Prompt", 3, Some(Page::Prompt)),
+            // Off for a video opened to play, which has no prompt.
+            page("Prompt", 3, (!tab.plays || tab.gallery.current_cell().is_some()).then_some(Page::Prompt)),
         ],
         cell: (shown == Page::Prompt).then(|| tab.gallery.current_cell().map(|cell| prompt_cell(&cell.id, session.has_animatic()))).flatten(),
     })

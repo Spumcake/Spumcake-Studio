@@ -1421,6 +1421,11 @@ pub(crate) struct CardState<'a> {
     /// The project's folder, against which a reference's relative path is
     /// read.
     pub root: Option<&'a std::path::Path>,
+    /// The project's sound cues, its canon facts `<cue>: start`, which a
+    /// sound reference marks before any other, and why they are at the
+    /// film's times, when they are for an error in the step's template.
+    pub cues: &'a [protocol::Cue],
+    pub cue_note: Option<&'a str>,
 }
 
 /// A reference's small image, with words for its corner, such as a
@@ -1640,7 +1645,7 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
         .input
         .iter()
         .filter(|part| is_reference(part) && part_media_type(part).starts_with("audio/"))
-        .flat_map(|part| sound_cues(part, state.previews.and_then(|previews| previews.get(&reference_key(part)))))
+        .flat_map(|part| sound_cues(part, state.previews.and_then(|previews| previews.get(&reference_key(part))), state.cues))
         .collect();
     if let Some(text) = prompt_field(ui, id, cell, &declared.hint, width, &cues) {
         events.push(CardEvent::Edit { cell: id.to_string(), input: with_prompt(&cell.input, &text), settings: cell.settings.clone() });
@@ -1853,11 +1858,19 @@ pub(crate) fn beats(text: &str) -> Vec<(std::ops::Range<usize>, f64, f64)> {
     spans
 }
 
-/// A sound reference's cues: its file's own, or else those its role names,
-/// as Last order's soundtrack's does, "with a door cue: … at exactly
-/// 3.00 s": each "<word> cue" at the first time in seconds after it, "at
-/// [exactly] N s", labelled with the word unless it is an article.
-pub(crate) fn sound_cues(part: &CellPart, preview: Option<&ReferencePreview>) -> Vec<protocol::Cue> {
+/// A sound reference's cues. The project's canon cue facts come first, as
+/// Spumcake-Skills holds a cue's time as canon. Without any, the file's own
+/// cue points, and then, for a project from before the facts such as Last
+/// order, those its role names, as Last order's soundtrack's does, "with a
+/// door cue: … at exactly 3.00 s": each "<word> cue" at the first time in
+/// seconds after it, "at [exactly] N s", labelled with the word unless it
+/// is an article. The prompt's own words are never read for a cue.
+pub(crate) fn sound_cues(part: &CellPart, preview: Option<&ReferencePreview>, facts: &[protocol::Cue]) -> Vec<protocol::Cue> {
+    if !facts.is_empty() {
+        // Those past the sound's end are not its own.
+        let length = preview.and_then(|preview| preview.length).unwrap_or(f64::INFINITY);
+        return facts.iter().filter(|cue| cue.at <= length).cloned().collect();
+    }
     if let Some(preview) = preview
         && !preview.cues.is_empty()
     {
@@ -2005,7 +2018,13 @@ fn references(
                     && let Some(preview) = preview
                     && let Some(length) = preview.length.filter(|length| *length > 0.0)
                 {
-                    sound_strip(ui, width, preview, &sound_cues(parts[reference], Some(preview)), length);
+                    sound_strip(ui, width, preview, &sound_cues(parts[reference], Some(preview), state.cues), length);
+                    // Why its cues are at the film's times, in gray under it.
+                    if let Some(note) = state.cue_note.filter(|_| !state.cues.is_empty()) {
+                        let galley = ui.painter().layout(note.to_string(), card_small(), MUTED, width);
+                        let (line, _) = ui.allocate_exact_size(vec2(width, galley.size().y + S.of(4.0)), Sense::hover());
+                        ui.painter().galley(line.left_top(), galley, MUTED);
+                    }
                 }
             }
             Entry::Slot(role) => slot_row(ui, row, index + 1, &declared.roles[role], declared, events),
@@ -2613,11 +2632,26 @@ mod tests {
         assert_eq!(read, [("[0s-3s] The keeper turns.", 0.0, 3.0), ("[3s–4.2s] The door bangs open behind him.", 3.0, 4.2), ("[4s-8s] It stays open", 4.0, 8.0)]);
         let role = "the soundtrack, with a door cue: quiet room tone to 3.0 s, then the door's latch click and bell at exactly 3.00 s, then the sound bed";
         let sound = CellPart::Path { path: "prompts/resources/door.wav".into(), media_type: "audio/wav".into(), role: Some(role.into()), field: None };
-        let cues = sound_cues(&sound, Some(&ReferencePreview::default()));
+        let cues = sound_cues(&sound, Some(&ReferencePreview::default()), &[]);
         assert_eq!(cues, [protocol::Cue { at: 3.0, label: "door".into(), colour: None }]);
         // A file's own cue points come first.
         let own = ReferencePreview { cues: vec![protocol::Cue { at: 1.5, label: "bell".into(), colour: None }], ..Default::default() };
-        assert_eq!(sound_cues(&sound, Some(&own))[0].label, "bell");
+        assert_eq!(sound_cues(&sound, Some(&own), &[])[0].label, "bell");
+        // The project's canon cue facts come before either.
+        let rows = "[\"the door\", \"start\", \"13.0 s\"]\n[\"the door\", \"end\", \"13.4\"]\n[\"the bell\", \"start\", \"1.5\"]\n[\"shot 2\", \"in\", \"10.0\"]";
+        let (film, frames) = crate::prompt_page::timing_facts(rows);
+        assert_eq!(film.iter().map(|cue| (cue.label.as_str(), cue.at)).collect::<Vec<_>>(), [("the bell", 1.5), ("the door", 13.0)]);
+        // On shot 2's sound, from 10 s in the film: the door at 3 s, the bell
+        // before the shot dropped; with no frame named, the film's times.
+        let (shot, note) = crate::prompt_page::shot_cues("Shot 2 opens at {{shot 2: in}}.", &film, &frames);
+        assert_eq!(shot.iter().map(|cue| (cue.label.as_str(), cue.at)).collect::<Vec<_>>(), [("the door", 3.0)]);
+        assert_eq!(note, None);
+        assert_eq!(crate::prompt_page::shot_cues("No frame named.", &film, &frames), (film.clone(), None));
+        // Two shots named is a template's error: the film's times, and why.
+        assert_eq!(crate::prompt_page::shot_cues("{{shot 2: in}} and {{shot 3: in}}", &film, &frames), (film.clone(), Some(crate::prompt_page::SEVERAL_SHOTS)));
+        let eight = ReferencePreview { length: Some(8.0), ..own.clone() };
+        assert_eq!(sound_cues(&sound, Some(&eight), &shot), shot);
+        assert!(sound_cues(&sound, Some(&eight), &film).iter().all(|cue| cue.at <= 8.0), "a cue past the sound's end was marked");
         let job = prompt_job(prompt, egui::FontId::proportional(14.0), 300.0, &cues);
         let lit: Vec<&str> = job.sections.iter().filter(|section| section.format.background != Color32::TRANSPARENT).map(|section| &prompt[section.byte_range.start.0..section.byte_range.end.0]).collect();
         assert_eq!(lit, ["[3s–4.2s] The door bangs open behind him."]);

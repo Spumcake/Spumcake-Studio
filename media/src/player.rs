@@ -365,8 +365,8 @@ fn output(state: Arc<Mutex<State>>, rate: u32, fps: (u32, u32)) -> Result<cpal::
             },
             None,
         )
-        .map_err(|why| error(format!("Studio could not open the sound output at {rate} Hz: {why}.")))?;
-    stream.play().map_err(|why| error(format!("Studio could not start the sound output: {why}.")))?;
+        .map_err(|why| error(format!("Spumcake for Desktop could not open the sound output at {rate} Hz: {why}.")))?;
+    stream.play().map_err(|why| error(format!("Spumcake for Desktop could not start the sound output: {why}.")))?;
     Ok(stream)
 }
 

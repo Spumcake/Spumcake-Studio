@@ -2649,6 +2649,8 @@ impl HostWindow {
                         cost: view.cost.as_deref(),
                         root: root.as_deref(),
                         previews: Some(&self.previews.shown),
+                        cues: &view.cues,
+                        cue_note: view.cue_note,
                         ..Default::default()
                     };
                     panel::show_with(&mut column, properties.as_ref(), &card, panel_rect)

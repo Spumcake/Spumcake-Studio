@@ -104,6 +104,10 @@ pub struct Tab {
     /// The take's sound and the sound layers as a held slider found them,
     /// until it is let go and the drag becomes one step.
     mix_before: Option<(crate::gallery::TakeSound, Vec<crate::gallery::SoundLayer>)>,
+    /// Opened to play a video file, such as a film delivered to `output/`:
+    /// no Prompt page cell is made for it, since it has no prompt or seed,
+    /// and its Prompt page is off while it has no cell.
+    pub plays: bool,
 }
 
 /// An image written for the host: what it shows, how many of its frames
@@ -774,6 +778,7 @@ impl Session {
             over_animatic: false,
             sound: None,
             mix_before: None,
+            plays: false,
         });
         self.active = self.tabs.len() - 1;
         self.active
@@ -1079,7 +1084,8 @@ impl Session {
                 self.page = match number("value").or_else(|| number("page")).map(|page| page as i64) {
                     Some(0) => Page::Layers,
                     Some(1) => Page::Properties,
-                    Some(3) => Page::Prompt,
+                    // Not for a video opened to play, which has no prompt.
+                    Some(3) if self.active_tab().is_none_or(|tab| !tab.plays || tab.gallery.current_cell().is_some()) => Page::Prompt,
                     _ => self.page,
                 };
             }
@@ -1397,7 +1403,8 @@ impl Session {
                 let title = file_title(&path);
                 let gallery = Gallery::new(vec![(title.clone(), link, file, Some(info))], 0);
                 self.stop_playing();
-                self.push_tab(gallery, None, Some(title));
+                let index = self.push_tab(gallery, None, Some(title));
+                self.tabs[index].plays = true;
                 self.declare_new(out);
             }
             Err(reason) => out.push(notice("This video could not be opened", &reason)),

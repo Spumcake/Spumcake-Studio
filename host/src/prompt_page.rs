@@ -51,6 +51,12 @@ pub(crate) struct Canon {
     /// Each step's place in its chain, by its chain and its name: the
     /// steps at one place are one cell's assets in use.
     pub step_orders: HashMap<(String, String), i64>,
+    /// Each sound cue the timing reference settled, its canon fact
+    /// `<cue>: start`, labelled by its element, in seconds from the film's
+    /// start, as Spumcake-Skills' write-timing-reference publishes them.
+    pub cues: Vec<protocol::Cue>,
+    /// Each frame's start in the film, its canon fact `<frame>: in`.
+    pub frame_starts: HashMap<String, f64>,
 }
 
 /// The living pipeline: the highest-numbered folder in `pipeline/`, as the
@@ -117,8 +123,66 @@ pub(crate) fn read_canon(scripts: &Path, folder: &Path, setup: &[(String, String
             }
         }
     }
+    let facts = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(element, name, value) FROM fact WHERE name IN ('start', 'end', 'in')", "--read-only"]).unwrap_or_default();
+    (canon.cues, canon.frame_starts) = timing_facts(&facts);
     Ok(canon)
 }
+
+/// The timing reference's canon facts, one JSON row each, `[element, name,
+/// value]`, in seconds from the film's start, as "3.0" or "3.0 s": each
+/// element's `start` is a sound cue labelled by the element, and each
+/// `in` a frame's start. An `end` alone marks nothing.
+pub(crate) fn timing_facts(rows: &str) -> (Vec<protocol::Cue>, HashMap<String, f64>) {
+    let (mut cues, mut frames) = (Vec::new(), HashMap::new());
+    for row in rows.lines() {
+        if let Ok(Value::Array(cells)) = serde_json::from_str::<Value>(row)
+            && let [Value::String(element), Value::String(name), Value::String(value)] = cells.as_slice()
+            && let Ok(at) = value.trim().trim_end_matches('s').trim().parse::<f64>()
+        {
+            match name.as_str() {
+                "start" => cues.push(protocol::Cue { at, label: element.clone(), colour: None }),
+                "in" => {
+                    frames.insert(element.clone(), at);
+                }
+                _ => {}
+            }
+        }
+    }
+    cues.sort_by(|a, b| a.at.total_cmp(&b.at));
+    (cues, frames)
+}
+
+/// A shot's cues: the film's cues less the start of the shot its step's
+/// template names, its one `{{<shot>: in}}` placeholder, when the canon
+/// holds that `in`, as Spumcake-Skills settled on 2026-11-20; those before
+/// the shot are dropped. Only the placeholders are read, never the prose
+/// around them. A template naming no `in` is timed to the whole film, so
+/// its cues are the film's times; one naming several is in error, and its
+/// cues are the film's times too, with `SEVERAL_SHOTS` to say why.
+pub(crate) fn shot_cues(template: &str, cues: &[protocol::Cue], frame_starts: &HashMap<String, f64>) -> (Vec<protocol::Cue>, Option<&'static str>) {
+    let mut shots: Vec<&str> = template
+        .match_indices("{{")
+        .filter_map(|(open, _)| {
+            let inside = &template[open + 2..open + 2 + template[open + 2..].find("}}")?];
+            inside.trim().strip_suffix(": in").map(str::trim)
+        })
+        .collect();
+    shots.sort_unstable();
+    shots.dedup();
+    let start = match shots.as_slice() {
+        [shot] => frame_starts.get(*shot).copied(),
+        [] => None,
+        _ => return (cues.to_vec(), Some(SEVERAL_SHOTS)),
+    };
+    let Some(start) = start else {
+        return (cues.to_vec(), None);
+    };
+    (cues.iter().filter(|cue| cue.at >= start).map(|cue| protocol::Cue { at: cue.at - start, ..cue.clone() }).collect(), None)
+}
+
+/// Why a step's cues are at the film's times when its template names more
+/// than one shot, the guide's proposed words of 2026-11-20.
+pub(crate) const SEVERAL_SHOTS: &str = "This step names more than one shot, so its cues are shown at the film's times.";
 
 /// A chain step, as `pipeline.py step --show` prints it.
 pub(crate) fn read_step(scripts: &Path, folder: &Path, setup: &[(String, String)], pipeline: &str, step: &StepRef) -> Result<Value, String> {
@@ -776,6 +840,11 @@ pub(crate) struct CardView {
     /// which shows as declared.
     pub cell: Option<Cell>,
     pub cost: Option<String>,
+    /// The project's sound cues, from its canon facts, as the cell's shot
+    /// hears them, and why they are at the film's times, when they are for
+    /// an error in its template.
+    pub cues: Vec<protocol::Cue>,
+    pub cue_note: Option<&'static str>,
 }
 
 /// The Prompt page's runner state for the open project: canon and steps as
@@ -878,7 +947,8 @@ impl PromptPage {
             crate::prices::fill_from_history(&folder, &mut plan);
             Some(cost_line(&plan, &service))
         });
-        CardView { cell: shown, cost }
+        let (cues, cue_note) = shot_cues(&cell.prompt(), &self.canon.cues, &self.canon.frame_starts);
+        CardView { cell: shown, cost, cues, cue_note }
     }
 
     /// The spec a cell runs as now, its step read afresh.
