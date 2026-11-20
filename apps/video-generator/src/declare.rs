@@ -382,7 +382,7 @@ pub fn properties(session: &Session) -> Option<Properties> {
             // Off for a video opened to play, which has no prompt.
             page("Prompt", 3, (!tab.plays || tab.gallery.current_cell().is_some()).then_some(Page::Prompt)),
         ],
-        cell: (shown == Page::Prompt).then(|| tab.gallery.current_cell().map(|cell| prompt_cell(&cell.id, session.has_animatic()))).flatten(),
+        cell: (shown == Page::Prompt).then(|| tab.gallery.current_cell().map(|cell| prompt_cell(cell, session.has_animatic()))).flatten(),
     })
 }
 
@@ -391,9 +391,28 @@ pub fn properties(session: &Session) -> Option<Properties> {
 /// have, Start frame and End frame each a row of its own, the references
 /// it takes, a reference's menu, and the settings Size, Length in seconds,
 /// and Seed.
-pub fn prompt_cell(cell: &str, animatic: bool) -> PanelCell {
+pub fn prompt_cell(cell: &protocol::Cell, animatic: bool) -> PanelCell {
+    let seed = CellSetting { key: "seed".into(), label: "Seed".into(), kind: RowKind::Field { min: 0.0, max: 2_147_483_647.0, places: 0 } };
+    // A step's settings are its model's own, which the host fills from the
+    // step: fal's video models name the length `duration` and the size
+    // `resolution`, as Last order's final shot sends them, and as
+    // vg-sound-cue shows them, Length, Resolution, and Seed. A draft's are
+    // this workspace's own.
+    let settings = if cell.step.is_some() {
+        vec![
+            CellSetting { key: "duration".into(), label: "Length".into(), kind: RowKind::Field { min: 1.0, max: 20.0, places: 0 } },
+            CellSetting { key: "resolution".into(), label: "Resolution".into(), kind: RowKind::Text },
+            seed,
+        ]
+    } else {
+        vec![
+            CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Text },
+            CellSetting { key: "length".into(), label: "Length".into(), kind: RowKind::Field { min: 1.0, max: 20.0, places: 0 } },
+            seed,
+        ]
+    };
     PanelCell {
-        cell: cell.to_string(),
+        cell: cell.id.clone(),
         hint: HINT.into(),
         roles: rounds::ROLES
             .iter()
@@ -401,11 +420,7 @@ pub fn prompt_cell(cell: &str, animatic: bool) -> PanelCell {
             .collect(),
         reference_types: rounds::REFERENCE_TYPES.iter().map(|kind| kind.to_string()).collect(),
         reference_menu: reference_menu(animatic),
-        settings: vec![
-            CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Text },
-            CellSetting { key: "length".into(), label: "Length".into(), kind: RowKind::Field { min: 1.0, max: 20.0, places: 0 } },
-            CellSetting { key: "seed".into(), label: "Seed".into(), kind: RowKind::Field { min: 0.0, max: 2_147_483_647.0, places: 0 } },
-        ],
+        settings,
         menu: Vec::new(),
     }
 }
@@ -442,4 +457,23 @@ pub fn tabs(session: &Session) -> Option<Tabs> {
         new_tab: Some(Action::new("new_video")),
         new_tab_tip: "New video".into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches a step's settings read under this workspace's own keys, so
+    /// its Length shows the field's least: a step's page declares its
+    /// model's keys, `duration` and `resolution`, as Length and Resolution,
+    /// and a draft its own Size and Length.
+    #[test]
+    fn a_steps_settings_are_its_models_own() {
+        let mut step = protocol::Cell::text("c1", "");
+        step.step = Some(protocol::StepRef { chain: "the final shot".into(), step: "final shot".into() });
+        let rows = |cell: &protocol::Cell| prompt_cell(cell, false).settings.into_iter().map(|row| (row.key, row.label)).collect::<Vec<_>>();
+        let pair = |key: &str, label: &str| (key.to_string(), label.to_string());
+        assert_eq!(rows(&step), [pair("duration", "Length"), pair("resolution", "Resolution"), pair("seed", "Seed")]);
+        assert_eq!(rows(&protocol::Cell::text("c2", "")), [pair("size", "Size"), pair("length", "Length"), pair("seed", "Seed")]);
+    }
 }

@@ -2448,11 +2448,18 @@ fn part_file(part: &CellPart) -> String {
 /// whose label is its menu word, by index, and the user's words. A role
 /// with no declared menu word is all the user's words.
 fn split_role<'a>(role: &'a str, roles: &[ReferenceRole]) -> (Option<usize>, &'a str) {
-    if let Some(index) = roles.iter().position(|known| known.label == role) {
+    // A role's menu word as written, or in a sentence's case after "the",
+    // as Last order's requests write "the start frame" for Start frame.
+    let known = |word: &str| {
+        let word = word.trim();
+        let word = word.strip_prefix("the ").or_else(|| word.strip_prefix("The ")).unwrap_or(word);
+        roles.iter().position(|known| known.label.eq_ignore_ascii_case(word))
+    };
+    if let Some(index) = known(role) {
         return (Some(index), "");
     }
     if let Some((word, words)) = role.split_once(", ")
-        && let Some(index) = roles.iter().position(|known| known.label == word)
+        && let Some(index) = known(word)
     {
         return (Some(index), words);
     }
@@ -2618,6 +2625,21 @@ fn setting_json(kind: &RowKind, value: &PropValue) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches Last order's "the start frame" kept apart from the Start
+    /// frame slot it fills: a role matches its menu word in a sentence's
+    /// case after "the", and the user's words after it are kept.
+    #[test]
+    fn a_role_after_the_fills_its_slot() {
+        let roles = vec![
+            ReferenceRole { label: "Start frame".into(), field: None, slot: true },
+            ReferenceRole { label: "Reference".into(), field: None, slot: false },
+        ];
+        assert_eq!(split_role("the start frame", &roles), (Some(0), ""));
+        assert_eq!(split_role("Start frame, the door", &roles), (Some(0), "the door"));
+        assert_eq!(split_role("The start frame, lit", &roles), (Some(0), "lit"));
+        assert_eq!(split_role("image 1, the lit plate", &roles), (None, "image 1, the lit plate"));
+    }
 
     /// Catches a timed beat read wrongly or lit for the wrong cue, and Last
     /// order's soundtrack, which has no cue points, losing its door: the
