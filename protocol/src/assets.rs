@@ -33,11 +33,13 @@ pub struct Iterated {
 }
 
 /// Each file, by the files filed or published as its iterations, oldest
-/// first, and each iteration by the file it iterates.
+/// first, and each iteration by every file it iterates or fixes, in the
+/// order they were read, as one filed `--iterates` one file and later
+/// published to fix another.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Iterations {
     next: HashMap<String, Vec<Iterated>>,
-    before: HashMap<String, String>,
+    before: HashMap<String, Vec<String>>,
 }
 
 impl Iterations {
@@ -86,7 +88,10 @@ impl Iterations {
     fn add(&mut self, of: &str, file: &str, at: &str, fix: bool) {
         if of != file {
             self.next.entry(of.to_string()).or_default().push(Iterated { at: at.to_string(), file: file.to_string(), fix });
-            self.before.insert(file.to_string(), of.to_string());
+            let before = self.before.entry(file.to_string()).or_default();
+            if !before.iter().any(|known| known == of) {
+                before.push(of.to_string());
+            }
         }
     }
 
@@ -96,9 +101,15 @@ impl Iterations {
         self.next.get(file).map_or(&[], Vec::as_slice)
     }
 
-    /// Every file that iterates another, with the file it iterates.
+    /// Every file that iterates another, with each file it iterates or
+    /// fixes.
     pub fn iterated(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.before.iter().map(|(file, of)| (file.as_str(), of.as_str()))
+        self.before.iter().flat_map(|(file, before)| before.iter().map(move |of| (file.as_str(), of.as_str())))
+    }
+
+    /// Every file that has iterations of its own.
+    pub fn with_iterations(&self) -> impl Iterator<Item = &str> {
+        self.next.keys().map(String::as_str)
     }
 
     /// The latest iteration of `file`: its newest iteration's latest, and
@@ -116,12 +127,13 @@ impl Iterations {
     }
 
     /// The asset's first file, the one `file` is an iteration of, through
-    /// every iteration before it, or `file` itself.
+    /// every iteration before it, or `file` itself. A file that iterates
+    /// more than one follows the last read.
     pub fn first(&self, file: &str) -> String {
         let mut at = file.to_string();
         let mut seen = HashSet::new();
         while seen.insert(at.clone()) {
-            match self.before.get(&at) {
+            match self.before.get(&at).and_then(|before| before.last()) {
                 Some(older) => at = older.clone(),
                 None => break,
             }
@@ -196,5 +208,20 @@ mod tests {
             &[&lines(&[serde_json::json!({ "event": "publish", "at": "2026-11-19T10:00:01Z", "file": "prompts/resources/bell-edit.png", "edited_from": "library/bell.png" })])],
         );
         assert_eq!(filed_then_published.next("library/bell.png").len(), 1);
+        assert_eq!(filed_then_published.iterated().count(), 1);
+        // Filed as an iteration of one file, then published to fix another:
+        // an iteration of both, and both have iterations.
+        let iterates_and_fixes = Iterations::from_text(
+            &lines(&[serde_json::json!({ "at": "2026-11-19T10:00:00Z", "file": "prompts/resources/F.png", ITERATES: { "file": "library/A.png", "sha256": "a1" } })]),
+            &[&lines(&[serde_json::json!({ "event": "publish", "at": "2026-11-19T11:00:00Z", "file": "prompts/resources/F.png", "fixes": "library/B.png" })])],
+        );
+        let mut of: Vec<&str> = iterates_and_fixes.iterated().map(|(_, of)| of).collect();
+        of.sort();
+        assert_eq!(of, ["library/A.png", "library/B.png"]);
+        let mut with: Vec<&str> = iterates_and_fixes.with_iterations().collect();
+        with.sort();
+        assert_eq!(with, ["library/A.png", "library/B.png"]);
+        assert_eq!(iterates_and_fixes.latest("library/A.png"), "prompts/resources/F.png");
+        assert_eq!(iterates_and_fixes.first("prompts/resources/F.png"), "library/B.png");
     }
 }

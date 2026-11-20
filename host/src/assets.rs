@@ -126,11 +126,11 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
     }
     // So is a file iterated since, such as a filed layout edited in its
     // workspace, though canon now names its iteration.
-    let mut edited: Vec<String> = next.iterated().map(|(_, of)| of.to_string()).filter(|file| is_reference(file) && !iterated.contains(file.as_str())).collect();
+    let mut edited: Vec<&str> = next.with_iterations().filter(|file| is_reference(file) && !iterated.contains(file)).collect();
     edited.sort();
     for file in edited {
-        if seen.insert(file.clone()) {
-            takes.push((String::new(), file.clone(), None));
+        if seen.insert(file.to_string()) {
+            takes.push((String::new(), file.to_string(), None));
         }
     }
     // And so is every other file the project's records name, a filed
@@ -368,6 +368,35 @@ mod tests {
         assert!(found[3].in_use && found[3].cell.is_none(), "a published resource no step makes was given a cell");
         assert!(!found[4].in_use && found[4].cell.is_none(), "a filed export was put in a cell, or in use");
         assert!(found[5].cell.is_none(), "a mix filed from a take was put in a cell");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a file lost from the Library when the file filed as its
+    /// iteration is later published to fix another.
+    #[test]
+    fn a_file_iterated_by_a_fix_of_another_stays_an_asset() {
+        let folder = std::env::temp_dir().join(format!("assets-both-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["prompts/resources", "pipeline/002", "library"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        std::fs::write(
+            folder.join("prompts/resources/records.jsonl"),
+            json!({ "at": "2026-11-19T10:00:00Z", "file": "prompts/resources/F.png", "iterates": { "file": "library/A.png", "sha256": "a1" } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("pipeline/002/runs.jsonl"),
+            json!({ "event": "publish", "at": "2026-11-19T11:00:00Z", "artifact": "Last order: keyframe, the bell", "file": "prompts/resources/F.png", "fixes": "library/B.png" }).to_string(),
+        )
+        .unwrap();
+        for held in ["library/A.png", "library/B.png", "prompts/resources/F.png"] {
+            std::fs::write(folder.join(held), b"held").unwrap();
+        }
+        let found = assets(&folder, &Canon::default(), &json!({}));
+        let firsts: Vec<&str> = found.iter().map(|asset| asset.first.as_str()).collect();
+        assert_eq!(firsts, ["library/A.png", "library/B.png"], "a file with iterations was left out, or its iteration became an asset");
+        assert!(found.iter().all(|asset| asset.canonical() == "prompts/resources/F.png"));
         let _ = std::fs::remove_dir_all(&folder);
     }
 }
