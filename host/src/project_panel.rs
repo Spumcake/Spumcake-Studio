@@ -407,7 +407,7 @@ impl Thumbs {
             let root = project.to_path_buf();
             std::thread::spawn(move || {
                 for path in asked {
-                    if let Some(image) = shrunk(&root.join(&path)) {
+                    if let Some(image) = shrunk(&root.join(&path), THUMB_WIDTH) {
                         if send.send((path.display().to_string(), image)).is_err() {
                             break;
                         }
@@ -423,14 +423,14 @@ impl Thumbs {
     }
 }
 
-/// An image file, shrunk to at most `THUMB_WIDTH` wide by averaging.
-fn shrunk(file: &Path) -> Option<egui::ColorImage> {
+/// An image file, shrunk to at most `widest` pixels wide by averaging.
+pub(crate) fn shrunk(file: &Path, widest: usize) -> Option<egui::ColorImage> {
     let icon = eframe::icon_data::from_png_bytes(&std::fs::read(file).ok()?).ok()?;
     let (w, h) = (icon.width as usize, icon.height as usize);
     if w == 0 || h == 0 {
         return None;
     }
-    let step = w.div_ceil(THUMB_WIDTH).max(1);
+    let step = w.div_ceil(widest).max(1);
     let (tw, th) = (w / step, h / step);
     let mut pixels = Vec::with_capacity(tw * th * 4);
     for y in 0..th {
@@ -758,17 +758,16 @@ mod tests {
         let assets = crate::assets::read_assets(&scripts.scripts, project, &[], &crate::prompt_page::living_pipeline(project).unwrap()).unwrap();
         assert_eq!(listing.library.len(), assets.len(), "Library shows each asset once");
         // Library draws every file the grouping covers, each asset once at
-        // its latest iteration with its count of iterations: by the plan's
-        // rule of 2026-11-20, the 615 files the port's inventory counts in
-        // Last order, research in `sources/` included.
+        // its latest iteration with its count of iterations, research in
+        // `sources/` included, as the plan's rule of 2026-11-20 counts them.
         let mut drawn: Vec<&str> = listing.library.iter().map(|tile| tile.file.as_str()).collect();
         let mut latest: Vec<&str> = assets.iter().map(|asset| asset.canonical()).collect();
         drawn.sort();
         latest.sort();
         assert_eq!(drawn, latest, "Library's tiles are not the assets at their latest iterations");
         let covered: usize = listing.library.iter().map(|tile| tile.iterations).sum();
-        assert_eq!(covered, assets.iter().map(|asset| asset.files().count()).sum::<usize>());
-        assert_eq!(covered, 615, "Library covers {covered} files, where the port's inventory counts 615");
+        // The grouping's own test holds this count to the port's inventory.
+        assert_eq!(covered, assets.iter().map(|asset| asset.files().count()).sum::<usize>(), "Library covers other files than the grouping");
         assert!(listing.library.iter().any(|tile| tile.file.starts_with("sources/")), "no research source is in Library");
         assert!(listing.library.iter().any(|tile| tile.cell.is_some()), "an asset in a recipe names its cell");
         // The animatic, canon in prompts/resources/, is one of Library's

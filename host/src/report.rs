@@ -590,7 +590,11 @@ pub(crate) fn shown_file(
     let shown = match preview.and_then(|preview| preview.thumbnail.as_ref()) {
         Some(thumbnail) => crate::raster::raw_image(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false)
             .map(|(texture, _)| (texture, vec2(thumbnail.width.max(1) as f32, thumbnail.height.max(1) as f32))),
-        None if !path.is_empty() => crate::chat::shown_texture(ui.ctx(), &project.join(path).display().to_string()).map(|texture| (texture.id(), texture.size_vec2())),
+        // Only an image is read here, off the window's thread; a video or a
+        // sound waits for its workspace's preview.
+        None if crate::project_panel::Kind::of(path) == Some(crate::project_panel::Kind::Image) => {
+            image_texture(ui.ctx(), &project.join(path)).map(|texture| (texture.id(), texture.size_vec2()))
+        }
         None => None,
     };
     match shown {
@@ -618,6 +622,65 @@ pub(crate) fn shown_file(
         return response.clicked();
     }
     false
+}
+
+/// The widest an image on the card or a panel row is kept, in pixels.
+const IMAGE_WIDTH: usize = 480;
+
+/// How many images decode at once, each on its own thread.
+const DECODERS: usize = 2;
+
+/// Images decoded and shrunk off the window's thread, a few at a time, for
+/// one context: each file asked once, and one that does not decode is not
+/// read again.
+#[derive(Default)]
+struct Images {
+    shown: std::collections::HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
+    asks: Option<std::sync::mpsc::Sender<std::path::PathBuf>>,
+    results: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Option<egui::ColorImage>)>>,
+}
+
+/// An image file's texture, at most `IMAGE_WIDTH` wide; none while it is
+/// decoded, and none for a file that is not an image that decodes.
+fn image_texture(ctx: &egui::Context, file: &Path) -> Option<egui::TextureHandle> {
+    use std::sync::{Arc, Mutex, mpsc::channel};
+    let images = ctx.data_mut(|data| data.get_temp_mut_or_default::<Arc<Mutex<Images>>>(egui::Id::new("report-images")).clone());
+    let mut images = images.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let done: Vec<_> = images.results.as_ref().map(|results| results.try_iter().collect()).unwrap_or_default();
+    for (path, image) in done {
+        let texture = image.map(|image| ctx.load_texture(format!("report-image:{}", path.display()), image, egui::TextureOptions::LINEAR));
+        images.shown.insert(path, texture);
+    }
+    if let Some(shown) = images.shown.get(file) {
+        return shown.clone();
+    }
+    if images.asks.is_none() {
+        let (asks, asked) = channel::<std::path::PathBuf>();
+        let (send, results) = channel();
+        let asked = Arc::new(Mutex::new(asked));
+        for _ in 0..DECODERS {
+            let (asked, send, ctx) = (asked.clone(), send.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let next = asked.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv();
+                    let Ok(path) = next else { break };
+                    let image = crate::project_panel::shrunk(&path, IMAGE_WIDTH);
+                    if send.send((path, image)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+        }
+        images.asks = Some(asks);
+        images.results = Some(results);
+    }
+    // Asked once: a file still decoding is not asked again.
+    images.shown.insert(file.to_path_buf(), None);
+    if let Some(asks) = &images.asks {
+        let _ = asks.send(file.to_path_buf());
+    }
+    None
 }
 
 /// Whether Python reads a value as true, as `request.py`'s `or` does.
@@ -858,6 +921,39 @@ mod tests {
             assert!(at.is_some(), "{path}: the reference {file}, in the order sent");
             last = at.unwrap_or(last) + 1;
         }
+    }
+
+    /// Catches an image read on the window's thread: the first ask returns
+    /// at once with nothing, the image arrives from a worker, shrunk, and
+    /// a file that does not decode is answered from memory after that.
+    #[test]
+    fn an_image_decodes_off_the_windows_thread() {
+        let folder = std::env::temp_dir().join(format!("report-images-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let (png, mp4) = (folder.join("wide.png"), folder.join("film.mp4"));
+        let mut bytes = Vec::new();
+        let wide = image::RgbaImage::from_pixel(1200, 600, image::Rgba([200, 30, 30, 255]));
+        image::DynamicImage::ImageRgba8(wide).write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        std::fs::write(&png, bytes).unwrap();
+        std::fs::write(&mp4, b"not an image").unwrap();
+        let ctx = egui::Context::default();
+        assert!(image_texture(&ctx, &png).is_none(), "the image was decoded before the window went on");
+        let waited = std::time::Instant::now();
+        let shown = loop {
+            if let Some(texture) = image_texture(&ctx, &png) {
+                break texture;
+            }
+            assert!(waited.elapsed() < std::time::Duration::from_secs(10), "the image never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(shown.size()[0] <= IMAGE_WIDTH && shown.size()[0] * 2 == shown.size()[1] * 4, "{:?}", shown.size());
+        assert!(image_texture(&ctx, &mp4).is_none());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::remove_file(&mp4).unwrap();
+        assert!(image_texture(&ctx, &mp4).is_none());
+        let images = ctx.data_mut(|data| data.get_temp_mut_or_default::<std::sync::Arc<std::sync::Mutex<Images>>>(egui::Id::new("report-images")).clone());
+        assert!(images.lock().unwrap().shown.contains_key(&mp4), "a file that does not decode is asked again");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// Catches a card that leaves out what tell says: a report with canon
