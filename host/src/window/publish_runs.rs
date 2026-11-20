@@ -319,7 +319,24 @@ fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
         finished_as = name;
     }
     let role = if finished_as == shot { format!("{MIX_SOURCE}, {UNTOUCHED}") } else { MIX_SOURCE.to_string() };
-    let made_from = sources_of(place, artifact, None, file, &[(finished_as.clone(), role)])?;
+    // Each sound heard, in the role build-animatic gives it: where it
+    // starts and its gain, as the mix's own command set them.
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+    let command = place.script("request.py", &["show", file]).ok().and_then(|shown| serde_json::from_str::<Value>(&shown).ok()).and_then(|record| {
+        let lines = match record {
+            Value::Array(lines) => lines,
+            line => vec![line],
+        };
+        lines.iter().rev().find_map(|line| line.get("command").and_then(Value::as_str).map(String::from))
+    });
+    let sounds = command.as_deref().map(sound_roles).unwrap_or_default();
+    let made_from: Vec<(String, String)> = sources_of(place, artifact, None, file, &[(finished_as.clone(), role)])?
+        .into_iter()
+        .map(|(source, role)| match canon.files.get(&source).and_then(|file| sounds.get(file)) {
+            Some(sound) => (source, sound.clone()),
+            None => (source, role),
+        })
+        .collect();
     let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact, "--file", file];
     if let Some(chain) = &chain {
         args.extend(["--chain", chain.as_str()]);
@@ -339,6 +356,55 @@ fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
 /// the shot as it is, or the last of its finishings.
 const MIX_SOURCE: &str = "the picture"; // Skills' stored spelling
 const UNTOUCHED: &str = "untouched";
+
+/// Each sound a mix's command heard, by its file, in the role build-animatic
+/// gives it: "a sound, at <start> s, <gain> dB", as written in the command
+/// `mix.py` ran. A muted sound is not heard, so it has none.
+fn sound_roles(command: &str) -> HashMap<String, String> {
+    let words = shell_words(command);
+    let mut roles = HashMap::new();
+    let mut at = 0;
+    while at < words.len() {
+        if words[at] == "--sound" && at + 3 < words.len() {
+            let (file, gain, start) = (&words[at + 1], &words[at + 2], &words[at + 3]);
+            let muted = words.get(at + 4).is_some_and(|word| word == "muted");
+            if !muted {
+                roles.insert(file.clone(), format!("a sound, at {start} s, {gain} dB"));
+            }
+            at += if muted { 5 } else { 4 };
+            continue;
+        }
+        at += 1;
+    }
+    roles
+}
+
+/// A command's words as a shell splits them, with single and double
+/// quotes, as the record keeps the command `mix.py` ran.
+fn shell_words(command: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut any) = (Vec::new(), String::new(), None::<char>, false);
+    for c in command.chars() {
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                any = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if any || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                any = false;
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if any || !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
 
 /// The role each finishing names the take it finishes in.
 const FINISHES: &str = "the take it finishes";
@@ -1253,6 +1319,18 @@ mod tests {
         let old_mix = last(skills("request.py", &["resource", "agent/old-mix.wav", "--name", "old-mix", "--from", &take]));
         assert_eq!(check_delivery(&place, &delivery(&old_mix)), Err(String::from(NOT_CANON)));
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a mix naming its sounds as plain inputs rather than as
+    /// build-animatic does, where each starts and at what gain, or naming a
+    /// muted sound it never heard.
+    #[test]
+    fn a_mixs_sounds_are_named_as_heard() {
+        let command = "python3 skills/build-animatic/scripts/mix.py --take 'library/shot 60.mp4' --sound prompts/resources/bed.wav -6 0 --sound \"library/door opens.wav\" 1.5 3.00 --sound library/cough.wav 0 2 muted --name mix";
+        let roles = sound_roles(command);
+        assert_eq!(roles.get("prompts/resources/bed.wav").map(String::as_str), Some("a sound, at 0 s, -6 dB"));
+        assert_eq!(roles.get("library/door opens.wav").map(String::as_str), Some("a sound, at 3.00 s, 1.5 dB"));
+        assert!(!roles.contains_key("library/cough.wav"), "a muted sound was named as heard");
     }
 
     /// Catches a film mixed from a retimed take refused, or published as if
