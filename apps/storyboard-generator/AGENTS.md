@@ -1,6 +1,6 @@
 # Storyboard Generator — sub-application
 
-The Storyboard Generator makes storyboards, as a Spumcake Studio sub-application. A storyboard is a film: drawn clips on the Shots track, each a shot drawn on its own sheet of genga paper with layers, keyframes, and holds, and sounds on Sound tracks under it. It plays and scrubs the film with its sound, shows the film's sound inside a clip for lip-sync, and exports the animatic as an MP4 with its sound. Its drawing is pressure-sensitive, carried over from Simple Sketch 1.0.1; its sound and video go through the shared `media/` library, never the host. A new storyboard is "Untitled Storyboard", then "Untitled Storyboard 2", named by `protocol::free_name` among the open tabs and the `.smx` files in the project's folder.
+The Storyboard Generator makes storyboards, as a Spumcake for Desktop sub-application. A storyboard is a film: drawn clips on the Shots track, each a shot drawn on its own sheet of genga paper with layers, keyframes, and holds, and sounds on Sound tracks under it. It plays and scrubs the film with its sound, shows the film's sound inside a clip for lip-sync, and exports the animatic as an MP4 with its sound. Its drawing is pressure-sensitive, carried over from Simple Sketch 1.0.1; its sound and video go through the shared `media/` library, never the host. A new storyboard is "Untitled Storyboard", then "Untitled Storyboard 2", named by `protocol::free_name` among the open tabs and the `.smx` files in the project's folder.
 
 ## Rules for this sub-application
 

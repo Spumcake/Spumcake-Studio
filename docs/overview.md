@@ -1,12 +1,12 @@
-# Spumcake Studio — overview
+# Spumcake for Desktop — overview
 
-Spumcake Studio is the open-source production software of Spumcake, an AI-native entertainment and technology company: a Codex for creatives. It is a computer graphics (CG) authoring application for creative professionals, from indie artists up, that standardizes their production pipeline and helps enthusiasts and professionals make an animated pilot in months instead of years. It is where the user and an assistant shape the staged intermediates of a production together, before anything goes to a final render. It works fully on its own, with the user's own generation endpoints, such as OpenAI, fal.ai, or ComfyUI, or with the Spumcake platform, whose credits pay for generation. Spumcake's original media is fully open for remixing and editing in it.
+Spumcake for Desktop is the open-source production software of Spumcake, an AI-native entertainment and technology company: a Codex for creatives. It is a computer graphics (CG) authoring application for creative professionals, from indie artists up, that standardizes their production pipeline and helps enthusiasts and professionals make an animated pilot in months instead of years. It is where the user and an assistant shape the staged intermediates of a production together, before anything goes to a final render. It works fully on its own, with the user's own generation endpoints, such as OpenAI, fal.ai, or ComfyUI, or with the Spumcake platform, whose credits pay for generation. Spumcake's original media is fully open for remixing and editing in it.
 
 Studio is one host window that runs separate sub-applications, each its own program owning one kind of creative work. Each is named for what it makes: the Storyboard Generator, the Image Generator, and Recipe Creation, with a Video Generator to come. The user meets Studio as they would an agentic tool such as Codex: it opens on a session, a conversation with the assistant inside a project, and the work of the sub-applications opens beside that conversation. Each sub-application declares the tools the assistant can use on its work. The assistant works from skills, agent skills as any agentic harness uses them, tuned for Studio. Studio ships with general skills for creative work, and the user overrides any skill with a skill cell of their own. Recipe Creation is the workspace where the user gathers cells into recipes: each recipe is a list of cells in one place, such as a show's characters, references, skills, and results, that the assistant draws on when it generates. A production can keep as many recipes as it needs. The assistant discovers its capabilities from those skills, plans from them, and carries out the plan. Working with the assistant and working by hand are one seamless flow: every sub-application works fully without the assistant, and with it, the assistant amplifies what the user does by hand.
 
 ## Where it is going
 
-Spumcake Studio is for professional animation studios that want the benefits of AI without handing creative control to a machine, in place of tools such as Adobe Animate or Moho. Its sub-applications will grow into workflows across a production. In pre-production they assist the user with concept artwork, prop and background design, continuity (character sheets, style guides, and height charts), and layout design, while the user makes the creative calls. In production they handle the low-level jobs that make animation tedious, such as animation tests, inbetweening, line art, cleanup, colouring, secondary animation, and lip-sync, so users can focus on being creative. AI in Studio solves targeted problems, and Studio is open about where it is used, so the art stays an intentional choice.
+Spumcake for Desktop is for professional animation studios that want the benefits of AI without handing creative control to a machine, in place of tools such as Adobe Animate or Moho. Its sub-applications will grow into workflows across a production. In pre-production they assist the user with concept artwork, prop and background design, continuity (character sheets, style guides, and height charts), and layout design, while the user makes the creative calls. In production they handle the low-level jobs that make animation tedious, such as animation tests, inbetweening, line art, cleanup, colouring, secondary animation, and lip-sync, so users can focus on being creative. AI in Studio solves targeted problems, and Studio is open about where it is used, so the art stays an intentional choice.
 
 ## What is always true
 
@@ -26,7 +26,7 @@ Spumcake Studio is for professional animation studios that want the benefits of 
 
 ## References
 
-**Simple Sketch 1.0.1** (at `887f6f4`) is part of Spumcake Studio. Its chrome is the host shell: the window, tab strip and new-tab button, menu button, toolbar, and the properties panel that opens from a tab at its edge. Its drawing is the Storyboard Generator. Both were carried over from its code, not rewritten, and the shell is that chrome without what belongs only to drawing.
+**Simple Sketch 1.0.1** (at `887f6f4`) is part of Spumcake for Desktop. Its chrome is the host shell: the window, tab strip and new-tab button, menu button, toolbar, and the properties panel that opens from a tab at its edge. Its drawing is the Storyboard Generator. Both were carried over from its code, not rewritten, and the shell is that chrome without what belongs only to drawing.
 
 ## What it will never be
 
@@ -34,7 +34,7 @@ A monolith that tries to do everything in one program. A general-purpose AI chat
 
 ## Words we use
 
-- **Host:** Spumcake Studio itself: the shell, the protocol, and the assistant.
+- **Host:** Spumcake for Desktop itself: the shell, the protocol, and the assistant.
 - **Sub-application:** a separate program that owns one kind of creative work.
 - **Activity:** one piece of work, such as a storyboard, an image, or a recipe, kept as a file in its project's folder and opened in its workspace.
 - **Declarations:** what a sub-application tells the host it offers, as data.

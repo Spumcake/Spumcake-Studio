@@ -96,7 +96,7 @@ struct Project {
 pub fn run(specs: Vec<AppSpec>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Spumcake Studio")
+            .with_title("Spumcake for Desktop")
             // The desktop matches the window to its launcher entry and icon by
             // this id, which is the desktop file's name.
             .with_app_id(APP_ID)
