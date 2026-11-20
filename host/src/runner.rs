@@ -904,7 +904,18 @@ pub(crate) struct Runner {
     /// The project whose prerequisites were found, and what is missing.
     checked: Option<(PathBuf, Vec<String>)>,
     ctx: Option<eframe::egui::Context>,
+    /// Every request the runner sends goes to request.py's stand-in, though
+    /// its card shows the real plan and cost, while `INPAINTER_STAND_IN=1`
+    /// was set when Studio started, as screenshot scenarios do. A cell that
+    /// runs on its endpoint, such as the conversation's, and a web search
+    /// are not the runner's requests. Never a setting, so no user turns it
+    /// on by mistake.
+    always_stand_in: bool,
 }
+
+/// The variable that sends every request to the stand-in, read once when
+/// Studio starts.
+pub(crate) const STAND_IN_VARIABLE: &str = "INPAINTER_STAND_IN";
 
 /// What a call to a runner tool comes to at once.
 pub(crate) enum Begun {
@@ -919,6 +930,11 @@ fn failed(call: &str, reason: impl Into<String>) -> ToolResult {
 }
 
 impl Runner {
+    /// A runner that sends every request to the stand-in when `stand_in`.
+    pub(crate) fn with_stand_in(stand_in: bool) -> Self {
+        Self { always_stand_in: stand_in, ..Self::default() }
+    }
+
     pub(crate) fn asking(&self) -> Option<&Asking> {
         self.asking.as_ref()
     }
@@ -979,7 +995,11 @@ impl Runner {
         self.env = env.vars.clone();
         self.scripts = env.scripts.clone();
         let text = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let stand_in = input.get("stand_in").and_then(Value::as_bool).unwrap_or(false);
+        // A stand-in run, as asked or as Studio was started; it is planned
+        // as a stand-in, with no price read, only when asked.
+        let asked_stand_in = input.get("stand_in").and_then(Value::as_bool).unwrap_or(false);
+        let plan_stand_in = asked_stand_in && !self.always_stand_in;
+        let stand_in = asked_stand_in || self.always_stand_in;
         let asking = match name {
             RUN_COMMAND => {
                 let command: Vec<String> = input.get("command").and_then(Value::as_array).map(|items| items.iter().filter_map(|item| item.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -1013,7 +1033,7 @@ impl Runner {
                 };
                 let (cwd, vars, spec_path, call_name, tool_name) = (folder.to_path_buf(), env.vars.clone(), folder.join(&spec), call.to_string(), tool.to_string());
                 return self.plan_later(call, move || {
-                    let (mut plan, hash) = planned(&planning, &cwd, &vars, stand_in)?;
+                    let (mut plan, hash) = planned(&planning, &cwd, &vars, plan_stand_in)?;
                     // A research request files what was found: the card shows
                     // each file with its address, page, and use, from the spec.
                     if plan.pointer("/endpoint/kind").and_then(Value::as_str) == Some("research") {
@@ -1024,7 +1044,7 @@ impl Runner {
                     if stand_in {
                         run.push(String::from("--stand-in"));
                     }
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in, fix: None })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in: plan_stand_in, fix: None })
                 });
             }
             RERUN_STEP => {
@@ -1040,7 +1060,7 @@ impl Runner {
                 if !text("chain").is_empty() && !text("step").is_empty() {
                     asked.extend([String::from("--step"), text("chain"), text("step"), String::from("--json")]);
                 }
-                if stand_in {
+                if plan_stand_in {
                     asked.push(String::from("--stand-in"));
                 }
                 let mut planning = asked.clone();
@@ -1053,10 +1073,13 @@ impl Runner {
                     Err(reason) => return Begun::Answered(failed(call, reason)),
                 };
                 let (cwd, vars, call_name, tool_name) = (folder.to_path_buf(), env.vars.clone(), call.to_string(), tool.to_string());
+                if stand_in && !plan_stand_in {
+                    run.push(String::from("--stand-in"));
+                }
                 return self.plan_later(call, move || {
-                    let (plan, hash) = planned(&planning, &cwd, &vars, stand_in)?;
+                    let (plan, hash) = planned(&planning, &cwd, &vars, plan_stand_in)?;
                     run.extend([String::from("--expect"), hash]);
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in, fix: None })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans: vec![plan], runs: vec![run], stand_in: plan_stand_in, fix: None })
                 });
             }
             FIX_CHAIN => {
@@ -1083,10 +1106,10 @@ impl Runner {
                     let (mut collected, mut left_pending) = (Vec::new(), Vec::new());
                     for (chain, step, artifact, uses) in found {
                         let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &chain, &step, "--plan", "--json"]);
-                        if stand_in {
+                        if plan_stand_in {
                             argv.push(String::from("--stand-in"));
                         }
-                        let (mut plan, hash) = planned(&argv, &cwd, &vars, stand_in)?;
+                        let (mut plan, hash) = planned(&argv, &cwd, &vars, plan_stand_in)?;
                         // A request still at its endpoint is collected, never
                         // made again, when it was sent as the step is now and
                         // from nothing this fix replaces; else it would bring
@@ -1106,7 +1129,7 @@ impl Runner {
                         steps.push(FixStep { chain, step, artifact: artifact.clone(), hash, collect: None, plan: Some(plans.len() - 1) });
                         fixed.push(artifact);
                     }
-                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed, waiting, collected, left_pending }) })
+                    Ok(Asking::Plans { call: call_name, tool: tool_name, plans, runs: Vec::new(), stand_in: plan_stand_in, fix: Some(Fix { scripts, pipeline, steps, not_fixed, waiting, collected, left_pending }) })
                 });
             }
             _ => return Begun::Answered(failed(call, "No such tool.")),
@@ -1214,6 +1237,8 @@ impl Runner {
     /// next step.
     fn fix_chain(&mut self, call: &str, fix: Fix, approved: Vec<Value>, stand_in: bool) {
         let (answered, cwd, vars) = (call.to_string(), self.cwd.clone(), self.env.clone());
+        // Planned again as a stand-in only when the fix was asked as one.
+        let plan_stand_in = stand_in && !self.always_stand_in;
         self.spawn(call, move |stop| {
             let Fix { scripts, pipeline, steps, not_fixed, waiting, left_pending, .. } = fix;
             let mut published: HashMap<String, String> = HashMap::new();
@@ -1247,10 +1272,10 @@ impl Runner {
                     step.hash.clone()
                 } else {
                     let mut argv = skills_argv(&scripts, "pipeline.py", &["rerun", &pipeline, "--step", &step.chain, &step.step, "--plan", "--json"]);
-                    if stand_in {
+                    if plan_stand_in {
                         argv.push(String::from("--stand-in"));
                     }
-                    match planned(&argv, &cwd, &vars, stand_in).and_then(|(plan, hash)| same_but_fixed(&approved[plan_index], &plan, &published).map(|()| hash)) {
+                    match planned(&argv, &cwd, &vars, plan_stand_in).and_then(|(plan, hash)| same_but_fixed(&approved[plan_index], &plan, &published).map(|()| hash)) {
                         Ok(hash) => hash,
                         Err(reason) => {
                             stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
@@ -1390,11 +1415,13 @@ impl Runner {
             Asking::Command { argv, .. } => (vec![argv], false),
             // A step that runs a script, such as a builder, sends nothing to
             // a model, so Stop ends it as it ends any command.
+            // Its card's `stand_in` is what it was asked as; a runner started
+            // on the stand-in runs it there all the same.
             Asking::Plans { fix: Some(fix), plans, stand_in, .. } => {
-                self.fix_chain(&call, fix, plans, stand_in);
+                self.fix_chain(&call, fix, plans, stand_in || self.always_stand_in);
                 return None;
             }
-            Asking::Plans { runs, stand_in, plans, .. } => (runs, !stand_in && plans.iter().any(|plan| plan.get("endpoint").is_some_and(|endpoint| !endpoint.is_null()))),
+            Asking::Plans { runs, stand_in, plans, .. } => (runs, !stand_in && !self.always_stand_in && plans.iter().any(|plan| plan.get("endpoint").is_some_and(|endpoint| !endpoint.is_null()))),
             Asking::Searches { searches, .. } => {
                 let Some(key) = self.search_key.take() else { return Some(failed(&call, "Brave Search has no key.")) };
                 self.search(&call, searches, key);
@@ -1867,6 +1894,68 @@ mod tests {
         assert!(answer.ok, "{:?}", answer.output);
         let count = |sub: &str| std::fs::read_dir(folder.join(sub)).unwrap().count();
         assert_eq!((count("library"), count("requests")), (1, 1), "{:?}", answer.output);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a request paid for while Studio was started with
+    /// `INPAINTER_STAND_IN=1`, its card planned as a stand-in with no real
+    /// cost, and a request sent on the stand-in without it. Runs when
+    /// SPUMCAKE_SKILLS_SCRIPTS names the checkout's scripts folder.
+    #[test]
+    fn started_on_the_stand_in_every_request_goes_to_it() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let folder = std::env::temp_dir().join(format!("runner-stand-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests", "agent"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let harness = |script: &str, args: &[&str]| {
+            let out = Command::new("python3").arg(Path::new(&scripts).join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        harness("pipeline.py", &["new", "001"]);
+        harness("pipeline.py", &["element", "001", "the diner", "--kind", "place"]);
+        harness("pipeline.py", &["chain", "001", "the diner", "--order", "01"]);
+        harness("pipeline.py", &["step", "001", "the diner", "keyframe", "--order", "1", "--skill", "generate-keyframe", "--endpoint", r#"{"kind": "fal", "model": "stand-in"}"#, "--template", "The diner.", "--artifact", "the diner: keyframe"]);
+        std::fs::write(folder.join("agent/spec.json"), r#"{"name": "check", "skill": "generate-keyframe", "endpoint": {"kind": "fal", "model": "stand-in"}, "prompt": "a check"}"#).unwrap();
+        let env = || ScriptEnv { scripts: Some(PathBuf::from(&scripts)), ..ScriptEnv::default() };
+        let asks = [(SEND_REQUEST, json!({ "spec": "agent/spec.json" })), (RERUN_STEP, json!({ "pipeline": "001", "chain": "the diner", "step": "keyframe" }))];
+        // Asked as plain requests: each card planned as one, each run on
+        // the stand-in only when Studio was started on it.
+        for always in [false, true] {
+            for (tool, input) in &asks {
+                let mut runner = Runner::with_stand_in(always);
+                runner.assume_prerequisites(&folder);
+                if let Begun::Answered(result) = runner.begin(&folder, env(), "c1", "t", tool, input) {
+                    panic!("{tool} answered at once: {:?}", result.output);
+                }
+                wait_until_asked(&mut runner);
+                let Some(Asking::Plans { plans, runs, stand_in, .. }) = runner.asking() else { panic!("{tool} asked no plan card") };
+                assert!(!*stand_in, "{tool}: the card was shown as a stand-in's");
+                let (title, _) = crate::plan_card::title_of(runner.asking().unwrap());
+                assert!(!title.contains("a stand-in answers"), "{tool}: the card hid its cost: {title}");
+                assert!(plans.iter().all(|plan| plan.get("endpoint").is_some_and(|endpoint| !endpoint.is_null())), "{tool}: the card was planned as a stand-in: {plans:?}");
+                assert!(runs.iter().all(|run| run.iter().any(|word| word == "--stand-in") == always), "{tool}: --stand-in was {} the run: {runs:?}", if always { "left out of" } else { "added to" });
+                if !always {
+                    assert!(runner.answer(false).is_some());
+                    continue;
+                }
+                // Approved, the step's real scripts take the real plan's hash
+                // on the stand-in.
+                assert!(runner.answer(true).is_none());
+                let start = std::time::Instant::now();
+                let answer = loop {
+                    if let Some(answer) = runner.poll().0.pop() {
+                        break answer;
+                    }
+                    assert!(start.elapsed().as_secs() < 60, "{tool} never ended");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                };
+                assert!(answer.ok, "{tool}: {:?}", answer.output);
+            }
+        }
+        let log = std::fs::read_to_string(folder.join("pipeline/001/runs.jsonl")).unwrap_or_default();
+        assert!(log.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).any(|event| event["step"] == "keyframe" && event["stand_in"] == true), "the step did not run on the stand-in: {log}");
         let _ = std::fs::remove_dir_all(&folder);
     }
 

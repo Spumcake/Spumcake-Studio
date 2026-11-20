@@ -280,10 +280,13 @@ fn record_inputs(place: &Place, file: &str) -> Option<Vec<String>> {
 /// Whether a delivery may be shown on its card: its film's record names
 /// what it was mixed from, and each of those is published canon.
 fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
-    let inputs = record_inputs(place, &delivery.file).ok_or_else(|| String::from("This film has no record of what it was mixed from, so it cannot be delivered."))?;
+    let inputs = record_inputs(place, &delivery.file).ok_or_else(|| String::from(NO_MIX_RECORD))?;
     let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
-    if inputs.iter().any(|input| !canon.published.contains(input)) {
-        return Err(String::from(NOT_CANON));
+    // A finishing of the shot is published by the delivery itself, as the
+    // shot's finishing, so it need not be published yet.
+    let finishing: Vec<String> = finishing_of(place, &delivery.artifact, &delivery.file).into_iter().map(|(take, _, _)| take).collect();
+    if inputs.iter().any(|input| !canon.published.contains(input) && !finishing.contains(input)) {
+        return Err(String::from(MIXED_FROM_UNUSED));
     }
     Ok(())
 }
@@ -293,15 +296,50 @@ fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
 /// copied into `output/`, and, in git, what that wrote committed by path.
 /// Returns the file in `output/`.
 fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
-    // The mix is an asset of its own, made from the shot, as finishing is
-    // and Last order's mixes are: "<shot>, mixed", made from the shot in
-    // the role Last order records. The shot's own asset in use is never
-    // replaced.
+    // Each finishing of the shot the mix was made from is published first,
+    // as generate-finished-shot has it, "<shot>, 60 fps", then "<shot>, 60
+    // fps, 4K", each made from the one before; then the mix, an asset of
+    // its own, "<shot>, mixed", made from the last of them. The shot's own
+    // asset in use is never replaced.
     let (shot, file) = (delivery.artifact.as_str(), delivery.file.as_str());
     let artifact = format!("{shot}, mixed");
     let artifact = artifact.as_str();
-    let made_from = sources_of(place, artifact, None, file, &[(shot.to_string(), String::from(MIX_SOURCE_ROLE))])?;
     let chain = chain_of(place, shot)?;
+    let mut finished_as = shot.to_string();
+    for (take, request, part) in finishing_of(place, shot, file) {
+        let name = format!("{finished_as}, {part}");
+        let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+        if canon.files.get(&name) != Some(&take) || !canon.published.contains(&take) {
+            let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), name.as_str(), "--file", take.as_str(), "--from", finished_as.as_str(), FINISHES];
+            if let Some(chain) = &chain {
+                args.extend(["--chain", chain.as_str()]);
+            }
+            if let Some(request) = &request {
+                args.extend(["--request", request.as_str()]);
+            }
+            place.script("pipeline.py", &args)?;
+        }
+        finished_as = name;
+    }
+    let role = if finished_as == shot { format!("{MIX_SOURCE}, {UNTOUCHED}") } else { MIX_SOURCE.to_string() };
+    // Each sound heard, in the role build-animatic gives it: where it
+    // starts and its gain, as the mix's own command set them.
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+    let command = place.script("request.py", &["show", file]).ok().and_then(|shown| serde_json::from_str::<Value>(&shown).ok()).and_then(|record| {
+        let lines = match record {
+            Value::Array(lines) => lines,
+            line => vec![line],
+        };
+        lines.iter().rev().find_map(|line| line.get("command").and_then(Value::as_str).map(String::from))
+    });
+    let sounds = command.as_deref().map(sound_roles).unwrap_or_default();
+    let made_from: Vec<(String, String)> = sources_of(place, artifact, None, file, &[(finished_as.clone(), role)])?
+        .into_iter()
+        .map(|(source, role)| match canon.files.get(&source).and_then(|file| sounds.get(file)) {
+            Some(sound) => (source, sound.clone()),
+            None => (source, role),
+        })
+        .collect();
     let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact, "--file", file];
     if let Some(chain) = &chain {
         args.extend(["--chain", chain.as_str()]);
@@ -316,9 +354,98 @@ fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or_else(|| String::from("The film was published, but where it was delivered was not given."))
 }
 
-/// The role a mix names its shot in, exactly as Last order records it, so
-/// Claude Code and the finishing rule find Studio's mixes as they find its.
-const MIX_SOURCE_ROLE: &str = "the picture, untouched"; // Skills' stored spelling
+/// The role a mix names what it was made from in, as Last order records it, so
+/// Claude Code and the finishing rule find Studio's mixes as they find its:
+/// the shot as it is, or the last of its finishings.
+const MIX_SOURCE: &str = "the picture"; // Skills' stored spelling
+const UNTOUCHED: &str = "untouched";
+
+/// Each sound a mix's command heard, by its file, in the role build-animatic
+/// gives it: "a sound, at <start> s, <gain> dB", as written in the command
+/// `mix.py` ran. A muted sound is not heard, so it has none.
+fn sound_roles(command: &str) -> HashMap<String, String> {
+    let words = shell_words(command);
+    let mut roles = HashMap::new();
+    let mut at = 0;
+    while at < words.len() {
+        if words[at] == "--sound" && at + 3 < words.len() {
+            let (file, gain, start) = (&words[at + 1], &words[at + 2], &words[at + 3]);
+            let muted = words.get(at + 4).is_some_and(|word| word == "muted");
+            if !muted {
+                roles.insert(file.clone(), format!("a sound, at {start} s, {gain} dB"));
+            }
+            at += if muted { 5 } else { 4 };
+            continue;
+        }
+        at += 1;
+    }
+    roles
+}
+
+/// A command's words as a shell splits them, with single and double
+/// quotes, as the record keeps the command `mix.py` ran.
+fn shell_words(command: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut any) = (Vec::new(), String::new(), None::<char>, false);
+    for c in command.chars() {
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                any = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if any || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                any = false;
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if any || !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// The role each finishing names the take it finishes in.
+const FINISHES: &str = "the take it finishes";
+
+/// The finishings between the shot and the video the mix at `file` was
+/// made from, the first first: each take, the request that made it, and
+/// its part of the name as generate-finished-shot words it, "60 fps" or
+/// "4K", followed back through each finishing request's `video_url` to
+/// the shot's own file. None when the mix used the shot as it is.
+fn finishing_of(place: &Place, shot: &str, file: &str) -> Vec<(String, Option<String>, String)> {
+    let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline).unwrap_or_default();
+    let shot_file = canon.files.get(shot).cloned().unwrap_or_default();
+    let mut at = record_inputs(place, file).unwrap_or_default().into_iter().find(|input| crate::prompt_page::media_type(input).starts_with("video/")).unwrap_or_default();
+    let mut found = Vec::new();
+    for _ in 0..8 {
+        if at.is_empty() || at == shot_file {
+            break;
+        }
+        let Some(record) = place.script("request.py", &["show", &at]).ok().and_then(|shown| serde_json::from_str::<Value>(&shown).ok()) else { break };
+        // What was sent, as a report keeps it, or else the spec's.
+        let settings = record.pointer("/sent/settings").or_else(|| record.pointer("/endpoint/settings")).cloned().unwrap_or(Value::Null);
+        let part = match (settings.get("target_fps").and_then(Value::as_f64), settings.get("upscale_factor")) {
+            (Some(fps), _) => format!("{fps:.0} fps"),
+            (None, Some(_)) => String::from("4K"),
+            _ => break,
+        };
+        let request = record.get("id").and_then(Value::as_str).map(String::from);
+        found.push((at.clone(), request, part));
+        let Some(source) = record.get("references").and_then(Value::as_array).and_then(|references| references.iter().find(|reference| reference.get("field").and_then(Value::as_str) == Some("video_url"))).and_then(|reference| reference.get("file").and_then(Value::as_str)) else { break };
+        at = source.to_string();
+    }
+    // The mix's video was not finished from the shot: none of it counts.
+    if at != shot_file {
+        return Vec::new();
+    }
+    found.reverse();
+    found
+}
 
 /// The chain an artifact belongs to: its step's, or its own row's.
 fn chain_of(place: &Place, artifact: &str) -> Result<Option<String>, String> {
@@ -619,8 +746,16 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
     let step = named.or(cell_step).ok_or_else(|| String::from(IN_NO_RECIPE))?;
     let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned().ok_or_else(|| String::from(NO_ARTIFACT))?;
     // The asset is put in use at its latest iteration, canon as the guide
-    // has it; one already in use stays as it is.
-    let asset = asset_at(assets_of(place)?, path)?;
+    // has it; one already in use stays as it is. A file filed for a cell
+    // that has just joined a recipe, with a record of what it was made
+    // from, is a new asset of its own.
+    // An asset outside any cell that no request made, such as a mix or a
+    // reference a report sent, is not a take of this cell: it goes into use
+    // here only when it was filed for this very step.
+    let asset = match asset_at(assets_of(place)?, path) {
+        Ok(asset) if asset.cell.is_some() || asset.in_use || request_of(place, &asset.first).is_some() => asset,
+        Ok(_) | Err(_) => filed_for_step(place, &canon, &step, &artifact, path).ok_or_else(|| String::from(NO_ASSET))?,
+    };
     if let Some(in_use) = asset.artifact.clone().filter(|_| asset.in_use) {
         return Ok(in_use);
     }
@@ -653,6 +788,30 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
     let made = record.or_else(|| request_of(place, &asset.first).and_then(|request| place.script("request.py", &["show", &request]).ok()).and_then(|shown| serde_json::from_str::<Value>(&shown).ok()));
     step_as_made(place, &canon, &step, &name, order, &alternative, made.as_ref())?;
     Ok(alternative)
+}
+
+/// A file filed for a step that has nothing in use yet, as a conversation
+/// cell's image is when the cell joins a recipe: its record names this very
+/// file, it iterates nothing, and it was made only from what the step refers
+/// to; a new asset of its own. A mix, a hold, or another asset's iteration
+/// is none of these.
+fn filed_for_step(place: &Place, canon: &crate::prompt_page::Canon, step: &protocol::StepRef, artifact: &str, path: &str) -> Option<crate::assets::Asset> {
+    if canon.files.get(artifact).is_some_and(|file| canon.published.contains(file)) {
+        return None;
+    }
+    let shown: Value = serde_json::from_str(&place.script("request.py", &["show", path]).ok()?).ok()?;
+    let lines = match shown {
+        Value::Array(lines) => lines,
+        line => vec![line],
+    };
+    let record = lines.iter().rev().find(|line| line.get("file").and_then(Value::as_str) == Some(path))?;
+    if record.get("iterates").is_some_and(|iterates| !iterates.is_null()) {
+        return None;
+    }
+    let refs: Vec<Value> = place.rows(&format!("SELECT refs FROM step WHERE chain={} AND name={}", quoted(&step.chain), quoted(&step.step))).ok()?.into_iter().next().and_then(|row| row.into_iter().next()).and_then(|refs| serde_json::from_str(&refs).ok()).unwrap_or_default();
+    let referred: Vec<String> = refs.iter().filter_map(|reference| reference.get("file").and_then(Value::as_str).map(String::from).or_else(|| canon.files.get(reference.get("artifact")?.as_str()?).cloned())).collect();
+    let inputs: Vec<&str> = record.get("inputs").and_then(Value::as_array).into_iter().flatten().filter_map(|input| input.get("file").and_then(Value::as_str)).collect();
+    inputs.iter().all(|input| referred.iter().any(|known| known == input)).then(|| crate::assets::Asset { first: path.to_string(), ..Default::default() })
 }
 
 /// What Skills says when a take's step was edited after the take was made.
@@ -705,7 +864,7 @@ fn step_as_made(place: &Place, canon: &crate::prompt_page::Canon, step: &protoco
 /// sentences as it is, Skills' known refusals as sentences, and anything
 /// else as `otherwise`, never the script's own words.
 fn plain_refusal(error: &str, otherwise: &str) -> String {
-    let own = [IN_NO_RECIPE, NO_ARTIFACT, NO_ASSET, "This project has no pipeline yet."];
+    let own = [IN_NO_RECIPE, NO_ARTIFACT, NO_ASSET, MIXED_FROM_UNUSED, NO_MIX_RECORD, "This project has no pipeline yet."];
     if own.contains(&error) {
         return error.to_string();
     }
@@ -726,6 +885,10 @@ const NO_RECORD: &str = "Nothing records what this was made from, so it can't be
 const NOT_USED: &str = "The take could not be put in use.";
 const NOT_SAVED: &str = "The iteration could not be saved.";
 const NOT_IGNORED: &str = "The take's outline could not be cleared.";
+const NOT_DELIVERED: &str = "The film could not be delivered.";
+/// A mix made from something neither in use nor a finishing of its shot.
+const MIXED_FROM_UNUSED: &str = "This film was mixed from something not in use, so it can't be delivered.";
+const NO_MIX_RECORD: &str = "This film has no record of what it was mixed from, so it cannot be delivered.";
 
 /// Whether a Save on the asset at `path` waits on the warning: the asset is
 /// in use and other work in use was made from it. Returns the warning's
@@ -1106,7 +1269,7 @@ impl HostWindow {
         match done {
             Done::Checked(delivery, Ok(())) => self.publish_runs.deliver_card = Some(delivery),
             Done::Checked(delivery, Err(sentence)) | Done::Delivered(delivery, Err(sentence)) => {
-                self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error: Some(sentence) });
+                self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error: Some(plain_refusal(&sentence, NOT_DELIVERED)) });
             }
             Done::Delivered(delivery, Ok(output)) => {
                 // Canon changed: the Prompt page reads it again.
@@ -1185,14 +1348,82 @@ mod tests {
         assert_eq!(canon.files.get("the line: take, mixed"), Some(&mix), "the film is not an asset of its own");
         assert_eq!(canon.files.get("the line: take"), Some(&take), "the delivery replaced the shot in use");
         let role = skills("pipeline.py", &["sql", "001", "SELECT role FROM made_from WHERE artifact='the line: take, mixed' AND source='the line: take'", "--read-only"]);
-        assert_eq!(role.trim(), MIX_SOURCE_ROLE);
+        assert_eq!(role.trim(), format!("{MIX_SOURCE}, {UNTOUCHED}"), "the mix of a shot as it is did not name it untouched");
         // A mix of a take published again since is refused before its card.
         std::fs::write(folder.join("agent/take2.wav"), b"RIFF take again").unwrap();
         let take2 = last(skills("request.py", &["resource", "agent/take2.wav", "--name", "take-again"]));
         skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take2, "--chain", "the line"]);
         std::fs::write(folder.join("agent/old-mix.wav"), b"RIFF old mix").unwrap();
         let old_mix = last(skills("request.py", &["resource", "agent/old-mix.wav", "--name", "old-mix", "--from", &take]));
-        assert_eq!(check_delivery(&place, &delivery(&old_mix)), Err(String::from(NOT_CANON)));
+        assert_eq!(check_delivery(&place, &delivery(&old_mix)), Err(String::from(MIXED_FROM_UNUSED)));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a mix naming its sounds as plain inputs rather than as
+    /// build-animatic does, where each starts and at what gain, or naming a
+    /// muted sound it never heard.
+    #[test]
+    fn a_mixs_sounds_are_named_as_heard() {
+        let command = "python3 skills/build-animatic/scripts/mix.py --take 'library/shot 60.mp4' --sound prompts/resources/bed.wav -6 0 --sound \"library/door opens.wav\" 1.5 3.00 --sound library/cough.wav 0 2 muted --name mix";
+        let roles = sound_roles(command);
+        assert_eq!(roles.get("prompts/resources/bed.wav").map(String::as_str), Some("a sound, at 0 s, -6 dB"));
+        assert_eq!(roles.get("library/door opens.wav").map(String::as_str), Some("a sound, at 3.00 s, 1.5 dB"));
+        assert!(!roles.contains_key("library/cough.wav"), "a muted sound was named as heard");
+    }
+
+    /// Catches a film mixed from a retimed take refused, or published as if
+    /// made from the shot as it is: its finishing is published first, as
+    /// generate-finished-shot has it, "<shot>, 60 fps", made from the shot,
+    /// and the mix is made from that.
+    #[test]
+    fn a_film_mixed_from_a_retimed_take_is_delivered_with_its_finishing() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("deliver-retimed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests", "agent"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let skills = |script: &str, args: &[&str]| {
+            let out = Command::new("python3").arg(scripts.join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let last = |printed: String| printed.lines().last().unwrap().trim().to_string();
+        skills("pipeline.py", &["new", "001"]);
+        skills("pipeline.py", &["element", "001", "the line", "--kind", "story"]);
+        skills("pipeline.py", &["chain", "001", "the line", "--order", "01"]);
+        skills("pipeline.py", &["step", "001", "the line", "take", "--order", "1", "--skill", "create-final-animation", "--artifact", "the line: take"]);
+        std::fs::write(folder.join("agent/take.mp4"), b"take").unwrap();
+        let take = last(skills("request.py", &["resource", "agent/take.mp4", "--name", "take"]));
+        skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take, "--chain", "the line"]);
+        // The take retimed: a report as fal's Topaz retime of Last order's
+        // final shot left one, its settings under what was sent.
+        let retimed = String::from("library/take-60fps.mp4");
+        std::fs::write(folder.join(&retimed), b"take at 60 fps").unwrap();
+        let report = serde_json::json!({
+            "id": "take-60fps", "name": "take-60fps", "skill": "generate-finished-shot", "pipeline": "001",
+            "started": "2026-11-20T10:00:00Z", "finished": "2026-11-20T10:01:00Z", "prompt": "",
+            "sent": { "service": "fal", "model": "topaz/interpolate/video", "settings": { "target_fps": 60, "model": "Apollo" } },
+            "references": [{ "file": take, "role": "the take", "field": "video_url" }],
+            "outputs": [retimed], "result": { "cost": "not returned by the endpoint" },
+        });
+        std::fs::write(folder.join("requests/take-60fps.html"), format!("<script type=\"application/json\" id=\"request\">{report}</script>")).unwrap();
+        std::fs::write(folder.join("agent/mix.mp4"), b"mix").unwrap();
+        let mix = last(skills("request.py", &["resource", "agent/mix.mp4", "--name", "mix", "--from", &retimed]));
+        let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
+        let delivery = Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: take"), file: mix.clone(), uses: String::from("Take 1 · 60 fps"), size: String::from("1280 × 720"), frame_rate: String::from("60 fps"), format: String::from("H.264 with AAC sound") };
+        check_delivery(&place, &delivery).unwrap_or_else(|error| panic!("the card for a mix of a retimed take was refused: {error}"));
+        let output = deliver(&place, &delivery).unwrap_or_else(|error| panic!("a mix of a retimed take was refused: {error}"));
+        assert!(output.starts_with("output/"), "{output}");
+        let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
+        assert_eq!(canon.files.get("the line: take, 60 fps"), Some(&retimed), "the retime was not published as the shot's finishing");
+        assert_eq!(canon.files.get("the line: take, mixed"), Some(&mix));
+        assert_eq!(canon.files.get("the line: take"), Some(&take), "the delivery replaced the shot in use");
+        let made = skills("pipeline.py", &["sql", "001", "SELECT source FROM made_from WHERE artifact='the line: take, mixed'", "--read-only"]);
+        assert!(made.contains("the line: take, 60 fps"), "the mix was not made from the retime: {made}");
+        let finished = skills("pipeline.py", &["sql", "001", "SELECT source FROM made_from WHERE artifact='the line: take, 60 fps'", "--read-only"]);
+        assert_eq!(finished.trim(), "the line: take", "the retime was not made from the shot");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
@@ -1426,11 +1657,27 @@ mod tests {
         let refused = use_take(&place, 0, "1", None, &fifth).expect_err("a take made from an image changed since was put in use");
         assert_eq!(plain_refusal(&refused, NOT_USED), TAKE_INPUT_CHANGED, "{refused}");
         assert_eq!(skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step", "--read-only"]), steps, "a refused Use left a step behind");
+        // A conversation cell's image, filed when the cell joins a recipe,
+        // goes into use as the first asset of the step just made for it:
+        // filed from the files its step refers to, so Skills accepts it.
+        skills("pipeline.py", &["step", "001", "the diner", "keeper", "--order", "9", "--skill", "generate-keyframe", "--template", "The keeper.", "--refs", r#"[{"artifact": "the diner: layout", "role": "image 1"}]"#, "--artifact", "the diner: Untitled Image"]);
+        std::fs::write(folder.join("work/keeper.png"), b"\x89PNG\r\n\x1a\nkeeper").unwrap();
+        let layout_now = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap().files["the diner: layout"].clone();
+        let keeper = skills("request.py", &["resource", "work/keeper.png", "--name", "keeper", "--from", &layout_now]).lines().last().unwrap().trim().to_string();
+        let keeper_step = protocol::StepRef { chain: String::from("the diner"), step: String::from("keeper") };
+        // A file made from something the step does not refer to, such as a
+        // mix of another take, is not taken for the cell's image.
+        let first_now = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap().files["the diner: keyframe"].clone();
+        std::fs::write(folder.join("work/keyframe-mix.png"), b"\x89PNG\r\n\x1a\nmix").unwrap();
+        let mix = skills("request.py", &["resource", "work/keyframe-mix.png", "--name", "keyframe-mix", "--from", &first_now]).lines().last().unwrap().trim().to_string();
+        assert_eq!(use_take(&place, 0, "1", Some(keeper_step.clone()), &mix), Err(String::from(NO_ASSET)), "a mix was put in use as a cell's image");
+        assert_eq!(use_take(&place, 0, "1", Some(keeper_step), &keeper), Ok(String::from("the diner: Untitled Image")), "a conversation cell's filed image was not put in use for its new step");
         // Ignore clears the first keyframe's outline, and not the second's.
         ignore_take(&place, &first).unwrap();
         let assets = assets_of(&place).unwrap();
-        assert!(!assets.iter().find(|asset| asset.first == first).unwrap().outlined, "Ignore left the outline");
-        assert!(assets.iter().find(|asset| asset.first == second).unwrap().outlined, "Ignore cleared another take's outline");
+        let of = |file: &str| assets.iter().find(|asset| asset.first == file).unwrap_or_else(|| panic!("{file} is no asset after Ignore: {assets:#?}"));
+        assert!(!of(&first).outlined, "Ignore left the outline");
+        assert!(of(&second).outlined, "Ignore cleared another take's outline");
         let _ = std::fs::remove_dir_all(&folder);
     }
 

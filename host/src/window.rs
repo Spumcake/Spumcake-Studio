@@ -315,7 +315,7 @@ impl HostWindow {
             renders: HashMap::new(),
             next_render: 0,
             keys: crate::keys::Keys::default(),
-            runner: crate::runner::Runner::default(),
+            runner: crate::runner::Runner::with_stand_in(std::env::var_os(crate::runner::STAND_IN_VARIABLE).is_some_and(|value| value == "1")),
             prompt_page: crate::prompt_page::PromptPage::default(),
             publishing: publishing::Publishing::default(),
             previews: previews::Previews::default(),
@@ -1686,7 +1686,9 @@ impl HostWindow {
     fn take_cell_requests(&mut self) {
         let mut runs = Vec::new();
         let mut stops = Vec::new();
+        let mut declared = Vec::new();
         for (app, started) in self.apps.iter_mut().enumerate() {
+            declared.extend(started.running.declared.cells_declared.drain(..).map(|tab| (app, tab)));
             runs.extend(
                 started
                     .running
@@ -1703,6 +1705,15 @@ impl HostWindow {
                     .drain(..)
                     .map(|(tab, cell)| (app, tab, cell)),
             );
+        }
+        declared.dedup();
+        for (app, tab) in declared {
+            if !self.send_draft_rounds(app, &tab)
+                && let Some(started) = self.apps.get_mut(app)
+                && !started.running.declared.cells_declared.contains(&tab)
+            {
+                started.running.declared.cells_declared.push_back(tab);
+            }
         }
         for (app, tab, cell) in runs {
             self.start_recipe_run(app, &tab, &cell);
@@ -2664,6 +2675,9 @@ impl HostWindow {
                         cost: view.cost.as_deref(),
                         root: root.as_deref(),
                         previews: Some(&self.previews.shown),
+                        cues: &view.cues,
+                        cue_note: view.cue_note,
+                        sound_cues: Some(&view.sound_cues),
                         ..Default::default()
                     };
                     panel::show_with(&mut column, properties.as_ref(), &card, panel_rect)

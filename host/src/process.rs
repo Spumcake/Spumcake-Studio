@@ -187,6 +187,9 @@ pub struct Declared {
     pub take_asks: VecDeque<(String, protocol::ItemRef, String, TakeAsk)>,
     /// Cells the toolbar asked the host to run.
     pub run_cells: VecDeque<(String, String)>,
+    /// Each tab whose cells were declared since the host last looked, so a
+    /// draft's rounds reach it with no card asked for.
+    pub cells_declared: VecDeque<String>,
     /// Cells the toolbar asked the host to stop.
     pub stop_cells: VecDeque<(String, String)>,
     /// Answers to `claim`.
@@ -649,6 +652,7 @@ impl Running {
             AppMessage::ToolResult(result) => declared.results.push_back(result),
             AppMessage::Kept { tab, path, error } => declared.kept.push_back((tab, path, error)),
             AppMessage::Cells { tab, cells, selected } => {
+                declared.cells_declared.push_back(tab.clone());
                 declared.cells.insert(tab, (cells, selected));
             }
             // A cell given with `at` runs with the host's lifecycle work.

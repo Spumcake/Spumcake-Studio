@@ -520,7 +520,7 @@ pub fn properties(session: &Session) -> Option<Properties> {
             });
         }
         Page::Properties => sections.push(chosen_settings(session)),
-        Page::Prompt => cell = image.gallery.current_cell().map(|own| prompt_cell(&own.id)),
+        Page::Prompt => cell = image.gallery.current_cell().map(prompt_cell),
         Page::Adjustments => sections.push(Section {
             title: String::new(),
             icon: None,
@@ -575,19 +575,23 @@ pub fn properties(session: &Session) -> Option<Properties> {
 /// The Prompt page's cell, as ig-request-anchor shows it: the host draws
 /// the card and runs it; this names the cell, the roles a reference can
 /// have, the references it takes, and the settings Size, Images, and Seed.
-/// A role's model input is the model's workflow skill's to pick.
-pub fn prompt_cell(cell: &str) -> PanelCell {
+/// A role's model input is the model's workflow skill's to pick. A step's
+/// settings are its model's own, which the host fills from the step and
+/// shows only where the step holds them: OpenAI's image models name the
+/// count of images `n`.
+pub fn prompt_cell(cell: &protocol::Cell) -> PanelCell {
     // Plain fields, as ig-request-anchor shows them, not sliders.
     let number = |min: f64, max: f64| RowKind::Field { min, max, places: 0 };
+    let images = if cell.step.is_some() { "n" } else { "images" };
     PanelCell {
-        cell: cell.to_string(),
+        cell: cell.id.clone(),
         hint: "Describe the image…".into(),
         roles: rounds::ROLES.iter().map(|label| ReferenceRole { label: label.to_string(), field: None, slot: false }).collect(),
         reference_types: rounds::IMAGE_TYPES.iter().map(|kind| kind.to_string()).collect(),
         reference_menu: Vec::new(),
         settings: vec![
             CellSetting { key: "size".into(), label: "Size".into(), kind: RowKind::Text },
-            CellSetting { key: "images".into(), label: "Images".into(), kind: number(1.0, 10.0) },
+            CellSetting { key: images.into(), label: "Images".into(), kind: number(1.0, 10.0) },
             CellSetting { key: "seed".into(), label: "Seed".into(), kind: number(0.0, 2_147_483_647.0) },
         ],
         menu: Vec::new(),
