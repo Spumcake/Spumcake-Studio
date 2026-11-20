@@ -24,6 +24,7 @@ use protocol::{
     ItemRef, PanelSide, PropValue, RasterGesture, RasterTool, RasterView, TextEditing, Thumbnail,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -313,6 +314,12 @@ pub struct Session {
     /// The tabs whose notice is a refused Use this take, which a later
     /// success takes away.
     refused: std::collections::HashSet<String>,
+    /// A Save waiting on the host, by tab: the image's frame, its edits
+    /// when it was written, and the PNG written; and each image saved as an
+    /// iteration, by tab and frame, at those edits, so it is saved again
+    /// only once changed.
+    iterating: HashMap<String, (u64, u64, PathBuf)>,
+    iterated: HashMap<(String, u64), u64>,
     /// Where images and thumbnails for the host are written, and whether
     /// it is a folder of this session's own in memory, which stays when a
     /// project is named.
@@ -375,6 +382,8 @@ impl Session {
             project: None,
             filings: Vec::new(),
             refused: std::collections::HashSet::new(),
+            iterating: HashMap::new(),
+            iterated: HashMap::new(),
             in_memory: memory.is_some(),
             display_failed: false,
             cache: memory.unwrap_or_else(scratch_folder),
@@ -687,7 +696,8 @@ impl Session {
             HostMessage::CellBecameStep { tab, cell, step, .. } => self.cell_became_step(&tab, &cell, &step, &mut out),
             // Use this take answered: an error is said; the seal comes with
             // the next `takes`.
-            HostMessage::TakeUsed { tab, error, .. } => self.take_used(&tab, error, &mut out),
+            HostMessage::TakeUsed { tab, error, .. } | HostMessage::TakeIgnored { tab, error, .. } => self.take_used(&tab, error, &mut out),
+            HostMessage::IterationSaved { tab, file, error, .. } => self.iteration_saved(&tab, file, error, &mut out),
             // A draft's file filed.
             HostMessage::Filed { id, file, error } => {
                 // A layer written out: only a refusal is said.
@@ -976,6 +986,9 @@ impl Session {
             }
             "save" | "save_as" if self.project.is_some() => {
                 let _ = self.write_into_project(self.active);
+                if id == "save" {
+                    self.save_iteration(out);
+                }
             }
             "save" | "save_as" => {
                 let Some(image) = self.active_image() else {
@@ -1058,7 +1071,7 @@ impl Session {
                 }
             }
             // A take's menu.
-            "take_next_round" | "take_use" | "take_edit" | "take_report" => {
+            "take_next_round" | "take_use" | "take_edit" | "take_report" | "take_ignore" | "take_fix" | "take_stack" => {
                 let Some(path) = arg.get("take").and_then(Value::as_str).map(str::to_string) else {
                     return;
                 };
@@ -1068,6 +1081,15 @@ impl Session {
                         self.use_take(&path, out);
                         return;
                     }
+                    "take_ignore" => {
+                        self.ignore_take(&path, out);
+                        return;
+                    }
+                    "take_fix" => {
+                        self.ask_to_fix(&path, out);
+                        return;
+                    }
+                    "take_stack" => self.toggle_stack(&path),
                     "take_report" => {
                         self.open_report(&path, out);
                         return;

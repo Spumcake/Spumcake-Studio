@@ -2,8 +2,11 @@
 //! sends them with `takes`, and never kept in the `.vgx`, as the Image
 //! Generator's rounds are. Each round is a run of the filmstrip: its takes,
 //! each read through `media` when it is new or changed on disk, and a place
-//! for each take still being made, or one for a round that failed. A take
-//! shown in the working area is drawn as any take of the gallery is.
+//! for each take still being made, or one for a round that failed. Each
+//! take is a reference asset: its tile shows its latest iteration, and a
+//! take with iterations opens as a run of its own, "Take N · N iterations",
+//! after its round, as the Image Generator's does. A take shown in the
+//! working area is drawn as any take of the gallery is.
 
 use protocol::{FilmPending, Round, RoundState, TakeFile};
 use std::collections::HashMap;
@@ -32,14 +35,32 @@ pub struct Tile {
     pub number: u32,
     /// The take's place in its round, from 0.
     pub take: usize,
-    /// Its file, or none for a take still being made or a round that failed.
+    /// The file it shows, or none for a take still being made or a round
+    /// that failed: the asset's latest iteration on a round's tile, or one
+    /// iteration on an opened stack's.
     pub file: Option<TakeFile>,
+    /// The take as the host sent it, the asset with its iterations, its
+    /// outline, and whether it is in use.
+    pub asset: Option<TakeFile>,
+    /// On an opened stack's tile, which iteration it is, from 1, the take
+    /// itself.
+    pub iteration: Option<usize>,
     pub pending: Option<FilmPending>,
 }
 
 impl Tile {
     pub fn path(&self) -> Option<&str> {
         self.file.as_ref().map(|file| file.path.as_str())
+    }
+
+    /// Whether it stands for its asset: a round's tile, or, while the
+    /// asset's stack is open and it is out of its round, the stack's latest.
+    pub fn is_asset(&self) -> bool {
+        match (self.iteration, &self.asset) {
+            (None, _) => true,
+            (Some(at), Some(asset)) => at == 1 + asset.iterations.len(),
+            _ => false,
+        }
     }
 }
 
@@ -83,6 +104,8 @@ pub struct Rounds {
     /// What the take shown is shown with.
     pub with: With,
     reads: HashMap<String, Read>,
+    /// The take whose stack is open as a run, by its own path.
+    pub open: Option<String>,
 }
 
 impl Rounds {
@@ -97,7 +120,7 @@ impl Rounds {
         }
         let place = |id: &str| cells.iter().position(|cell| cell == id).unwrap_or(usize::MAX);
         self.by_cell.sort_by_key(|(id, _)| place(id.as_str()));
-        let shown = self.shown.and_then(|index| self.tiles.get(index)).and_then(|tile| tile.path().map(str::to_string));
+        let shown = self.shown.and_then(|index| self.tiles.get(index)).and_then(|tile| Some((tile.path()?.to_string(), tile.iteration)));
         let mut tiles = Vec::new();
         for (cell, rounds) in &self.by_cell {
             for round in rounds {
@@ -115,13 +138,23 @@ impl Rounds {
                     RoundState::Failed => FilmPending::Failed,
                     _ => FilmPending::Running { since: round.started },
                 };
+                let mut stack = Vec::new();
                 for (take, file) in videos.iter().enumerate() {
+                    // An opened stack takes its take out of its round, as
+                    // ig-iteration-stack-open shows.
+                    if self.open.as_deref() == Some(file.path.as_str()) && !file.iterations.is_empty() {
+                        stack.push((take, *file));
+                        continue;
+                    }
+                    let latest = file.iterations.last().map_or(file.path.clone(), |iteration| iteration.file.clone());
                     tiles.push(Tile {
                         cell: cell.clone(),
                         request: round.request.clone(),
                         number: round.number,
                         take,
-                        file: Some((*file).clone()),
+                        file: Some(TakeFile { path: latest, ..(*file).clone() }),
+                        asset: Some((*file).clone()),
+                        iteration: None,
                         pending: None,
                     });
                 }
@@ -132,13 +165,38 @@ impl Rounds {
                         number: round.number,
                         take: videos.len() + more,
                         file: None,
+                        asset: None,
+                        iteration: None,
                         pending: Some(pending.clone()),
                     });
+                }
+                // The opened stack, after its round: the take itself and
+                // each iteration, the latest sealed while it is in use.
+                for (take, file) in stack {
+                    let count = 1 + file.iterations.len();
+                    let paths = std::iter::once(file.path.clone()).chain(file.iterations.iter().map(|iteration| iteration.file.clone()));
+                    for (at, path) in paths.enumerate() {
+                        tiles.push(Tile {
+                            cell: cell.clone(),
+                            request: round.request.clone(),
+                            number: round.number,
+                            take,
+                            file: Some(TakeFile { path, media_type: file.media_type.clone(), canon: file.canon && at + 1 == count, ..Default::default() }),
+                            asset: Some(file.clone()),
+                            iteration: Some(at + 1),
+                            pending: None,
+                        });
+                    }
                 }
             }
         }
         self.tiles = tiles;
-        self.shown = shown.and_then(|path| self.tiles.iter().position(|tile| tile.path() == Some(path.as_str())));
+        // The tile shown stays shown, or a tile showing its file, as a
+        // round's tile shows its stack's latest.
+        self.shown = shown.and_then(|(path, iteration)| {
+            let showing = |tile: &Tile| tile.path() == Some(path.as_str());
+            self.tiles.iter().position(|tile| showing(tile) && tile.iteration == iteration).or_else(|| self.tiles.iter().position(showing))
+        });
         // A take beside it stays while its file is still among them.
         let gone = match &self.with {
             With::Tile(path) => self.tile_of(path).is_none(),
@@ -189,19 +247,42 @@ impl Rounds {
         self.with = With::Alone;
     }
 
-    /// The tiles of a tile's round, in order, that have their take.
+    /// The tiles of a tile's round that have their take, in the order of
+    /// its takes: an opened stack's latest stands for its take.
     pub fn round_tiles(&self, tile: &Tile) -> Vec<usize> {
-        (0..self.tiles.len())
+        let mut tiles: Vec<usize> = (0..self.tiles.len())
             .filter(|index| {
                 let other = &self.tiles[*index];
-                other.cell == tile.cell && other.request == tile.request && other.file.is_some()
+                other.cell == tile.cell && other.request == tile.request && other.file.is_some() && other.is_asset()
             })
-            .collect()
+            .collect();
+        tiles.sort_by_key(|index| self.tiles[*index].take);
+        tiles
     }
 
     /// The tile of the take at `path`.
     pub fn tile_of(&self, path: &str) -> Option<usize> {
         self.tiles.iter().position(|tile| tile.path() == Some(path))
+    }
+
+    /// The tile that stands for the asset one of whose files is at `path`,
+    /// the take itself or any of its iterations: its round's, or its opened
+    /// stack's latest.
+    pub fn asset_of(&self, path: &str) -> Option<usize> {
+        self.tiles.iter().position(|tile| {
+            tile.is_asset()
+                && tile.asset.as_ref().is_some_and(|asset| asset.path == path || asset.iterations.iter().any(|iteration| iteration.file == path))
+        })
+    }
+
+    /// Opens the stack of the take at `path` as a run of its own, after
+    /// its round, or closes it when it is open, laying the strip out again
+    /// from the rounds held.
+    pub fn toggle_stack(&mut self, path: &str, cells: &[String]) {
+        self.open = if self.open.as_deref() == Some(path) { None } else { Some(path.to_string()) };
+        if let Some((cell, rounds)) = self.by_cell.first().cloned() {
+            self.set(&cell, rounds, cells);
+        }
     }
 
     /// Whether that cell has made a round: its draft is no longer only
@@ -214,9 +295,9 @@ impl Rounds {
     /// how many tiles it has.
     pub fn groups(&self) -> Vec<(String, usize)> {
         let mut groups: Vec<(String, usize)> = Vec::new();
-        let mut last: Option<(&str, &str)> = None;
+        let mut last: Option<(&str, &str, bool)> = None;
         for tile in &self.tiles {
-            let key = (tile.cell.as_str(), tile.request.as_str());
+            let key = (tile.cell.as_str(), tile.request.as_str(), tile.iteration.is_some());
             if last == Some(key)
                 && let Some(group) = groups.last_mut()
             {
@@ -224,8 +305,11 @@ impl Rounds {
                 continue;
             }
             last = Some(key);
-            let model = self.round_of(tile).map_or("", model_name);
-            groups.push((round_title(tile.number, model), 1));
+            let label = match &tile.asset {
+                Some(asset) if tile.iteration.is_some() => stack_title(tile.take + 1, 1 + asset.iterations.len()),
+                _ => round_title(tile.number, self.round_of(tile).map_or("", model_name)),
+            };
+            groups.push((label, 1));
         }
         groups
     }
@@ -238,6 +322,11 @@ impl Rounds {
 
 /// A round's words, "Round 3 · MiniMax H3 Max", or "Round 3" alone when its
 /// report names no model.
+/// An opened stack's label, "Take 3 · 3 iterations".
+pub fn stack_title(take: usize, count: usize) -> String {
+    format!("Take {take} · {count} iterations")
+}
+
 pub fn round_title(number: u32, model: &str) -> String {
     if model.is_empty() { format!("Round {number}") } else { format!("Round {number} · {model}") }
 }

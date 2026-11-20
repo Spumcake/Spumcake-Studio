@@ -5,6 +5,10 @@
 use super::*;
 use protocol::{Cell, CellPart, ItemRef, Round, StepRef};
 
+/// What "Ask the assistant to fix the dependency chain" puts in the
+/// composer, as the Image Generator's.
+pub(super) const FIX: &str = "Fix the dependency chain.";
+
 impl Session {
     /// A new draft's size: the gallery's first take's, or its rounds'
     /// takes', or 1280 × 720.
@@ -216,26 +220,61 @@ impl Session {
     /// takes in use, replacing none, so it asks nothing first. The tab's
     /// file is written first when it has none, so the item has a file.
     pub(super) fn use_take(&mut self, path: &str, out: &mut Vec<AppMessage>) {
-        let index = self.active;
-        let Some(cell) = self.tabs.get(index).and_then(|tab| tab.rounds.tile_of(path).map(|tile| tab.rounds.tiles[tile].cell.clone())) else {
+        if let Some((tab, cell)) = self.asked_of(path, out) {
+            out.push(AppMessage::UseTake { tab, cell, path: path.to_string() });
+        }
+    }
+
+    /// Ignore: `ignore_take` for the out-of-date take at `path`, which
+    /// clears its outline and no other's.
+    pub(super) fn ignore_take(&mut self, path: &str, out: &mut Vec<AppMessage>) {
+        if let Some((tab, cell)) = self.asked_of(path, out) {
+            out.push(AppMessage::IgnoreTake { tab, cell, path: path.to_string() });
+        }
+    }
+
+    /// "Ask the assistant to fix the dependency chain": the fix put in the
+    /// composer with the take's cell, for the person to send.
+    pub(super) fn ask_to_fix(&mut self, path: &str, out: &mut Vec<AppMessage>) {
+        if let Some((_, cell)) = self.asked_of(path, out) {
+            out.push(AppMessage::AskAssistant { text: FIX.into(), items: vec![cell] });
+        }
+    }
+
+    /// A take's stack badge: its iterations opened as a run after its
+    /// round, or closed.
+    pub(super) fn toggle_stack(&mut self, path: &str) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
+        let order: Vec<String> = tab.gallery.cells.iter().map(|own| own.id.clone()).collect();
+        tab.rounds.toggle_stack(path, &order);
+        // The take itself and its earlier iterations are read once shown.
+        let root = self.project.clone().unwrap_or_default();
+        tab.rounds.read_files(&root);
+    }
+
+    /// The tab and the cell's item as `takes` names it, for the take at
+    /// `path` or any iteration of its asset, the tab's file written first
+    /// when it has none, so the item has a file.
+    fn asked_of(&mut self, path: &str, out: &mut Vec<AppMessage>) -> Option<(String, ItemRef)> {
+        let index = self.active;
+        let tab = self.tabs.get(index)?;
+        let tile = tab.rounds.tile_of(path).or_else(|| tab.rounds.asset_of(path))?;
+        let cell = tab.rounds.tiles[tile].cell.clone();
         if self.tabs[index].path.is_none() {
             self.tabs[index].dirty = true;
         }
         let file = match self.write_into_project(index) {
             Ok(Some(file)) => file,
-            Ok(None) => return,
+            Ok(None) => return None,
             Err(reason) => {
                 out.push(super::deliver::notices(&self.tabs[index].id, Some((reason, protocol::NoticeState::Failed))));
-                return;
+                return None;
             }
         };
-        let Some(own) = self.relative(&file) else {
-            return;
-        };
-        let tab = self.tabs[index].id.clone();
-        out.push(AppMessage::UseTake { tab, cell: ItemRef { path: own, item: Some(cell) }, path: path.to_string() });
+        let own = self.relative(&file)?;
+        Some((self.tabs[index].id.clone(), ItemRef { path: own, item: Some(cell) }))
     }
 
     /// Edit: the take added to the gallery as a take of its own, linking

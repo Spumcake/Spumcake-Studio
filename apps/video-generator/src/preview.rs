@@ -32,14 +32,14 @@ const PREVIEW_SIZE: [u32; 2] = [160, 96];
 /// `cache`, named by the path, so asking again replaces it, with the next
 /// revision.
 pub fn preview(id: String, path: &str, media_type: &str, root: &Path, cache: &Path, revision: &mut u64) -> AppMessage {
-    let failed = |id: String, error: String| AppMessage::Previewed { id, thumbnail: None, badge: String::new(), cues: Vec::new(), error: Some(error) };
+    let failed = |id: String, error: String| AppMessage::Previewed { id, thumbnail: None, badge: String::new(), length: None, cues: Vec::new(), error: Some(error) };
     if !media_type.starts_with("video/") && !media_type.starts_with("audio/") {
         return failed(id, "Only videos and sounds are previewed here.".into());
     }
     let file = if Path::new(path).is_absolute() { PathBuf::from(path) } else { root.join(path) };
     if media_type.starts_with("audio/") {
         return match sound(&file, path, cache, revision) {
-            Ok((thumbnail, badge, cues)) => AppMessage::Previewed { id, thumbnail: Some(thumbnail), badge, cues, error: None },
+            Ok((thumbnail, badge, length, cues)) => AppMessage::Previewed { id, thumbnail: Some(thumbnail), badge, length: Some(length), cues, error: None },
             Err(error) => failed(id, error),
         };
     }
@@ -63,6 +63,7 @@ pub fn preview(id: String, path: &str, media_type: &str, root: &Path, cache: &Pa
                 id,
                 thumbnail: Some(Thumbnail { path: written.display().to_string(), width: frame.width, height: frame.height, revision: *revision }),
                 badge: length(&info),
+                length: Some(f64::from(info.frames) / info.fps().max(f64::EPSILON)),
                 cues: Vec::new(),
                 error: None,
             }
@@ -73,10 +74,10 @@ pub fn preview(id: String, path: &str, media_type: &str, root: &Path, cache: &Pa
 
 /// A sound's preview: its waveform, `SOUND_SIZE`, drawn from its peaks as
 /// the transport row's is and written as a raw image in `cache`, named by
-/// the path; its length, "8.0 s"; and, for a WAV, its cue points, each at
-/// its time with its label. Decoded on the message loop, once for each
-/// `preview`.
-fn sound(file: &Path, path: &str, cache: &Path, revision: &mut u64) -> Result<(Thumbnail, String, Vec<Cue>), String> {
+/// the path; its length, "8.0 s", and in seconds; and, for a WAV, its cue
+/// points, each at its time with its label. Decoded on the message loop,
+/// once for each `preview`.
+fn sound(file: &Path, path: &str, cache: &Path, revision: &mut u64) -> Result<(Thumbnail, String, f64, Vec<Cue>), String> {
     let heard = media::Sound::open(file, crate::waveform::RATE).map_err(|error| error.0)?;
     let peaks = crate::waveform::peaks(&heard, SOUND_SIZE[0] as usize);
     let image = crate::waveform::draw_sized(&peaks, SOUND_SIZE[0], SOUND_SIZE[1]);
@@ -92,7 +93,7 @@ fn sound(file: &Path, path: &str, cache: &Path, revision: &mut u64) -> Result<(T
         .into_iter()
         .map(|(at, label)| Cue { at, label, colour: None })
         .collect();
-    Ok((thumbnail, format!("{seconds:.1} s"), cues))
+    Ok((thumbnail, format!("{seconds:.1} s"), seconds, cues))
 }
 
 /// A video's length, as a thumbnail's corner shows it: "8.0 s".

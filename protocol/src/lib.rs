@@ -176,14 +176,16 @@ pub enum AppMessage {
         corner: NoticeCorner,
     },
     /// The answer to `preview`: a small image of the file, words for its
-    /// corner such as "8.0 s", and, for a sound, its cues; or `error`, a
-    /// sentence.
+    /// corner such as "8.0 s", for a video or a sound its `length` in
+    /// seconds, and, for a sound, its cues; or `error`, a sentence.
     Previewed {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thumbnail: Option<Thumbnail>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         badge: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<f64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         cues: Vec<Cue>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1816,10 +1818,11 @@ mod tests {
             id: "v1".into(),
             thumbnail: Some(Thumbnail { path: "/run/w.rgba".into(), width: 120, height: 40, revision: 1 }),
             badge: "8.0 s".into(),
+            length: Some(8.0),
             cues: vec![Cue { at: 3.25, label: "Door".into(), colour: None }],
             error: None,
         });
-        round_trip_app(AppMessage::Previewed { id: "v2".into(), thumbnail: None, badge: String::new(), cues: Vec::new(), error: Some("This file could not be read.".into()) });
+        round_trip_app(AppMessage::Previewed { id: "v2".into(), thumbnail: None, badge: String::new(), length: None, cues: Vec::new(), error: Some("This file could not be read.".into()) });
         round_trip_app(AppMessage::AskAssistant { text: "Use this take.".into(), items: vec![cell] });
         round_trip_app(AppMessage::Notices { tab: "1".into(), notices: Vec::new(), corner: NoticeCorner::BottomLeft });
         let Ok(AppMessage::Notices { corner, .. }) = parse_app_message(r#"{"type":"notices","tab":"1","notices":[]}"#) else {

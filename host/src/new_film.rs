@@ -130,12 +130,28 @@ mod tests {
         let requests = files(&folder, "requests");
         assert_eq!(requests.len(), 2, "{requests:?}");
         assert!(requests.iter().any(|n| n.starts_with(&studio_id)) && requests.iter().any(|n| n.starts_with(&harness_id)));
-        for id in [&studio_id, &harness_id] {
-            assert!(files(&folder, "library").iter().any(|n| n.starts_with(id.as_str())), "{id} filed no output");
-            harness(&scripts, &folder, "request.py", &["tell", id]);
-        }
         let canon = harness(&scripts, &folder, "pipeline.py", &["sql", "001", "SELECT file FROM artifact WHERE id = 'the keeper: model sheet'", "--read-only"]);
         assert!(canon.contains(&output), "the published sheet is not canon: {canon}");
+        // The Project tab, as the window reads it: both requests, each
+        // output an asset, and the published sheet in use; and each report's
+        // card with the prompt and the model `request.py tell` says.
+        let place = crate::project_panel::Scripts { scripts: scripts.clone(), vars: Vec::new() };
+        let listing = crate::project_panel::read(&folder, Some(&place), &std::sync::Mutex::default());
+        assert_eq!(listing.requests.len(), 2, "{:?}", listing.requests);
+        assert_eq!(listing.library.len(), 2, "each output is one asset: {:?}", listing.library);
+        let published = format!("library/{output}");
+        for id in [&studio_id, &harness_id] {
+            assert!(files(&folder, "library").iter().any(|n| n.starts_with(id.as_str())), "{id} filed no output");
+            let told = harness(&scripts, &folder, "request.py", &["tell", id]);
+            let report = crate::report::Report::read(&folder, &format!("requests/{id}.html")).unwrap();
+            let prompt = report.prompt.clone().unwrap_or_default();
+            assert!(told.contains(&format!("```text\n{prompt}\n```")), "{id}: the card's prompt is not tell's:\n{told}");
+            let placed = crate::report::Placed::read(&folder, &scripts, &[], &report);
+            for output in &report.outputs {
+                let words = &placed.outputs[output].words;
+                assert_eq!(words, if *output == published { "in use" } else { "not in use" }, "{output}");
+            }
+        }
 
         // 5. Skills' own check, and git: nothing but what the steps made.
         harness(&scripts, &folder, "request.py", &["check"]);

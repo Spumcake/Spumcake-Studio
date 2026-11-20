@@ -173,6 +173,25 @@ pub struct FilmItem {
     /// A take not made yet: drawn as a placeholder tile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<FilmPending>,
+    /// Out of date: drawn with the red outline, as ig-out-of-date shows.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub outlined: bool,
+    /// A stack of iterations, drawn as a stack with its count on a dark
+    /// round badge at the bottom right, as ig-iteration-stack shows; a
+    /// click on the badge sends its action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<FilmStack>,
+    /// Words under the tile, such as an iteration's number or Unverified.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub caption: String,
+}
+
+/// A tile's stack of iterations: how many, the take itself counted, and
+/// what a click on its badge sends, such as opening the stack as a run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilmStack {
+    pub count: usize,
+    pub open: crate::Action,
 }
 
 /// Why a filmstrip tile has no image yet.
@@ -401,6 +420,9 @@ mod tests {
                     mark: None,
                     chosen: false,
                     pending: None,
+                    outlined: false,
+                    stack: None,
+                    caption: String::new(),
                 }],
                 shown: 0,
                 select: crate::Action::new("select_image"),
@@ -427,10 +449,11 @@ mod tests {
         film.items.push(FilmItem { badge: "8.0 s".into(), mark: Some("canon".into()), chosen: true, ..tile.clone() });
         film.items.push(FilmItem { pending: Some(FilmPending::Running { since: Some(1_793_146_000) }), ..tile.clone() });
         film.items.push(FilmItem { pending: Some(FilmPending::Running { since: None }), ..tile.clone() });
-        film.items.push(FilmItem { pending: Some(FilmPending::Failed), ..tile });
+        film.items.push(FilmItem { pending: Some(FilmPending::Failed), ..tile.clone() });
+        film.items.push(FilmItem { outlined: true, stack: Some(FilmStack { count: 3, open: crate::Action::new("take_stack") }), caption: "Unverified".into(), ..tile });
         film.groups = vec![
             FilmGroup { label: "Round 14 · GPT Image 2.5".into(), count: 2, menu: Vec::new() },
-            FilmGroup { label: "Round 15 · GPT Image 2.5".into(), count: 3, menu: vec![crate::MenuEntry { tip: None, label: "Next round from this".into(), icon: None, enabled: true, divider: false, action: Some(crate::Action::new("next_round")), submenu: Vec::new(), rename: false }] },
+            FilmGroup { label: "Round 15 · GPT Image 2.5".into(), count: 4, menu: vec![crate::MenuEntry { tip: None, label: "Next round from this".into(), icon: None, enabled: true, divider: false, action: Some(crate::Action::new("next_round")), submenu: Vec::new(), rename: false }] },
         ];
         let text = serde_json::to_string(&crate::AppMessage::Raster(view.clone())).unwrap();
         assert_eq!(crate::parse_app_message(&text).unwrap(), crate::AppMessage::Raster(view.clone()));

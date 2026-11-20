@@ -213,8 +213,8 @@ pub(crate) fn toggle_tab(
 }
 
 /// The page tabs' height, and the space above them.
-const PAGE_H: f32 = S.of(40.0);
-const PAGE_TOP: f32 = S.of(14.0);
+pub(crate) const PAGE_H: f32 = S.of(40.0);
+pub(crate) const PAGE_TOP: f32 = S.of(14.0);
 /// A page tab's words, and the room on either side of them.
 const PAGE_TEXT: f32 = S.of(15.5);
 const PAGE_PAD: f32 = S.of(14.0);
@@ -1429,8 +1429,9 @@ pub(crate) struct CardState<'a> {
 pub(crate) struct ReferencePreview {
     pub thumbnail: Option<protocol::Thumbnail>,
     pub badge: String,
+    /// A video's or a sound's length in seconds.
+    pub length: Option<f64>,
     /// A sound's own cue marks, when its file holds them.
-    #[allow(dead_code)]
     pub cues: Vec<protocol::Cue>,
 }
 
@@ -1495,6 +1496,11 @@ const EMPTY_LINES: f32 = 3.0;
 const ECHO_PASSES: u64 = 60;
 
 const KIND_FILL: Color32 = Color32::from_rgb(243, 244, 246);
+/// A cue's colour when it names none, vg-sound-cue's orange.
+const CUE: [u8; 3] = [249, 115, 22];
+/// A sound reference's waveform strip under its row: its cue tags, the
+/// waveform, and its seconds.
+const SOUND_STRIP: f32 = S.of(66.0);
 const WAITS: Color32 = Color32::from_rgb(170, 174, 180);
 const FAILED_RED: Color32 = Color32::from_rgb(220, 38, 38);
 const LANDING: Color32 = Color32::from_rgb(37, 99, 235);
@@ -1627,9 +1633,16 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
         hairline(ui, width);
     }
 
-    // The prompt, plain wrapped text, edited in place.
+    // The prompt, plain wrapped text, edited in place, its timed beats at a
+    // sound's cue lit in the cue's colour, as vg-sound-cue shows.
     ui.add_space(CARD_GAP);
-    if let Some(text) = prompt_field(ui, id, cell, &declared.hint, width) {
+    let cues: Vec<protocol::Cue> = cell
+        .input
+        .iter()
+        .filter(|part| is_reference(part) && part_media_type(part).starts_with("audio/"))
+        .flat_map(|part| sound_cues(part, state.previews.and_then(|previews| previews.get(&reference_key(part)))))
+        .collect();
+    if let Some(text) = prompt_field(ui, id, cell, &declared.hint, width, &cues) {
         events.push(CardEvent::Edit { cell: id.to_string(), input: with_prompt(&cell.input, &text), settings: cell.settings.clone() });
     }
     ui.add_space(CARD_GAP);
@@ -1732,7 +1745,7 @@ fn failure_block(ui: &mut egui::Ui, id: &str, reason: &str, events: &mut Vec<Car
 /// in gray while it is empty. Returns the new text when an edit is let go
 /// and differs from the cell's. What was let go stays shown until the cell
 /// echoes it.
-fn prompt_field(ui: &mut egui::Ui, id: &str, cell: &Cell, hint: &str, width: f32) -> Option<String> {
+fn prompt_field(ui: &mut egui::Ui, id: &str, cell: &Cell, hint: &str, width: f32, cues: &[protocol::Cue]) -> Option<String> {
     let field_id = ui.id().with(("card-prompt", id));
     let stored = cell.prompt();
     let pass = ui.ctx().cumulative_pass_nr();
@@ -1754,7 +1767,7 @@ fn prompt_field(ui: &mut egui::Ui, id: &str, cell: &Cell, hint: &str, width: f32
     };
     let font = widgets::body(S);
     let line = ui.painter().layout_no_wrap("A".to_string(), font.clone(), TEXT).size().y;
-    let galley = ui.painter().layout(text.clone(), font.clone(), TEXT, width);
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(prompt_job(&text, font.clone(), width, cues)));
     let height = if text.is_empty() { line * EMPTY_LINES } else { galley.size().y.max(line) };
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     // In a child of its own, so the field never moves the page's cursor.
@@ -1767,7 +1780,7 @@ fn prompt_field(ui: &mut egui::Ui, id: &str, cell: &Cell, hint: &str, width: f32
             .desired_width(width)
             .desired_rows(1)
             .layouter(&mut |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
-                let job = egui::text::LayoutJob::simple(text.as_str().to_string(), font.clone(), TEXT, wrap);
+                let job = prompt_job(text.as_str(), font.clone(), wrap, cues);
                 ui.fonts_mut(|fonts| fonts.layout_job(job))
             }),
     );
@@ -1785,6 +1798,136 @@ fn prompt_field(ui: &mut egui::Ui, id: &str, cell: &Cell, hint: &str, width: f32
         }
     }
     None
+}
+
+/// The prompt laid out, each timed beat a cue falls inside lit in that
+/// cue's colour, as `request-page.md` has it, from its bracket to the end of
+/// its first sentence.
+fn prompt_job(text: &str, font: egui::FontId, wrap: f32, cues: &[protocol::Cue]) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob { wrap: egui::text::TextWrapping { max_width: wrap, ..Default::default() }, ..Default::default() };
+    let plain = egui::TextFormat { font_id: font.clone(), color: TEXT, ..Default::default() };
+    let mut at = 0;
+    for (span, start, end) in beats(text) {
+        let Some(cue) = cues.iter().find(|cue| cue.at >= start && cue.at < end) else {
+            continue;
+        };
+        let [r, g, b] = cue.colour.unwrap_or(CUE);
+        job.append(&text[at..span.start], 0.0, plain.clone());
+        job.append(&text[span.clone()], 0.0, egui::TextFormat { background: Color32::from_rgba_unmultiplied(r, g, b, 70), ..plain.clone() });
+        at = span.end;
+    }
+    job.append(&text[at..], 0.0, plain);
+    job
+}
+
+/// A prompt's timed beats, as Last order's final-shot prompts write them,
+/// "[3s-4s] …" or "[3s–4.2s] …": each one's span, from its bracket to the
+/// end of its first sentence, the line's end, or the next beat, and its
+/// start and end in seconds.
+pub(crate) fn beats(text: &str) -> Vec<(std::ops::Range<usize>, f64, f64)> {
+    let mut found: Vec<(usize, usize, f64, f64)> = Vec::new();
+    for (open, _) in text.match_indices('[') {
+        let Some(close) = text[open..].find(']').map(|close| open + close) else {
+            continue;
+        };
+        let inside = text[open + 1..close].replace(['–', '—'], "-");
+        let Some((from, to)) = inside.split_once('-') else {
+            continue;
+        };
+        let seconds = |words: &str| words.trim().strip_suffix('s').and_then(|number| number.trim().parse::<f64>().ok());
+        if let (Some(start), Some(end)) = (seconds(from), seconds(to)) {
+            found.push((open, close + 1, start, end));
+        }
+    }
+    let mut spans = Vec::new();
+    for (index, (open, after, start, end)) in found.iter().enumerate() {
+        let limit = found.get(index + 1).map_or(text.len(), |next| next.0);
+        let rest = &text[*after..limit];
+        let line = rest.find('\n').unwrap_or(rest.len());
+        let sentence = rest[..line]
+            .char_indices()
+            .find(|(at, ch)| matches!(ch, '.' | '!' | '?') && rest[at + ch.len_utf8()..].chars().next().is_none_or(char::is_whitespace))
+            .map_or(line, |(at, ch)| at + ch.len_utf8());
+        spans.push((*open..after + sentence, *start, *end));
+    }
+    spans
+}
+
+/// A sound reference's cues: its file's own, or else those its role names,
+/// as Last order's soundtrack's does, "with a door cue: … at exactly
+/// 3.00 s": each "<word> cue" at the first time in seconds after it, "at
+/// [exactly] N s", labelled with the word unless it is an article.
+pub(crate) fn sound_cues(part: &CellPart, preview: Option<&ReferencePreview>) -> Vec<protocol::Cue> {
+    if let Some(preview) = preview
+        && !preview.cues.is_empty()
+    {
+        return preview.cues.clone();
+    }
+    role_cues(part_role(part))
+}
+
+fn role_cues(role: &str) -> Vec<protocol::Cue> {
+    let words: Vec<String> = role.split_whitespace().map(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.' && ch != '-').to_lowercase()).collect();
+    // The time "at [exactly] N s" from word `from` on: N, and where it ends.
+    let time = |from: usize| {
+        (from..words.len()).filter(|at| words[*at] == "at").find_map(|at| {
+            let mut next = at + 1;
+            if words.get(next).map(String::as_str) == Some("exactly") {
+                next += 1;
+            }
+            let number = words.get(next)?;
+            match number.strip_suffix('s') {
+                Some(number) => number.parse::<f64>().ok(),
+                None => (words.get(next + 1).map(String::as_str) == Some("s")).then(|| number.parse::<f64>().ok()).flatten(),
+            }
+        })
+    };
+    let mut cues = Vec::new();
+    for at in (1..words.len()).filter(|at| words[*at] == "cue") {
+        let word = &words[at - 1];
+        let label = if matches!(word.as_str(), "a" | "an" | "the") { String::new() } else { word.clone() };
+        if let Some(seconds) = time(at + 1) {
+            cues.push(protocol::Cue { at: seconds, label, colour: None });
+        }
+    }
+    cues
+}
+
+/// A sound reference's waveform under its row, at the page's width, as
+/// vg-sound-cue shows it: its cues as marks with their labels above it, and
+/// its seconds under it.
+fn sound_strip(ui: &mut egui::Ui, width: f32, preview: &ReferencePreview, cues: &[protocol::Cue], length: f64) {
+    let (strip, _) = ui.allocate_exact_size(vec2(width, SOUND_STRIP), Sense::hover());
+    let painter = ui.painter();
+    let inner = Rect::from_min_max(pos2(strip.left() + S.of(8.0), strip.top() + S.of(20.0)), pos2(strip.right() - S.of(8.0), strip.top() + S.of(48.0)));
+    if let Some(thumbnail) = &preview.thumbnail
+        && let Some((texture, _)) = crate::raster::raw_image(ui.ctx(), &thumbnail.path, thumbnail.width, thumbnail.height, thumbnail.revision, &[], false)
+    {
+        painter.image(texture, inner, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    }
+    // The seconds, a tick and its time at each, fewer as the sound grows.
+    painter.hline(inner.x_range(), inner.bottom() + S.of(2.0), (1.0, BORDER));
+    let step = [1.0, 2.0, 5.0, 10.0, 30.0, 60.0].into_iter().find(|step| length / step <= 10.0).unwrap_or(120.0);
+    let x = |seconds: f64| inner.left() + (seconds / length.max(f64::EPSILON)) as f32 * inner.width();
+    let mut second = 0.0;
+    while second <= length + 1e-6 {
+        painter.vline(x(second), (inner.bottom() + S.of(2.0))..=(inner.bottom() + S.of(6.0)), (1.0, BORDER));
+        painter.text(pos2(x(second), inner.bottom() + S.of(8.0)), Align2::CENTER_TOP, format!("{second} s"), card_small(), MUTED);
+        second += step;
+    }
+    for cue in cues.iter().filter(|cue| cue.at >= 0.0 && cue.at <= length) {
+        let [r, g, b] = cue.colour.unwrap_or(CUE);
+        let colour = Color32::from_rgb(r, g, b);
+        let at = x(cue.at);
+        painter.vline(at, inner.y_range(), (1.5, colour));
+        widgets::ring(painter, pos2(at, inner.top()), S.of(3.5), 1.5, colour);
+        if !cue.label.is_empty() {
+            let words = painter.layout_no_wrap(cue.label.clone(), card_small(), Color32::WHITE);
+            let tag = Rect::from_min_size(pos2(at - S.of(2.0), strip.top() + S.of(1.0)), words.size() + vec2(S.of(10.0), S.of(3.0)));
+            painter.rect_filled(tag, S.of(3.0), colour);
+            painter.galley(tag.center() - words.size() / 2.0, words, Color32::WHITE);
+        }
+    }
 }
 
 /// The references: the gray label with "Add reference", then a row for
@@ -1856,6 +1999,14 @@ fn references(
                     drag = Some((reference, at.y - row.top()));
                 }
                 reference_row(ui, row, index + 1, reference, parts[reference], declared, cell, state, sent, events);
+                // A sound's waveform with its cues and seconds, under it.
+                let preview = state.previews.and_then(|previews| previews.get(&reference_key(parts[reference])));
+                if part_media_type(parts[reference]).starts_with("audio/")
+                    && let Some(preview) = preview
+                    && let Some(length) = preview.length.filter(|length| *length > 0.0)
+                {
+                    sound_strip(ui, width, preview, &sound_cues(parts[reference], Some(preview)), length);
+                }
             }
             Entry::Slot(role) => slot_row(ui, row, index + 1, &declared.roles[role], declared, events),
         }
@@ -2448,6 +2599,37 @@ fn setting_json(kind: &RowKind, value: &PropValue) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a timed beat read wrongly or lit for the wrong cue, and Last
+    /// order's soundtrack, which has no cue points, losing its door: the
+    /// beats are read with a hyphen or an en dash, each to the end of its
+    /// first sentence or its line; the role's "door cue … at exactly 3.00 s"
+    /// is the cue; only the beat it falls inside is lit; and a role naming
+    /// two cues gives each its own time.
+    #[test]
+    fn a_sounds_cue_lights_the_beat_it_falls_in() {
+        let prompt = "Shot 12. [0s-3s] The keeper turns. [3s–4.2s] The door bangs open behind him. The keeper as Image 1 shows him.\n[4s-8s] It stays open";
+        let read: Vec<(&str, f64, f64)> = beats(prompt).into_iter().map(|(span, start, end)| (&prompt[span], start, end)).collect();
+        assert_eq!(read, [("[0s-3s] The keeper turns.", 0.0, 3.0), ("[3s–4.2s] The door bangs open behind him.", 3.0, 4.2), ("[4s-8s] It stays open", 4.0, 8.0)]);
+        let role = "the soundtrack, with a door cue: quiet room tone to 3.0 s, then the door's latch click and bell at exactly 3.00 s, then the sound bed";
+        let sound = CellPart::Path { path: "prompts/resources/door.wav".into(), media_type: "audio/wav".into(), role: Some(role.into()), field: None };
+        let cues = sound_cues(&sound, Some(&ReferencePreview::default()));
+        assert_eq!(cues, [protocol::Cue { at: 3.0, label: "door".into(), colour: None }]);
+        // A file's own cue points come first.
+        let own = ReferencePreview { cues: vec![protocol::Cue { at: 1.5, label: "bell".into(), colour: None }], ..Default::default() };
+        assert_eq!(sound_cues(&sound, Some(&own))[0].label, "bell");
+        let job = prompt_job(prompt, egui::FontId::proportional(14.0), 300.0, &cues);
+        let lit: Vec<&str> = job.sections.iter().filter(|section| section.format.background != Color32::TRANSPARENT).map(|section| &prompt[section.byte_range.start.0..section.byte_range.end.0]).collect();
+        assert_eq!(lit, ["[3s–4.2s] The door bangs open behind him."]);
+        // A file's cue point at the sound's onset, inside the beat, lights it.
+        let onset = [protocol::Cue { at: 3.085, label: "door".into(), colour: None }];
+        let job = prompt_job(prompt, egui::FontId::proportional(14.0), 300.0, &onset);
+        assert_eq!(job.sections.iter().filter(|section| section.format.background != Color32::TRANSPARENT).count(), 1);
+        // A role naming two cues gives both, each at its own time; a level
+        // in dB is no time.
+        let two = role_cues("a bell cue at 1 s, then -12 dB, and a door cue at -6 dB at 3.5 s");
+        assert_eq!(two.iter().map(|cue| (cue.label.as_str(), cue.at)).collect::<Vec<_>>(), [("bell", 1.0), ("door", 3.5)]);
+    }
 
     /// Catches page tabs cut at the panel's edge, as "Prompt" was at the
     /// panel's own width, the narrowest it is drawn: the Image Generator's

@@ -7,7 +7,7 @@ use crate::gallery::Mode;
 use crate::rounds::{self, With};
 use crate::session::{Page, Session, Tab, Tool};
 use protocol::{
-    Action, Binding, CellSetting, Chord, Film, FilmGroup, FilmItem, FlagIcons, HeadingAction, Keys, Layers, MenuEntry, PanelCell, PanelPage,
+    Action, Binding, CellSetting, Chord, Film, FilmGroup, FilmItem, FilmStack, FlagIcons, HeadingAction, Keys, Layers, MenuEntry, PanelCell, PanelPage,
     Properties, ReferenceRole, RowKind, TabEntry, Tabs, Thumbnail, ToolItem, Toolbar,
 };
 use protocol::{Transport, TransportClock, TransportRow};
@@ -173,16 +173,36 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
                 let (width, height) = size.map_or((78, 44), |(width, height)| crate::session::film_size(width, height));
                 Thumbnail { path: String::new(), width, height, revision: 0 }
             };
+            // A round's tile is its asset, as the Image Generator's: outlined
+            // while out of date, a stack while it has iterations,
+            // Unverified when nothing records what it was made from. An
+            // opened stack's tiles are numbered.
+            let asset = tile.asset.as_ref();
+            // The tile that stands for the asset: a round's, or an opened
+            // stack's latest, whose badge closes the stack again.
+            let round = tile.is_asset();
+            let (name, caption) = match (tile.iteration, asset) {
+                (Some(at), Some(asset)) => (format!("Take {} · iteration {at} of {}", tile.take + 1, 1 + asset.iterations.len()), at.to_string()),
+                (None, Some(asset)) if asset.unverified => (format!("Take {}", tile.take + 1), String::from("Unverified")),
+                _ => (format!("Take {}", tile.take + 1), String::new()),
+            };
+            let outlined = round && asset.is_some_and(|asset| asset.outlined);
             FilmItem {
-                name: format!("Take {}", tile.take + 1),
+                name,
                 thumbnail: read.and_then(|read| session.films.get(&read.file).cloned()).unwrap_or_else(placeholder),
-                menu: tile.path().map(|path| take_menu(session, tab, tile, path)).unwrap_or_default(),
+                menu: tile.path().map(|path| take_menu(session, tab, tile, path, outlined)).unwrap_or_default(),
                 // The take's length, as vg-filmstrip-rounds' badge shows it.
                 badge: read.and_then(|read| read.info).map(|info| crate::preview::length(&info)).unwrap_or_default(),
                 mark: tile.file.as_ref().filter(|file| file.canon).map(|_| String::from("badge-check")),
                 // The take shown, and one beside it.
                 chosen: rounds.shown == Some(index) || tile.path().is_some_and(|path| rounds.with == With::Tile(path.to_string())),
                 pending: tile.pending.clone(),
+                outlined,
+                stack: asset.filter(|asset| round && !asset.iterations.is_empty()).map(|asset| FilmStack {
+                    count: 1 + asset.iterations.len(),
+                    open: Action::with_arg("take_stack", json!({ "take": asset.path })),
+                }),
+                caption,
             }
         })
         .collect();
@@ -193,7 +213,7 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
         .groups()
         .into_iter()
         .map(|(label, count)| {
-            let label = rounds.tiles.get(first).and_then(|tile| tab.finishing_label(tile)).unwrap_or(label);
+            let label = rounds.tiles.get(first).filter(|tile| tile.iteration.is_none()).and_then(|tile| tab.finishing_label(tile)).unwrap_or(label);
             first += count;
             FilmGroup { label, count, menu: Vec::new() }
         })
@@ -224,6 +244,9 @@ pub fn film(session: &Session, tab: &Tab) -> Film {
                 // Beside a round's take shown.
                 chosen: rounds.shown.is_some() && matches!(rounds.with, With::Own { uid, .. } if uid == take.uid),
                 pending: None,
+                outlined: false,
+                stack: None,
+                caption: String::new(),
             }
         });
     let tiles = items.len();
@@ -278,7 +301,7 @@ pub fn transport(session: &Session, tab: &Tab) -> Option<Transport> {
 /// Deliver…, on only in a project for a take whose round names its
 /// artifact while no delivery is under way; for a finished take, Compare
 /// with the source; and Open report.
-fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str) -> Vec<MenuEntry> {
+fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str, outlined: bool) -> Vec<MenuEntry> {
     let target = json!({ "take": path });
     let mut retime = row(crate::finishing::RETIME, Action::with_arg("take_retime", target.clone()));
     retime.divider = true;
@@ -289,15 +312,23 @@ fn take_menu(session: &Session, tab: &Tab, tile: &rounds::Tile, path: &str) -> V
     edit.divider = true;
     let mut deliver = row(crate::session::DELIVER, Action::with_arg("take_deliver", target.clone()));
     deliver.enabled = session.can_deliver(tab, path);
+    // An opened stack's iteration starts a round or opens to edit.
+    if !tile.is_asset() {
+        return vec![row("Next round from this", Action::with_arg("take_next_round", target.clone())), edit];
+    }
     let mut rows = vec![
         row("Next round from this", Action::with_arg("take_next_round", target.clone())),
         // Beside the takes in use, replacing none, so it asks nothing first.
         row("Use this take", Action::with_arg("take_use", target.clone())),
-        retime,
-        upscale,
-        edit,
-        deliver,
     ];
+    // While out of date, as ig-out-of-date's menu shows.
+    if outlined {
+        let mut ignore = row("Ignore", Action::with_arg("take_ignore", target.clone()));
+        ignore.divider = true;
+        rows.push(ignore);
+        rows.push(row("Ask the assistant to fix the dependency chain", Action::with_arg("take_fix", target.clone())));
+    }
+    rows.extend([retime, upscale, edit, deliver]);
     if tab.finishing_label(tile).is_some() {
         rows.push(row(crate::finishing::COMPARE, Action::with_arg("take_compare", target.clone())));
     }
