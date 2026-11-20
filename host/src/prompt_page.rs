@@ -876,6 +876,9 @@ impl PromptPage {
                 crate::prices::fill_from_token_prices(&data, &folder, &mut plan);
             }
             crate::prices::fill_from_history(&folder, &mut plan);
+            // With no endpoint of the user's for its service, the card names
+            // the service the spec itself sends to, as the plan card does.
+            let service = if service.is_empty() { spec.pointer("/endpoint/kind").and_then(Value::as_str).map(crate::plan_card::service_name).unwrap_or_default() } else { service };
             Some(cost_line(&plan, &service))
         });
         CardView { cell: shown, cost }
