@@ -213,8 +213,8 @@ pub(crate) fn toggle_tab(
 }
 
 /// The page tabs' height, and the space above them.
-const PAGE_H: f32 = S.of(40.0);
-const PAGE_TOP: f32 = S.of(14.0);
+pub(crate) const PAGE_H: f32 = S.of(40.0);
+pub(crate) const PAGE_TOP: f32 = S.of(14.0);
 /// A page tab's words, and the room on either side of them.
 const PAGE_TEXT: f32 = S.of(15.5);
 const PAGE_PAD: f32 = S.of(14.0);

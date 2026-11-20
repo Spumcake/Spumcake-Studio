@@ -2,6 +2,8 @@
 
 Shows a place's pre-vis in 3D, as it stands, from the place's scene files in the project's `prompts/resources/`: the user orbits it freely, looks through any of its builder's cameras, and lays each camera's published pre-vis render beside or over it, and the door's swing plays as its published video shows it. Nothing in it is editable in Studio 0.15. The host draws the scene itself from the scene file; this program chooses what is shown, as `view3d`, and declares the camera list, the toolbar, and the menu.
 
+Which render of a camera is in use is the project's canon's, as the scene contract has it since the owner's data model of 2026-11-18: its camera's `canon` artifact's latest iteration, asked of the host with `read_canon` (`pipeline.py sql --read-only`) when a place opens, and what is out of date with `read_touches`. The list marks the render in use with the seal, draws the others dimmer, and outlines a render in use that is out of date. A later iteration no builder made is listed with the newest scene that has its camera, and is shown only beside the scene, never over it. Without a pipeline, nothing is marked.
+
 ## Rules for this sub-application
 
 - It is its own program. Its crate depends on `protocol`, `serde_json`, `scene` (the scene reader in Spumcake-Render), `image` for a published render's PNG, and `media` for a published video's frames, never on the host or on another sub-application.

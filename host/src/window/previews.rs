@@ -59,6 +59,18 @@ impl HostWindow {
         }
     }
 
+    /// Asks for a preview of each project file named that is not an image,
+    /// such as a report's video output, kept under its path in the project.
+    pub(super) fn ask_file_previews(&mut self, paths: &[String]) {
+        let Some(root) = self.project.as_ref().map(|project| project.folder.clone()) else { return };
+        for path in paths {
+            let media_type = crate::prompt_page::media_type(path);
+            if !media_type.starts_with("image/") {
+                self.ask_preview(path.clone(), &root.join(path), media_type);
+            }
+        }
+    }
+
     /// Asks the workspace that previews `media_type` for `file`'s preview,
     /// kept under `key`, when it is new or has changed since it was asked.
     fn ask_preview(&mut self, key: String, file: &std::path::Path, media_type: &str) {

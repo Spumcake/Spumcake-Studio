@@ -190,3 +190,69 @@ fn cameras_looks_steps_and_tools_answer_as_the_hand_does() {
     assert_eq!(views.last().unwrap()["look"], "coded");
     assert!(!results[3]["ok"].as_bool().unwrap(), "an unknown view is refused");
 }
+
+/// The canon's answer marks the render in use with the seal, dims the
+/// others, and outlines one out of date; a later iteration, which no
+/// builder made, is listed and shown only beside the scene.
+#[test]
+fn the_canon_marks_each_cameras_render_in_use() {
+    let Some(project) = diner_copy("canon") else { return };
+    let resources = project.join("prompts/resources");
+    // Each render's camera's canon artifact, from the scene files.
+    let mut canon_of: HashMap<String, String> = HashMap::new();
+    for entry in std::fs::read_dir(&resources).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "glb") {
+            for camera in scene::read(&std::fs::read(&path).unwrap()).unwrap().cameras {
+                if let (Some(file), Some(canon)) = (camera.reference_file, camera.canon) {
+                    canon_of.insert(file, canon);
+                }
+            }
+        }
+    }
+    let file = |part: &str| canon_of.keys().find(|f| f.contains(part)).unwrap().clone();
+    let wall = file("2026-11-11_17-20-previs-far-end-wall-grey");
+    let location = file("previs-location-grey");
+    // A later iteration of the location's render, as a workspace's Save
+    // files one.
+    std::fs::create_dir_all(project.join("library")).unwrap();
+    let later = "library/2026-11-19_10-00-location-iteration.png";
+    std::fs::copy(project.join(&location), project.join(later)).unwrap();
+
+    let opened = drive(&[json!({ "type": "project", "folder": project.display().to_string(), "skills": true })]);
+    let asked = opened.iter().find(|m| m["type"] == "read_canon").expect("the canon is read on opening");
+    assert!(asked["query"].as_str().unwrap().contains(&format!("'{}'", canon_of[&wall])), "{}", asked["query"]);
+    assert!(opened.iter().any(|m| m["type"] == "read_touches" && m["artifact"].is_null()), "touches is read on opening");
+
+    let said = drive(&[
+        json!({ "type": "project", "folder": project.display().to_string(), "skills": true }),
+        json!({ "type": "canon_rows", "id": asked["id"], "rows": [[canon_of[&wall], wall], [canon_of[&location], later]] }),
+        json!({ "type": "touches_read", "id": "touches", "touches": { "out_of_date": [{ "artifact": canon_of[&wall], "why": "its inputs changed" }], "unverified": [] } }),
+    ]);
+    let properties = said.iter().rfind(|m| m["type"] == "properties").unwrap();
+    let rows: Vec<&Value> = properties["layers"]["rows"].as_array().unwrap().iter().filter(|r| r["id"].as_u64().unwrap() >= 1000).collect();
+    assert_eq!(rows.len(), 11, "the ten renders and the later iteration");
+    let row = |name: &str, day: &str| *rows.iter().find(|r| r["name"] == name && r["value"] == day).unwrap_or_else(|| panic!("no row {name} {day}"));
+    let flag = |r: &Value, key: &str| r[key].as_bool().unwrap_or(false);
+    let wall_in_use = row("far-end-wall", "11 Nov");
+    assert_eq!(wall_in_use["mark"], "badge-check");
+    assert!(flag(wall_in_use, "outlined") && !flag(wall_in_use, "dim"));
+    assert!(flag(row("far-end-wall", "10 Nov"), "dim"), "an earlier iteration is dimmer");
+    let later_row = row("location", "19 Nov");
+    assert_eq!(later_row["mark"], "badge-check");
+    assert!(!flag(later_row, "dim") && !flag(later_row, "outlined"));
+    assert!(flag(row("location", "10 Nov"), "dim"));
+    assert!(row("back-wall", "10 Nov")["mark"].is_null(), "a render whose canon was not read is not marked");
+
+    // The later iteration, chosen, is shown beside the scene, never over it.
+    let id = later_row["id"].as_u64().unwrap();
+    let mut lines = vec![
+        json!({ "type": "project", "folder": project.display().to_string(), "skills": true }),
+        json!({ "type": "canon_rows", "id": "canon", "rows": [[canon_of[&location], later]] }),
+    ];
+    lines.push(pick(id));
+    let said = drive(&lines);
+    let view = said.iter().rfind(|m| m["type"] == "view3d").unwrap();
+    assert_eq!(view["camera"], json!({ "kind": "named", "name": "location" }));
+    assert_eq!(view["reference"]["show"]["kind"], "beside", "{}", view["reference"]);
+}

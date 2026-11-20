@@ -634,7 +634,14 @@ impl Views {
                 }
             }
             if let (Some(object), Some(pointer)) = (state.picked.and_then(|i| scene.objects.get(i)), response.hover_pos()) {
-                name_tip(&painter, pointer, &format!("{} · {}", object.label_text, object.name));
+                // A group of one part, such as "far end wall, beside the door",
+                // is named once.
+                let words = if object.label_text == object.name {
+                    object.name.clone()
+                } else {
+                    format!("{} · {}", object.label_text, object.name)
+                };
+                name_tip(&painter, pointer, &words);
             }
         }
         out
