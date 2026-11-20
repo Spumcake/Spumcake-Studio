@@ -11,6 +11,9 @@ directories = "=6.0.0"
 draw = { path = "../draw" }
 eframe = "=0.36.2"
 iconflow = { version = "=2.1.0", default-features = false, features = ["pack-iconoir"] }
+# The decoder eframe's `icon_data` reads images with, given JPEG beside PNG,
+# so research sources in `sources/` show, as the owner set on 2026-11-20.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 kurbo = "=0.13.1"
 libc = "=0.2.190"
 octotablet = { version = "=0.1.0", default-features = false, features = ["wayland-tablet-unstable-v2"] }

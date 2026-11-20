@@ -151,7 +151,7 @@ impl Video {
     fn seek(&mut self, index: u32) -> Result<()> {
         let seconds = f64::from(index) / self.info.fps() + self.start as f64 * self.tick;
         let at = (seconds * f64::from(ff::ffi::AV_TIME_BASE)) as i64;
-        self.input.seek(at, ..at + 1).map_err(|_| error(format!("Studio could not move to frame {} of {}.", index + 1, self.name)))?;
+        self.input.seek(at, ..at + 1).map_err(|_| error(format!("Spumcake for Desktop could not move to frame {} of {}.", index + 1, self.name)))?;
         self.decoder.flush();
         self.ended = false;
         self.at = None;

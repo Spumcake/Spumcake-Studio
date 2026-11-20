@@ -1667,22 +1667,6 @@ impl HostWindow {
         self.show_report(request);
     }
 
-    /// A request's report page, `requests/<request>.html` in the project.
-    fn report_page(&self, request: &str) -> Result<PathBuf, String> {
-        let plain = !request.is_empty() && request != "." && request != ".." && !request.contains(['/', '\\']);
-        if !plain {
-            return Err(format!("“{request}” names no request, so there is no report to show."));
-        }
-        let Some(project) = &self.project else {
-            return Err(String::from("No project is open, so there is no report to show."));
-        };
-        let page = project.folder.join("requests").join(format!("{request}.html"));
-        if !page.is_file() {
-            return Err(format!("Request {request} has no report yet."));
-        }
-        Ok(page)
-    }
-
     fn take_cell_requests(&mut self) {
         let mut runs = Vec::new();
         let mut stops = Vec::new();
@@ -2675,6 +2659,9 @@ impl HostWindow {
                         cost: view.cost.as_deref(),
                         root: root.as_deref(),
                         previews: Some(&self.previews.shown),
+                        cues: &view.cues,
+                        cue_note: view.cue_note,
+                        sound_cues: Some(&view.sound_cues),
                         ..Default::default()
                     };
                     panel::show_with(&mut column, properties.as_ref(), &card, panel_rect)

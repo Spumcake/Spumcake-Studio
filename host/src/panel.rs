@@ -13,7 +13,7 @@ use eframe::egui::{
     Stroke, StrokeKind, UiBuilder, pos2, vec2,
 };
 use protocol::{
-    Action, Cell, CellPart, CellState, ChoicePreview, PanelCell, PresetSample, PropValue, Properties, ReferenceRole, Row,
+    Action, Cell, CellPart, CellSetting, CellState, ChoicePreview, PanelCell, PresetSample, PropValue, Properties, ReferenceRole, Row,
     RowKind,
 };
 use serde_json::{Value, json};
@@ -1421,6 +1421,14 @@ pub(crate) struct CardState<'a> {
     /// The project's folder, against which a reference's relative path is
     /// read.
     pub root: Option<&'a std::path::Path>,
+    /// The project's sound cues, its canon facts `<cue>: start`, which a
+    /// sound reference marks before any other, and why they are at the
+    /// film's times, when they are for an error in the step's template.
+    pub cues: &'a [protocol::Cue],
+    pub cue_note: Option<&'a str>,
+    /// The cues each sound's step names, by the sound's file: a sound marks
+    /// only those, or every cue when its step names none.
+    pub sound_cues: Option<&'a HashMap<String, Vec<String>>>,
 }
 
 /// A reference's small image, with words for its corner, such as a
@@ -1640,7 +1648,7 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
         .input
         .iter()
         .filter(|part| is_reference(part) && part_media_type(part).starts_with("audio/"))
-        .flat_map(|part| sound_cues(part, state.previews.and_then(|previews| previews.get(&reference_key(part)))))
+        .flat_map(|part| sound_cues(part, state.previews.and_then(|previews| previews.get(&reference_key(part))), &own_cues(part, state)))
         .collect();
     if let Some(text) = prompt_field(ui, id, cell, &declared.hint, width, &cues) {
         events.push(CardEvent::Edit { cell: id.to_string(), input: with_prompt(&cell.input, &text), settings: cell.settings.clone() });
@@ -1651,8 +1659,15 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
 
     references(ui, declared, cell, state, width, sent, events);
 
-    // The settings, drawn as the panel's rows.
-    if !declared.settings.is_empty() {
+    // The settings, drawn as the panel's rows: a draft's every declared
+    // row; a step's only those whose keys its step's settings hold, as the
+    // step's model names them.
+    let shown: Vec<&CellSetting> = declared
+        .settings
+        .iter()
+        .filter(|setting| cell.step.is_none() || cell.settings.as_ref().is_some_and(|settings| settings.get(&setting.key).is_some()))
+        .collect();
+    if !shown.is_empty() {
         ui.add_space(S.of(8.0));
         hairline(ui, width);
         ui.add_space(S.of(8.0));
@@ -1661,7 +1676,7 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
         ui.add_space(S.of(4.0));
         let none = Action::new("");
         let mut edits = Vec::new();
-        for (index, setting) in declared.settings.iter().enumerate() {
+        for (index, setting) in shown.iter().enumerate() {
             if index > 0 {
                 ui.add_space(ROW_GAP);
             }
@@ -1853,11 +1868,28 @@ pub(crate) fn beats(text: &str) -> Vec<(std::ops::Range<usize>, f64, f64)> {
     spans
 }
 
-/// A sound reference's cues: its file's own, or else those its role names,
-/// as Last order's soundtrack's does, "with a door cue: … at exactly
-/// 3.00 s": each "<word> cue" at the first time in seconds after it, "at
-/// [exactly] N s", labelled with the word unless it is an article.
-pub(crate) fn sound_cues(part: &CellPart, preview: Option<&ReferencePreview>) -> Vec<protocol::Cue> {
+/// The project's cue facts a sound reference marks: those its step names
+/// in its template, or every one when its step names none.
+fn own_cues(part: &CellPart, state: &CardState) -> Vec<protocol::Cue> {
+    match state.sound_cues.and_then(|named| named.get(&reference_key(part))) {
+        Some(named) => state.cues.iter().filter(|cue| named.contains(&cue.label)).cloned().collect(),
+        None => state.cues.to_vec(),
+    }
+}
+
+/// A sound reference's cues. The project's canon cue facts come first, as
+/// Spumcake-Skills holds a cue's time as canon. Without any, the file's own
+/// cue points, and then, for a project from before the facts such as Last
+/// order, those its role names, as Last order's soundtrack's does, "with a
+/// door cue: … at exactly 3.00 s": each "<word> cue" at the first time in
+/// seconds after it, "at [exactly] N s", labelled with the word unless it
+/// is an article. The prompt's own words are never read for a cue.
+pub(crate) fn sound_cues(part: &CellPart, preview: Option<&ReferencePreview>, facts: &[protocol::Cue]) -> Vec<protocol::Cue> {
+    if !facts.is_empty() {
+        // Those past the sound's end are not its own.
+        let length = preview.and_then(|preview| preview.length).unwrap_or(f64::INFINITY);
+        return facts.iter().filter(|cue| cue.at <= length).cloned().collect();
+    }
     if let Some(preview) = preview
         && !preview.cues.is_empty()
     {
@@ -2005,7 +2037,13 @@ fn references(
                     && let Some(preview) = preview
                     && let Some(length) = preview.length.filter(|length| *length > 0.0)
                 {
-                    sound_strip(ui, width, preview, &sound_cues(parts[reference], Some(preview)), length);
+                    sound_strip(ui, width, preview, &sound_cues(parts[reference], Some(preview), &own_cues(parts[reference], state)), length);
+                    // Why its cues are at the film's times, in gray under it.
+                    if let Some(note) = state.cue_note.filter(|_| !state.cues.is_empty()) {
+                        let galley = ui.painter().layout(note.to_string(), card_small(), MUTED, width);
+                        let (line, _) = ui.allocate_exact_size(vec2(width, galley.size().y + S.of(4.0)), Sense::hover());
+                        ui.painter().galley(line.left_top(), galley, MUTED);
+                    }
                 }
             }
             Entry::Slot(role) => slot_row(ui, row, index + 1, &declared.roles[role], declared, events),
@@ -2429,11 +2467,18 @@ fn part_file(part: &CellPart) -> String {
 /// whose label is its menu word, by index, and the user's words. A role
 /// with no declared menu word is all the user's words.
 fn split_role<'a>(role: &'a str, roles: &[ReferenceRole]) -> (Option<usize>, &'a str) {
-    if let Some(index) = roles.iter().position(|known| known.label == role) {
+    // A role's menu word as written, or in a sentence's case after "the",
+    // as Last order's requests write "the start frame" for Start frame.
+    let known = |word: &str| {
+        let word = word.trim();
+        let word = word.strip_prefix("the ").or_else(|| word.strip_prefix("The ")).unwrap_or(word);
+        roles.iter().position(|known| known.label.eq_ignore_ascii_case(word))
+    };
+    if let Some(index) = known(role) {
         return (Some(index), "");
     }
     if let Some((word, words)) = role.split_once(", ")
-        && let Some(index) = roles.iter().position(|known| known.label == word)
+        && let Some(index) = known(word)
     {
         return (Some(index), words);
     }
@@ -2600,6 +2645,21 @@ fn setting_json(kind: &RowKind, value: &PropValue) -> Option<Value> {
 mod tests {
     use super::*;
 
+    /// Catches Last order's "the start frame" kept apart from the Start
+    /// frame slot it fills: a role matches its menu word in a sentence's
+    /// case after "the", and the user's words after it are kept.
+    #[test]
+    fn a_role_after_the_fills_its_slot() {
+        let roles = vec![
+            ReferenceRole { label: "Start frame".into(), field: None, slot: true },
+            ReferenceRole { label: "Reference".into(), field: None, slot: false },
+        ];
+        assert_eq!(split_role("the start frame", &roles), (Some(0), ""));
+        assert_eq!(split_role("Start frame, the door", &roles), (Some(0), "the door"));
+        assert_eq!(split_role("The start frame, lit", &roles), (Some(0), "lit"));
+        assert_eq!(split_role("image 1, the lit plate", &roles), (None, "image 1, the lit plate"));
+    }
+
     /// Catches a timed beat read wrongly or lit for the wrong cue, and Last
     /// order's soundtrack, which has no cue points, losing its door: the
     /// beats are read with a hyphen or an en dash, each to the end of its
@@ -2613,11 +2673,34 @@ mod tests {
         assert_eq!(read, [("[0s-3s] The keeper turns.", 0.0, 3.0), ("[3s–4.2s] The door bangs open behind him.", 3.0, 4.2), ("[4s-8s] It stays open", 4.0, 8.0)]);
         let role = "the soundtrack, with a door cue: quiet room tone to 3.0 s, then the door's latch click and bell at exactly 3.00 s, then the sound bed";
         let sound = CellPart::Path { path: "prompts/resources/door.wav".into(), media_type: "audio/wav".into(), role: Some(role.into()), field: None };
-        let cues = sound_cues(&sound, Some(&ReferencePreview::default()));
+        let cues = sound_cues(&sound, Some(&ReferencePreview::default()), &[]);
         assert_eq!(cues, [protocol::Cue { at: 3.0, label: "door".into(), colour: None }]);
         // A file's own cue points come first.
         let own = ReferencePreview { cues: vec![protocol::Cue { at: 1.5, label: "bell".into(), colour: None }], ..Default::default() };
-        assert_eq!(sound_cues(&sound, Some(&own))[0].label, "bell");
+        assert_eq!(sound_cues(&sound, Some(&own), &[])[0].label, "bell");
+        // The project's canon cue facts come before either.
+        let rows = "[\"the door\", \"start\", \"13.0 s\"]\n[\"the door\", \"end\", \"13.4\"]\n[\"the bell\", \"start\", \"1.5\"]\n[\"shot 2\", \"in\", \"10.0\"]";
+        let (film, frames) = crate::prompt_page::timing_facts(rows);
+        assert_eq!(film.iter().map(|cue| (cue.label.as_str(), cue.at)).collect::<Vec<_>>(), [("the bell", 1.5), ("the door", 13.0)]);
+        // On shot 2's sound, from 10 s in the film: the door at 3 s, the bell
+        // before the shot dropped; with no frame named, the film's times.
+        let (shot, note) = crate::prompt_page::shot_cues("Shot 2 opens at {{shot 2: in}}.", &film, &frames);
+        assert_eq!(shot.iter().map(|cue| (cue.label.as_str(), cue.at)).collect::<Vec<_>>(), [("the door", 3.0)]);
+        assert_eq!(note, None);
+        assert_eq!(crate::prompt_page::shot_cues("No frame named.", &film, &frames), (film.clone(), None));
+        // Two shots named is a template's error: the film's times, and why.
+        assert_eq!(crate::prompt_page::shot_cues("{{shot 2: in}} and {{shot 3: in}}", &film, &frames), (film.clone(), Some(crate::prompt_page::SEVERAL_SHOTS)));
+        let eight = ReferencePreview { length: Some(8.0), ..own.clone() };
+        assert_eq!(sound_cues(&sound, Some(&eight), &shot), shot);
+        assert!(sound_cues(&sound, Some(&eight), &film).iter().all(|cue| cue.at <= 8.0), "a cue past the sound's end was marked");
+        // A sound marks only the cues its step names, or every one when it
+        // names none.
+        assert_eq!(crate::prompt_page::named_cues("Water, then {{the bell: start}}, {{shot 1: in}}, {{the bell: start}}."), ["the bell"]);
+        let named = HashMap::from([(String::from("prompts/resources/door.wav"), vec![String::from("the bell")])]);
+        let state = CardState { cues: &film, sound_cues: Some(&named), ..Default::default() };
+        assert_eq!(own_cues(&sound, &state).iter().map(|cue| cue.label.as_str()).collect::<Vec<_>>(), ["the bell"]);
+        let other = CellPart::Path { path: "library/rain.wav".into(), media_type: "audio/wav".into(), role: None, field: None };
+        assert_eq!(own_cues(&other, &state).len(), film.len());
         let job = prompt_job(prompt, egui::FontId::proportional(14.0), 300.0, &cues);
         let lit: Vec<&str> = job.sections.iter().filter(|section| section.format.background != Color32::TRANSPARENT).map(|section| &prompt[section.byte_range.start.0..section.byte_range.end.0]).collect();
         assert_eq!(lit, ["[3s–4.2s] The door bangs open behind him."]);
