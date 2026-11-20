@@ -6,10 +6,9 @@
 //! or unverified while Skills has no record to compare. A cell's rounds and
 //! the project panel's Library both read it.
 //!
-//! Its iterations are read the way the storyboard's timeline reads them, a
-//! file filed with `request.py resource --iterates` and a version published
-//! as an edit of the artifact itself or to fix it, until that reading moves
-//! to `protocol/src/assets.rs`.
+//! Its iterations are read with `protocol::Iterations`, the reader every
+//! workspace shares: a file filed with `request.py resource --iterates`, and
+//! a version published as an edit of the artifact itself or to fix it.
 
 use crate::prompt_page::{Canon, media_type};
 use serde_json::Value;
@@ -51,53 +50,17 @@ impl Asset {
     }
 }
 
-/// Each file's iterations, by the file it iterates, oldest first, each as
-/// when it was filed or published, its file, and whether it was a fix: from
-/// `prompts/resources/records.jsonl` and every pipeline's `runs.jsonl`.
-fn iterations_of(folder: &Path) -> HashMap<String, Vec<(String, String, bool)>> {
-    let lines = |path: &Path| std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).collect::<Vec<_>>();
-    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()).map(String::from);
-    let mut next: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
-    let mut add = |of: String, file: String, at: String, fix: bool| {
-        if of != file {
-            next.entry(of).or_default().push((at, file, fix));
-        }
-    };
-    for record in lines(&folder.join("prompts/resources/records.jsonl")) {
-        let of = record.get("iterates").and_then(|iterates| text(iterates, "file").or_else(|| iterates.as_str().map(String::from)));
-        if let (Some(of), Some(file)) = (of, text(&record, "file")) {
-            add(of, file, text(&record, "at").unwrap_or_default(), false);
-        }
-    }
+/// Each file's iterations, read with the reader every workspace shares,
+/// `protocol::Iterations`: from `prompts/resources/records.jsonl` and every
+/// pipeline's `runs.jsonl`.
+fn read_iterations(folder: &Path) -> protocol::Iterations {
+    let records = std::fs::read_to_string(folder.join(protocol::RESOURCE_RECORDS)).unwrap_or_default();
+    let mut logs: Vec<String> = Vec::new();
     for pipeline in std::fs::read_dir(folder.join("pipeline")).into_iter().flatten().flatten() {
-        for event in lines(&pipeline.path().join("runs.jsonl")) {
-            if text(&event, "event").as_deref() != Some("publish") {
-                continue;
-            }
-            let Some(file) = text(&event, "file") else { continue };
-            let at = text(&event, "at").unwrap_or_default();
-            if let Some(of) = text(&event, "edited_from") {
-                add(of, file.clone(), at.clone(), false);
-            }
-            if let Some(of) = text(&event, "fixes") {
-                add(of, file.clone(), at, true);
-            }
-        }
+        logs.push(std::fs::read_to_string(pipeline.path().join("runs.jsonl")).unwrap_or_default());
     }
-    for later in next.values_mut() {
-        later.sort();
-        // A file filed and then published as an iteration is one iteration,
-        // a fix when either says so.
-        let mut kept: Vec<(String, String, bool)> = Vec::new();
-        for (at, file, fix) in later.drain(..) {
-            match kept.iter_mut().find(|(_, known, _)| *known == file) {
-                Some(known) => known.2 |= fix,
-                None => kept.push((at, file, fix)),
-            }
-        }
-        *later = kept;
-    }
-    next
+    let logs: Vec<&str> = logs.iter().map(String::as_str).collect();
+    protocol::Iterations::from_text(&records, &logs)
 }
 
 /// The project's assets, from its reports, its records, and its canon,
@@ -105,8 +68,8 @@ fn iterations_of(folder: &Path) -> HashMap<String, Vec<(String, String, bool)>> 
 /// out of date and unverified. Takes appear in the order their reports
 /// started, then the files only canon names.
 pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset> {
-    let next = iterations_of(folder);
-    let iterated: HashSet<&str> = next.values().flatten().map(|(_, file, _)| file.as_str()).collect();
+    let next = read_iterations(folder);
+    let iterated: HashSet<&str> = next.iterated().map(|(file, _)| file).collect();
     // Each take, with the step its report names; and every file a report
     // names as a reference it sent, an asset too, outside any cell. Research
     // files its reports beside its sources.
@@ -163,7 +126,7 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
     }
     // So is a file iterated since, such as a filed layout edited in its
     // workspace, though canon now names its iteration.
-    let mut edited: Vec<&String> = next.keys().filter(|file| is_reference(file) && !iterated.contains(file.as_str())).collect();
+    let mut edited: Vec<String> = next.iterated().map(|(_, of)| of.to_string()).filter(|file| is_reference(file) && !iterated.contains(file.as_str())).collect();
     edited.sort();
     for file in edited {
         if seen.insert(file.clone()) {
@@ -196,12 +159,12 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             let mut iterations = Vec::new();
             let mut at = first.clone();
             let mut walked = HashSet::from([first.clone()]);
-            while let Some((when, newer, fix)) = next.get(&at).and_then(|later| later.last()) {
-                if !walked.insert(newer.clone()) {
+            while let Some(newer) = next.next(&at).last() {
+                if !walked.insert(newer.file.clone()) {
                     break;
                 }
-                iterations.push(protocol::Iteration { file: newer.clone(), published: crate::prompt_page::epoch(when), fix: *fix });
-                at = newer.clone();
+                iterations.push(protocol::Iteration { file: newer.file.clone(), published: crate::prompt_page::epoch(&newer.at), fix: newer.fix });
+                at = newer.file.clone();
             }
             let mut asset = Asset { first, iterations, ..Asset::default() };
             // In use: one of its files is an artifact's file as published now.
