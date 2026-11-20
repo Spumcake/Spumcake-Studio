@@ -759,8 +759,9 @@ mod tests {
         assert_eq!(listing.library.len(), assets.len(), "Library shows each asset once");
         // Library draws every file the grouping covers, each asset once at
         // its latest iteration with its count of iterations: by the plan's
-        // rule of 2026-11-20, the 615 files the port's inventory counts in
-        // Last order, research in `sources/` included.
+        // rule of 2026-11-20, the 617 files the port's inventory counts in
+        // Last order, research in `sources/` and what its filed build
+        // scripts name included.
         let mut drawn: Vec<&str> = listing.library.iter().map(|tile| tile.file.as_str()).collect();
         let mut latest: Vec<&str> = assets.iter().map(|asset| asset.canonical()).collect();
         drawn.sort();
@@ -768,7 +769,7 @@ mod tests {
         assert_eq!(drawn, latest, "Library's tiles are not the assets at their latest iterations");
         let covered: usize = listing.library.iter().map(|tile| tile.iterations).sum();
         assert_eq!(covered, assets.iter().map(|asset| asset.files().count()).sum::<usize>());
-        assert_eq!(covered, 615, "Library covers {covered} files, where the port's inventory counts 615");
+        assert_eq!(covered, 617, "Library covers {covered} files, where the port's inventory counts 617");
         assert!(listing.library.iter().any(|tile| tile.file.starts_with("sources/")), "no research source is in Library");
         assert!(listing.library.iter().any(|tile| tile.cell.is_some()), "an asset in a recipe names its cell");
         // The animatic, canon in prompts/resources/, is one of Library's
