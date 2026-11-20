@@ -78,6 +78,26 @@ impl HostWindow {
             return true;
         };
         let Some(scripts) = env.scripts.clone() else { return false };
+        // A step's cell: a take of its step as it stands, or, after an edit,
+        // of a new alternative step made from the edit, through the plan
+        // card as any rerun of a step.
+        if let Some(step) = cell.step.clone() {
+            let pipeline = crate::prompt_page::living_pipeline(&folder).unwrap_or_default();
+            let target = match self.prompt_page.step_to_run(&folder, &scripts, &env.vars, &step, id) {
+                Ok(target) => target,
+                Err(reason) => {
+                    self.board.failed.insert(id.to_string(), reason);
+                    return true;
+                }
+            };
+            self.board.failed.remove(id);
+            let input = serde_json::json!({ "pipeline": pipeline, "chain": target.chain, "step": target.step });
+            if let Begun::Answered(result) = self.runner.begin(&folder, env, &cell_call(id), "", crate::runner::RERUN_STEP, &input) {
+                let reason = result.output.get("error").and_then(serde_json::Value::as_str).unwrap_or("It could not run.").to_string();
+                self.board.failed.insert(id.to_string(), reason);
+            }
+            return true;
+        }
         // The card's unsaved prompt is the one sent.
         let mut cell = cell;
         if cell.step.is_none()
@@ -132,12 +152,13 @@ impl HostWindow {
     /// a draft, which the workspace keeps.
     pub(super) fn edit_prompt_step(&mut self, id: &str, input: &[CellPart], settings: Option<&serde_json::Value>) -> bool {
         let Some((app, tab)) = self.cell_home(id) else { return false };
-        let Some(step) = self.panel_cell(app, &tab, id).and_then(|cell| cell.step) else { return false };
-        let Some((folder, env)) = self.project_scripts() else { return false };
-        let Some(scripts) = env.scripts.clone() else { return false };
-        if let Err(reason) = self.prompt_page.save_step(&folder, &scripts, &env.vars, &step, input, settings) {
-            self.tell(format!("The step could not be saved: {reason}"));
+        if self.panel_cell(app, &tab, id).and_then(|cell| cell.step).is_none() {
+            return false;
         }
+        // Held as the cell's edit: Generate makes a new asset from it, and
+        // the step it shows stays as it is, as the data model guide has it.
+        let settings = settings.cloned().or_else(|| self.prompt_page.step_drafts.get(id).and_then(|(_, settings)| settings.clone()));
+        self.prompt_page.step_drafts.insert(id.to_string(), (input.to_vec(), settings));
         true
     }
 

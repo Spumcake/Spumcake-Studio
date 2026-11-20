@@ -796,6 +796,10 @@ pub(crate) struct PromptPage {
     /// For each cell, `requests/`'s time and canon's when its rounds were
     /// last sent: a publish re-marks which takes are canon.
     sent: HashMap<String, (SystemTime, Option<SystemTime>)>,
+    /// Each step's cell's edit not yet run, by the cell's id: its prompt and
+    /// references, and its settings. Generate makes a new asset from it, as
+    /// the data model guide has it, and never changes the step it shows.
+    pub step_drafts: HashMap<String, (Vec<CellPart>, Option<Value>)>,
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -844,6 +848,16 @@ impl PromptPage {
             Some(step) => self.step(folder, scripts, setup, step).map(|read| step_cell(declared, &read, &self.canon)),
             None => None,
         };
+        // A step's cell shows its edit not yet run over the step.
+        let shown = shown.map(|mut cell| {
+            if let Some((input, settings)) = self.step_drafts.get(&declared.id) {
+                cell.input = input.clone();
+                if settings.is_some() {
+                    cell.settings = settings.clone();
+                }
+            }
+            cell
+        });
         self.refresh(folder, scripts, setup);
         let cell = shown.clone().unwrap_or_else(|| declared.clone());
         // The cost is worked out from the spec the run would send.
@@ -921,38 +935,19 @@ impl PromptPage {
         Some(found)
     }
 
-    /// Saves a person's edit to a step's cell into the step, with
-    /// `pipeline.py step`'s partial update: its template, references, and
-    /// settings. A reference whose file is a published artifact's is kept
-    /// by its artifact, as steps name canon.
-    pub(crate) fn save_step(&mut self, folder: &Path, scripts: &Path, setup: &[(String, String)], step: &StepRef, input: &[CellPart], settings: Option<&Value>) -> Result<(), String> {
-        let pipeline = living_pipeline(folder).ok_or("This project has no pipeline yet.")?;
+    /// The step a step's cell's Generate makes a take of: the cell's own
+    /// step as it stands, or, when the cell holds an edit that differs from
+    /// it, a new alternative step made from the edit, as Generate again is.
+    /// The edit is spent either way.
+    pub(crate) fn step_to_run(&mut self, folder: &Path, scripts: &Path, setup: &[(String, String)], step: &StepRef, cell: &str) -> Result<StepRef, String> {
+        let Some((input, settings)) = self.step_drafts.remove(cell) else { return Ok(step.clone()) };
         let canon = self.canon(folder, scripts, setup);
         let read = self.step(folder, scripts, setup, step).ok_or("The step could not be read.")?;
-        let (template, refs, endpoint) = step_edits(&read, &canon, input, settings);
+        let (template, refs, endpoint) = step_edits(&read, &canon, &input, settings.as_ref());
         if template.is_none() && refs.is_none() && endpoint.is_none() {
-            return Ok(());
+            return Ok(step.clone());
         }
-        // pipeline.py reads a template that starts with "@" as a file's name,
-        // so such a prompt is given as a file holding it.
-        let template = match template {
-            Some(template) if template.starts_with('@') => Some(format!("@{}", write_template(folder, &template)?)),
-            template => template,
-        };
-        // Only what changed is sent: pipeline.py step keeps every other field.
-        let mut args: Vec<&str> = vec!["step", pipeline.as_str(), step.chain.as_str(), step.step.as_str()];
-        if let Some(template) = &template {
-            args.extend(["--template", template.as_str()]);
-        }
-        if let Some(refs) = &refs {
-            args.extend(["--refs", refs.as_str()]);
-        }
-        if let Some(endpoint) = &endpoint {
-            args.extend(["--endpoint", endpoint.as_str()]);
-        }
-        script(scripts, folder, setup, "pipeline.py", &args)?;
-        self.forget();
-        Ok(())
+        self.generate_again(folder, scripts, setup, step, &input, settings.as_ref())
     }
 
     /// Generate again on a step's cell: a new step at the cell's place,
@@ -1200,6 +1195,51 @@ mod tests {
         assert_eq!(bell.iterations, [edit]);
         assert!(bell.canon && bell.outlined && bell.artifact.as_deref() == Some("Last order: keyframe, the bell"));
         assert!(!alternative.canon && !alternative.outlined && alternative.artifact.is_none(), "a take not in use was shown in use: {alternative:?}");
+    }
+
+    /// Catches Generate on a step's cell changing its step, rather than
+    /// making a take of it as it stands, or, after an edit, a new asset in
+    /// a new alternative step; and an edit that changes nothing taken for
+    /// one that does.
+    #[test]
+    fn generate_makes_a_take_of_the_step_or_a_new_asset_from_the_edit() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("generate-again-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let skills = |args: &[&str]| {
+            let out = Command::new("python3").arg(scripts.join("pipeline.py")).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        skills(&["new", "001"]);
+        skills(&["element", "001", "the diner", "--kind", "place"]);
+        skills(&["chain", "001", "the diner", "--order", "01"]);
+        skills(&["step", "001", "the diner", "keyframe, wiping", "--order", "2", "--skill", "generate-keyframe", "--endpoint", r#"{"kind": "fal", "model": "stand-in"}"#, "--template", "The diner.", "--artifact", "the diner: keyframe, wiping"]);
+        let step = StepRef { chain: String::from("the diner"), step: String::from("keyframe, wiping") };
+        let mut page = PromptPage::default();
+        // No edit: the step as it stands.
+        assert_eq!(page.step_to_run(&folder, &scripts, &[], &step, "c1").unwrap(), step);
+        // An edit that changes nothing: still the step, and no new one.
+        let declared: Cell = serde_json::from_value(json!({ "id": "c1", "kind": "image", "input": [], "state": "idle", "step": { "chain": "the diner", "step": "keyframe, wiping" } })).unwrap();
+        let read = page.step(&folder, &scripts, &[], &step).unwrap();
+        let canon = page.canon(&folder, &scripts, &[]);
+        let as_it_stands = step_cell(&declared, &read, &canon);
+        page.step_drafts.insert(String::from("c1"), (as_it_stands.input.clone(), None));
+        assert_eq!(page.step_to_run(&folder, &scripts, &[], &step, "c1").unwrap(), step);
+        // An edit: a new asset, in the next alternative step, from the edit.
+        page.step_drafts.insert(String::from("c1"), (vec![CellPart::Text { text: String::from("The diner at night.") }], None));
+        let made = page.step_to_run(&folder, &scripts, &[], &step, "c1").unwrap();
+        assert_eq!(made.step, "keyframe, wiping (2)");
+        let template = skills(&["sql", "001", "SELECT template FROM step WHERE name='keyframe, wiping (2)'", "--read-only"]);
+        assert_eq!(template.trim(), "The diner at night.");
+        let first = skills(&["sql", "001", "SELECT template FROM step WHERE name='keyframe, wiping'", "--read-only"]);
+        assert_eq!(first.trim(), "The diner.", "Generate after an edit changed the step it showed");
+        assert!(page.step_drafts.is_empty(), "the edit was not spent");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// Catches Generate again naming a third alternative "<step> (2) (2)",
