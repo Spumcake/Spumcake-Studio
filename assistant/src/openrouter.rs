@@ -144,7 +144,7 @@ fn send(
     }
     request
         .header("HTTP-Referer", "https://github.com/Spumcake/Spumcake-Studio")
-        .header("X-Title", "Spumcake Studio")
+        .header("X-Title", "Spumcake for Desktop")
         .header("Content-Type", "application/json")
         .send(body.to_string())
 }
@@ -443,7 +443,7 @@ pub fn make_image(base_url: &str, key: &str, model: &str, prompt: &str) -> Resul
     }
     let response = request
         .header("HTTP-Referer", "https://github.com/Spumcake/Spumcake-Studio")
-        .header("X-Title", "Spumcake Studio")
+        .header("X-Title", "Spumcake for Desktop")
         .header("Content-Type", "application/json")
         .send(body.to_string());
     let reply = read(response)?;
