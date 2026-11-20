@@ -357,21 +357,21 @@ pub struct Session {
     looping: bool,
     /// Image keys' images as the stage shows them, by path and size.
     key_images: HashMap<(String, u32, u32), Option<protocol::Thumbnail>>,
-    /// Holds asked to be published, by their artifact: the storyboard, the
-    /// clip, and the hold's first frame in it.
-    publishing: HashMap<String, (DrawingId, u64, u32, String, PathBuf)>,
-    /// Publishes asked for and not yet sent to the host: the artifact, the
-    /// file, and where it came from.
-    to_publish: Vec<(String, String, Vec<String>)>,
+    /// Drawn holds being filed as plain files before a save, by the
+    /// filing's id: the storyboard, the clip, the hold's first frame in it,
+    /// its stamp, and the copy written in `work/`.
+    hold_filing: HashMap<String, (DrawingId, u64, u32, String, PathBuf)>,
+    /// The save waiting for its drawn holds to be filed: the storyboard,
+    /// and the export to run after it, when Export asked for the save.
+    after_filing: Option<(DrawingId, Option<Vec<(String, String)>>)>,
     /// Messages for the host: canon reads, files to file, and step edits.
     outgoing: Vec<protocol::AppMessage>,
     /// Canon reads waiting for their answer, and what each was for.
     canon_asked: HashMap<String, project::Asked>,
     /// The project's animatic steps as last read, by "chain: name".
     steps: HashMap<String, project::AnimaticStep>,
-    /// Published files and their artifacts, as last read or published.
+    /// Published files and their artifacts, as last read.
     canon_files: HashMap<String, String>,
-    published_files: HashMap<String, String>,
     /// A Save timing to the project under way.
     saving: Option<project::Saving>,
     /// A storyboard opened from the animatic, and the assembly the step
@@ -388,8 +388,10 @@ pub struct Session {
     /// save knows what is there: the host answers reads in any order.
     film_read: bool,
     steps_read: bool,
-    /// Export animatic video, running the project's animatic step.
+    /// Export animatic video, running the project's animatic step's script.
     stepping: Option<project::Stepping>,
+    /// How the last export ended: the filed video, or why there is none.
+    export_outcome: Option<Result<String, String>>,
     /// Sounds from outside the project being filed into it, by the
     /// filing's id.
     filing: HashMap<String, sound::Filing>,
@@ -451,13 +453,12 @@ impl Session {
             playback: None,
             looping: false,
             key_images: HashMap::new(),
-            publishing: HashMap::new(),
-            to_publish: Vec::new(),
+            hold_filing: HashMap::new(),
+            after_filing: None,
             outgoing: Vec::new(),
             canon_asked: HashMap::new(),
             steps: HashMap::new(),
             canon_files: HashMap::new(),
-            published_files: HashMap::new(),
             saving: None,
             retimed: None,
             last_saved: None,
@@ -466,6 +467,7 @@ impl Session {
             film_read: false,
             steps_read: false,
             stepping: None,
+            export_outcome: None,
             filing: HashMap::new(),
             last_check: None,
         };

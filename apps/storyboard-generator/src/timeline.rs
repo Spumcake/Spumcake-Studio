@@ -356,13 +356,6 @@ fn sound_row(session: &Session, track: &SoundTrack, picked: &[u64]) -> protocol:
                 end_mark: None,
                 tip,
                 menu: vec![
-                    // Offered as canon, so the animatic can name it: a sound in
-                    // the project, never one placed with no project.
-                    entry(
-                        "Publish sound",
-                        action_with("publish_sound", json!(clip.id)),
-                        session.project().is_some() && !std::path::Path::new(&clip.file).is_absolute() && !session.is_canon(&clip.file),
-                    ),
                     entry("Delete", action_with("delete_sound", json!(clip.id)), !track.locked),
                 ],
                 open: None,
@@ -415,7 +408,6 @@ fn frame_menu(session: &Session) -> Vec<MenuEntry> {
         entry("Insert keyframe\tF6", action("insert_keyframe"), true),
         entry("Insert blank keyframe\tF7", action("insert_blank_keyframe"), true),
         entry("Insert image key…", action("insert_image_key"), true),
-        entry("Publish hold", action("publish_hold"), session.project().is_some()),
         entry("Clear keyframe\t⇧F6", action("clear_keyframe"), true),
         entry("Remove frames\t⇧F5", action("remove_frames"), true),
         divider(),
@@ -1006,11 +998,6 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
         "timeline_page" => {}
         "import_sound" => session.ask_import_sound(),
         "insert_image_key" => session.ask_image_key(),
-        "publish_hold" if session.open_clip().is_some() => {
-            if let Err(reason) = session.publish_hold() {
-                session.failed_by_hand(Some("Hold not published"), &reason);
-            }
-        }
         "save_timing" => {
             if let Err(reason) = session.save_timing() {
                 session.timing_refused(&reason);
@@ -1045,13 +1032,6 @@ pub fn command(session: &mut Session, id: &str, arg: Option<&Value>) -> bool {
         "delete_sound" => {
             if let Some(sound) = id_of(arg) {
                 session.delete_sound(sound);
-            }
-        }
-        "publish_sound" => {
-            if let Some(sound) = id_of(arg)
-                && let Err(reason) = session.publish_sound(sound)
-            {
-                session.failed_by_hand(None, &reason);
             }
         }
         "track_flag" => {

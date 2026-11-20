@@ -68,6 +68,17 @@ fn cost_words(estimate: &str) -> String {
     if estimate.trim().is_empty() || estimate.starts_with("unknown") { String::from("Cost unknown") } else { estimate.to_string() }
 }
 
+/// A card's title and its button, as it shows them.
+#[cfg(test)]
+pub(crate) fn title_of(asking: &Asking) -> (String, String) {
+    let (lines, button) = lines(asking, &|model| model.to_string());
+    let title = lines.into_iter().find_map(|line| match line {
+        Line::Title(title) => Some(title),
+        _ => None,
+    });
+    (title.unwrap_or_default(), button)
+}
+
 fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, String) {
     match asking {
         Asking::Command { argv, why, .. } => {
