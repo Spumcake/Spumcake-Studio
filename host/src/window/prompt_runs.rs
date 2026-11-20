@@ -275,6 +275,34 @@ impl HostWindow {
         }
     }
 
+    /// The rounds of each draft a tab declares whose output names a file,
+    /// such as a take opened to play, when they changed: a take opened from
+    /// any path shows its round, with no card asked for first. False while
+    /// no project is open, so the tab is asked again once one is.
+    pub(super) fn send_draft_rounds(&mut self, app: usize, tab: &str) -> bool {
+        let Some(drafts) = self.apps.get(app).and_then(|started| started.running.declared.cells.get(tab)).map(|(cells, _)| {
+            cells.iter().filter(|cell| cell.step.is_none() && cell.output.iter().any(|part| matches!(part, protocol::CellPart::Path { .. }))).cloned().collect::<Vec<_>>()
+        }) else {
+            return true;
+        };
+        if drafts.is_empty() {
+            return true;
+        }
+        if self.project.is_none() {
+            return false;
+        }
+        let Some((folder, env)) = self.project_scripts() else { return true };
+        let Some(scripts) = env.scripts.clone() else { return true };
+        for cell in drafts {
+            if let Some(rounds) = self.prompt_page.rounds_due(&folder, &scripts, &env.vars, &cell, false).filter(|rounds| !rounds.is_empty()) {
+                let at = self.cell_item(app, tab, &cell.id);
+                let rounds = self.named(rounds);
+                self.send(app, HostMessage::Takes { cell: at, rounds });
+            }
+        }
+        true
+    }
+
     /// Each round with its model's name, the one the card shows.
     fn named(&mut self, rounds: Vec<protocol::Round>) -> Vec<protocol::Round> {
         rounds

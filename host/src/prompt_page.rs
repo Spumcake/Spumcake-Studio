@@ -131,7 +131,12 @@ pub(crate) fn read_step(scripts: &Path, folder: &Path, setup: &[(String, String)
 pub(crate) fn step_cell(declared: &Cell, step: &Value, canon: &Canon) -> Cell {
     let mut cell = declared.clone();
     let template = step.get("template").and_then(Value::as_str).unwrap_or("").to_string();
-    let mut input = vec![CellPart::Text { text: template }];
+    // A template with front matter shows its prompt alone, as the approved
+    // views show a step. Its keys are words Skills sends in the prompt,
+    // never the request's settings, which are the endpoint's alone, so they
+    // are not shown as settings.
+    let prompt = Template::parse(&template).map_or(template.clone(), |framed| framed.prompt);
+    let mut input = vec![CellPart::Text { text: prompt }];
     let refs: Vec<Value> = step.get("refs").and_then(Value::as_str).and_then(|refs| serde_json::from_str(refs).ok()).unwrap_or_default();
     for reference in refs {
         let text = |key: &str| reference.get(key).and_then(Value::as_str).map(String::from);
@@ -147,6 +152,37 @@ pub(crate) fn step_cell(declared: &Cell, step: &Value, canon: &Canon) -> Cell {
         cell.settings = Some(settings.clone());
     }
     cell
+}
+
+/// A step's template with front matter, as Spumcake-Skills' templates for
+/// image models write it: `---`, a `key: value` on each line, `---`, then
+/// `## Prompt` and the prompt. Skills sends it whole as the prompt, so the
+/// front matter is written back exactly as it was around an edited prompt.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Template {
+    front: String,
+    head: String,
+    pub prompt: String,
+    tail: String,
+}
+
+impl Template {
+    /// The template's parts, or None when it has no front matter.
+    pub(crate) fn parse(template: &str) -> Option<Self> {
+        let body = template.strip_prefix("---\n")?;
+        let end = if body.starts_with("---\n") { 0 } else { body.find("\n---\n")? + 1 };
+        let front = body[..end].to_string();
+        let rest = &body[end + "---\n".len()..];
+        let heading = rest.strip_prefix("## Prompt\n").map_or(0, |_| "## Prompt\n".len());
+        let start = heading + rest[heading..].len() - rest[heading..].trim_start_matches('\n').len();
+        let prompt = rest[start..].trim_end();
+        Some(Self { front, head: rest[..start].to_string(), prompt: prompt.to_string(), tail: rest[start + prompt.len()..].to_string() })
+    }
+
+    /// The template around `prompt`, every other character as it was.
+    pub(crate) fn with(&self, prompt: &str) -> String {
+        format!("---\n{}---\n{}{}{}", self.front, self.head, prompt.trim_end(), self.tail)
+    }
 }
 
 /// A file's media type, from its extension.
@@ -700,7 +736,13 @@ pub(crate) fn resource_command(path: &str, from: &[String]) -> Vec<String> {
 /// with no file yet) kept in its place; and the endpoint with its settings.
 pub(crate) fn step_edits(read: &Value, canon: &Canon, input: &[CellPart], settings: Option<&Value>) -> (Option<String>, Option<String>, Option<String>) {
     let old_template = read.get("template").and_then(Value::as_str).unwrap_or("");
-    let template: String = input.iter().filter_map(|part| match part { CellPart::Text { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n");
+    let prompt: String = input.iter().filter_map(|part| match part { CellPart::Text { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n");
+    // A template with front matter takes the edited prompt between its
+    // own lines, unchanged.
+    let template = match Template::parse(old_template) {
+        Some(framed) => framed.with(&prompt),
+        None => prompt,
+    };
     let old: Vec<Value> = read.get("refs").and_then(Value::as_str).and_then(|refs| serde_json::from_str(refs).ok()).unwrap_or_default();
     let text = |reference: &Value, key: &str| reference.get(key).and_then(Value::as_str).map(String::from);
     let file_of = |reference: &Value| text(reference, "file").or_else(|| text(reference, "artifact").and_then(|artifact| canon.files.get(&artifact).cloned()));
@@ -794,8 +836,9 @@ pub(crate) struct PromptPage {
     reports: Reports,
     pub costs: Costs,
     /// For each cell, `requests/`'s time and canon's when its rounds were
-    /// last sent: a publish re-marks which takes are canon.
-    sent: HashMap<String, (SystemTime, Option<SystemTime>)>,
+    /// last sent, and the files it showed: a publish re-marks which takes
+    /// are canon, and a draft opened on another take has its rounds.
+    sent: HashMap<String, (SystemTime, Option<SystemTime>, Vec<String>)>,
     /// Each step's cell's edit not yet run, by the cell's id: its prompt and
     /// references, and its settings. Generate makes a new asset from it, as
     /// the data model guide has it, and never changes the step it shows.
@@ -916,15 +959,15 @@ impl PromptPage {
     /// sent, or when `again` asks for them anyway.
     pub(crate) fn rounds_due(&mut self, folder: &Path, scripts: &Path, setup: &[(String, String)], cell: &Cell, again: bool) -> Option<Vec<Round>> {
         let canon = self.canon(folder, scripts, setup);
-        let now = (modified(&folder.join("requests"))?, self.read_at);
-        if !again && self.sent.get(&cell.id) == Some(&now) {
-            return None;
-        }
-        self.sent.insert(cell.id.clone(), now);
         let outputs: Vec<String> = cell.output.iter().filter_map(|part| match part {
             CellPart::Path { path, .. } => Some(path.clone()),
             _ => None,
         }).collect();
+        let now = (modified(&folder.join("requests"))?, self.read_at, outputs.clone());
+        if !again && self.sent.get(&cell.id) == Some(&now) {
+            return None;
+        }
+        self.sent.insert(cell.id.clone(), now);
         let mut found = rounds(folder, &cell.id, cell.step.as_ref(), &outputs, &canon, &mut self.reports);
         // Each take as its asset stands: its iterations, whether it is in
         // use, and whether Skills finds it out of date.
@@ -1285,6 +1328,38 @@ mod tests {
         assert_eq!(ids, ["first", "second", "trial"], "the cell's two steps and its chain's trial, and not another place's step");
         assert_eq!(found[1].artifact.as_deref(), Some("Last order: final shot (2)"), "a round lost its own step's artifact");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a step's cell showing Skills' front matter as its prompt or
+    /// as its settings, which are the endpoint's alone, and an edited prompt
+    /// saved without the front matter exactly as it was.
+    /// It only reads Last order: set `LAST_ORDER` and
+    /// `SPUMCAKE_SKILLS_SCRIPTS`.
+    #[test]
+    fn a_steps_front_matter_stays_out_of_its_cell_and_around_its_prompt() {
+        let (Ok(folder), Ok(scripts)) = (std::env::var("LAST_ORDER"), std::env::var("SPUMCAKE_SKILLS_SCRIPTS")) else { return };
+        let (folder, scripts) = (PathBuf::from(folder), PathBuf::from(scripts));
+        let mut page = PromptPage::default();
+        let step = StepRef { chain: String::from("the diner"), step: String::from("primary canonical location") };
+        let read = page.step(&folder, &scripts, &[], &step).expect("Last order's step was not read");
+        let template = read["template"].as_str().unwrap().to_string();
+        assert!(template.starts_with("---\naspect_ratio: \"16:9\"\n"), "the step's template changed: {template}");
+        let mut declared = Cell::text("c1", "");
+        declared.step = Some(step.clone());
+        let cell = step_cell(&declared, &read, &page.canon);
+        let CellPart::Text { text: prompt } = &cell.input[0] else { panic!("no prompt") };
+        assert!(prompt.starts_with("The attached image is a generated concept image of a diner") && prompt.ends_with("no time of day."), "the cell's prompt is not the sentence alone: {prompt:?}");
+        assert_eq!(cell.settings, None, "the front matter was shown as the request's settings");
+        // Shown as it is, nothing changes.
+        assert_eq!(step_edits(&read, &page.canon, &cell.input, cell.settings.as_ref()), (None, None, None), "the step as shown reads as edited");
+        // An edited prompt goes back between the same front matter.
+        let mut edited = cell.input.clone();
+        edited[0] = CellPart::Text { text: String::from("The diner at night.") };
+        let (saved, _, endpoint) = step_edits(&read, &page.canon, &edited, cell.settings.as_ref());
+        assert_eq!(saved.as_deref(), Some(template.replace(prompt.as_str(), "The diner at night.").as_str()));
+        assert_eq!(endpoint, None, "the endpoint changed with the prompt");
+        // A template with no front matter is its prompt, as before.
+        assert_eq!(Template::parse("integrated_multimodal_description: [Shot 1] a line test."), None);
     }
 
     /// Catches a take of Last order opening with rounds it was not made in,

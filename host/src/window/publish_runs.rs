@@ -1675,8 +1675,9 @@ mod tests {
         // Ignore clears the first keyframe's outline, and not the second's.
         ignore_take(&place, &first).unwrap();
         let assets = assets_of(&place).unwrap();
-        assert!(!assets.iter().find(|asset| asset.first == first).unwrap().outlined, "Ignore left the outline");
-        assert!(assets.iter().find(|asset| asset.first == second).unwrap().outlined, "Ignore cleared another take's outline");
+        let of = |file: &str| assets.iter().find(|asset| asset.first == file).unwrap_or_else(|| panic!("{file} is no asset after Ignore: {assets:#?}"));
+        assert!(!of(&first).outlined, "Ignore left the outline");
+        assert!(of(&second).outlined, "Ignore cleared another take's outline");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
