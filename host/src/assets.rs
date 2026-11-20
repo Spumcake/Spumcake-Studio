@@ -122,8 +122,9 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             let step = text("chain").zip(text("step"));
             for output in files_named(record.get("outputs").unwrap_or(&Value::Null)) {
                 // A file an asset's own iteration is never an asset of its
-                // own, and a written document is no reference asset.
-                if !iterated.contains(output.as_str()) && is_reference(&output) {
+                // own, a written document is no reference asset, and a lost
+                // output, which the project no longer holds, shows nothing.
+                if !iterated.contains(output.as_str()) && is_reference(&output) && held(folder, &output) {
                     takes.push((text("started").unwrap_or_default(), output, step.clone()));
                 }
             }
@@ -142,7 +143,7 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             let step = text("chain").zip(text("step"));
             for file in event.get("files").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
                 ran.insert(file.to_string());
-                if !iterated.contains(file) && is_reference(file) {
+                if !iterated.contains(file) && is_reference(file) && held(folder, file) {
                     takes.push((text("at").unwrap_or_default(), file.to_string(), step.clone()));
                 }
             }
@@ -329,9 +330,13 @@ mod tests {
         std::fs::write(folder.join("pipeline/002/runs.jsonl"), log).unwrap();
         std::fs::write(folder.join("prompts/resources/records.jsonl"), records).unwrap();
         std::fs::write(folder.join("prompts/resources/stray.png"), b"stray").unwrap();
-        for held in ["prompts/resources/animatic-export-1.mp4", "prompts/resources/shot-mixed.mp4"] {
+        for held in ["prompts/resources/animatic-export-1.mp4", "prompts/resources/shot-mixed.mp4", "prompts/resources/previs-render.png", "library/bell.png", "library/bell-alt.png"] {
+            std::fs::create_dir_all(folder.join(held).parent().unwrap()).unwrap();
             std::fs::write(folder.join(held), b"held").unwrap();
         }
+        // A report's output the project no longer holds shows nothing.
+        let lost = json!({ "id": "lost", "started": "2026-11-19T07:00:00Z", "chain": "the animatic", "step": "keyframe, the bell", "outputs": ["library/lost.png"] });
+        std::fs::write(folder.join("requests/lost.html"), format!("<script type=\"application/json\" id=\"request\">{lost}</script>")).unwrap();
         let mut canon = Canon::default();
         for (step, artifact, order) in [("keyframe, the bell", "Last order: keyframe, the bell", 3), ("keyframe, the bell (2)", "Last order: keyframe, the bell (2)", 3), ("pre-vis, the bell", "Last order: pre-vis, the bell", 2)] {
             let key = (String::from("the animatic"), step.to_string());
