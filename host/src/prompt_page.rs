@@ -57,6 +57,9 @@ pub(crate) struct Canon {
     pub cues: Vec<protocol::Cue>,
     /// Each frame's start in the film, its canon fact `<frame>: in`.
     pub frame_starts: HashMap<String, f64>,
+    /// The cues each sound's step names in its template's placeholders,
+    /// `{{<cue>: start}}`, by the file of the artifact the step makes.
+    pub sound_cues: HashMap<String, Vec<String>>,
 }
 
 /// The living pipeline: the highest-numbered folder in `pipeline/`, as the
@@ -125,7 +128,36 @@ pub(crate) fn read_canon(scripts: &Path, folder: &Path, setup: &[(String, String
     }
     let facts = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(element, name, value) FROM fact WHERE name IN ('start', 'end', 'in')", "--read-only"]).unwrap_or_default();
     (canon.cues, canon.frame_starts) = timing_facts(&facts);
+    let templates = script(scripts, folder, setup, "pipeline.py", &["sql", pipeline, "SELECT json_array(artifact, template) FROM step WHERE artifact IS NOT NULL AND artifact != ''", "--read-only"]).unwrap_or_default();
+    for row in templates.lines() {
+        if let Ok(Value::Array(cells)) = serde_json::from_str::<Value>(row)
+            && let [Value::String(artifact), Value::String(template)] = cells.as_slice()
+            && let Some(file) = canon.files.get(artifact)
+        {
+            let named = named_cues(template);
+            if !named.is_empty() {
+                canon.sound_cues.insert(file.clone(), named);
+            }
+        }
+    }
     Ok(canon)
+}
+
+/// The cue elements a template names as `{{<cue>: start}}`, each once, in
+/// order: only its placeholders are read, never the prose around them.
+pub(crate) fn named_cues(template: &str) -> Vec<String> {
+    let mut named: Vec<String> = Vec::new();
+    for (open, _) in template.match_indices("{{") {
+        let Some(close) = template[open + 2..].find("}}") else {
+            continue;
+        };
+        if let Some(element) = template[open + 2..open + 2 + close].trim().strip_suffix(": start").map(str::trim)
+            && !named.iter().any(|known| known == element)
+        {
+            named.push(element.to_string());
+        }
+    }
+    named
 }
 
 /// The timing reference's canon facts, one JSON row each, `[element, name,
@@ -845,6 +877,8 @@ pub(crate) struct CardView {
     /// an error in its template.
     pub cues: Vec<protocol::Cue>,
     pub cue_note: Option<&'static str>,
+    /// The cues each sound's step names, by the sound's file.
+    pub sound_cues: HashMap<String, Vec<String>>,
 }
 
 /// The Prompt page's runner state for the open project: canon and steps as
@@ -951,7 +985,7 @@ impl PromptPage {
             Some(cost_line(&plan, &service))
         });
         let (cues, cue_note) = shot_cues(&cell.prompt(), &self.canon.cues, &self.canon.frame_starts);
-        CardView { cell: shown, cost, cues, cue_note }
+        CardView { cell: shown, cost, cues, cue_note, sound_cues: self.canon.sound_cues.clone() }
     }
 
     /// The spec a cell runs as now, its step read afresh.

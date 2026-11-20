@@ -104,9 +104,10 @@ pub struct Tab {
     /// The take's sound and the sound layers as a held slider found them,
     /// until it is let go and the drag becomes one step.
     mix_before: Option<(crate::gallery::TakeSound, Vec<crate::gallery::SoundLayer>)>,
-    /// Opened to play a video file, such as a film delivered to `output/`:
-    /// no Prompt page cell is made for it, since it has no prompt or seed,
-    /// and its Prompt page is off while it has no cell.
+    /// Opened to play a video file. Its draft still says the file, so the
+    /// host finds the file's round when it is a take; until its cell has
+    /// one, its Prompt page is off, as a film delivered to `output/` has no
+    /// prompt or seed.
     pub plays: bool,
 }
 
@@ -119,6 +120,12 @@ struct Drawn {
 }
 
 impl Tab {
+    /// Whether its Prompt page is on: always, except for a video opened to
+    /// play whose cell has made no round, as a delivered film has none.
+    pub fn prompts(&self) -> bool {
+        !self.plays || self.gallery.current_cell().is_some_and(|cell| self.rounds.has_rounds(&cell.id))
+    }
+
     pub fn look(&self) -> Look {
         Look { frame: self.frame, zoom: self.zoom, focus: self.focus }
     }
@@ -1084,8 +1091,8 @@ impl Session {
                 self.page = match number("value").or_else(|| number("page")).map(|page| page as i64) {
                     Some(0) => Page::Layers,
                     Some(1) => Page::Properties,
-                    // Not for a video opened to play, which has no prompt.
-                    Some(3) if self.active_tab().is_none_or(|tab| !tab.plays || tab.gallery.current_cell().is_some()) => Page::Prompt,
+                    // Not for a video opened to play that is no take.
+                    Some(3) if self.active_tab().is_none_or(Tab::prompts) => Page::Prompt,
                     _ => self.page,
                 };
             }

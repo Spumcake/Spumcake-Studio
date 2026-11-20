@@ -2666,6 +2666,7 @@ impl HostWindow {
                         previews: Some(&self.previews.shown),
                         cues: &view.cues,
                         cue_note: view.cue_note,
+                        sound_cues: Some(&view.sound_cues),
                         ..Default::default()
                     };
                     panel::show_with(&mut column, properties.as_ref(), &card, panel_rect)

@@ -379,8 +379,8 @@ pub fn properties(session: &Session) -> Option<Properties> {
             page("Layers", 0, Some(Page::Layers)),
             page("Properties", 1, Some(Page::Properties)),
             page("Adjustments", 2, None),
-            // Off for a video opened to play, which has no prompt.
-            page("Prompt", 3, (!tab.plays || tab.gallery.current_cell().is_some()).then_some(Page::Prompt)),
+            // Off for a video opened to play that is no take.
+            page("Prompt", 3, tab.prompts().then_some(Page::Prompt)),
         ],
         cell: (shown == Page::Prompt).then(|| tab.gallery.current_cell().map(|cell| prompt_cell(cell, session.has_animatic()))).flatten(),
     })
@@ -394,14 +394,15 @@ pub fn properties(session: &Session) -> Option<Properties> {
 pub fn prompt_cell(cell: &protocol::Cell, animatic: bool) -> PanelCell {
     let seed = CellSetting { key: "seed".into(), label: "Seed".into(), kind: RowKind::Field { min: 0.0, max: 2_147_483_647.0, places: 0 } };
     // A step's settings are its model's own, which the host fills from the
-    // step: fal's video models name the length `duration` and the size
-    // `resolution`, as Last order's final shot sends them, and as
-    // vg-sound-cue shows them, Length, Resolution, and Seed. A draft's are
-    // this workspace's own.
+    // step and shows only where the step holds them: fal's video models name
+    // the length `duration` and the size `resolution`, as Last order's final
+    // shot sends them and vg-sound-cue shows them, and a retime the frame
+    // rate `target_fps`. A draft's are this workspace's own.
     let settings = if cell.step.is_some() {
         vec![
             CellSetting { key: "duration".into(), label: "Length".into(), kind: RowKind::Field { min: 1.0, max: 20.0, places: 0 } },
             CellSetting { key: "resolution".into(), label: "Resolution".into(), kind: RowKind::Text },
+            CellSetting { key: "target_fps".into(), label: "Frame rate".into(), kind: RowKind::Field { min: 1.0, max: 240.0, places: 0 } },
             seed,
         ]
     } else {
@@ -473,7 +474,7 @@ mod tests {
         step.step = Some(protocol::StepRef { chain: "the final shot".into(), step: "final shot".into() });
         let rows = |cell: &protocol::Cell| prompt_cell(cell, false).settings.into_iter().map(|row| (row.key, row.label)).collect::<Vec<_>>();
         let pair = |key: &str, label: &str| (key.to_string(), label.to_string());
-        assert_eq!(rows(&step), [pair("duration", "Length"), pair("resolution", "Resolution"), pair("seed", "Seed")]);
+        assert_eq!(rows(&step), [pair("duration", "Length"), pair("resolution", "Resolution"), pair("target_fps", "Frame rate"), pair("seed", "Seed")]);
         assert_eq!(rows(&protocol::Cell::text("c2", "")), [pair("size", "Size"), pair("length", "Length"), pair("seed", "Seed")]);
     }
 }

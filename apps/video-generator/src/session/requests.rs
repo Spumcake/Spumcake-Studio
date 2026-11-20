@@ -20,16 +20,13 @@ impl Session {
     }
 
     /// The cells of every tab whose cells the host has not been told, each
-    /// tab with a cell for its Prompt page, an empty draft when it had none,
-    /// except a tab opened to play a video file, which has none.
+    /// tab with a cell for its Prompt page, an empty draft when it had none.
     pub(super) fn cells_due(&mut self) -> Vec<AppMessage> {
         let mut out = Vec::new();
         for index in 0..self.tabs.len() {
             let size = self.draft_size(index);
             let tab = &mut self.tabs[index];
-            if !tab.plays {
-                tab.gallery.ensure_cell(size);
-            }
+            tab.gallery.ensure_cell(size);
             let mut cells = tab.gallery.cells.clone();
             // A draft that has never run says the file of the gallery's take
             // shown as its output, so the host finds that take's round; a

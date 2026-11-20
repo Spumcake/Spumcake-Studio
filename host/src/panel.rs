@@ -13,7 +13,7 @@ use eframe::egui::{
     Stroke, StrokeKind, UiBuilder, pos2, vec2,
 };
 use protocol::{
-    Action, Cell, CellPart, CellState, ChoicePreview, PanelCell, PresetSample, PropValue, Properties, ReferenceRole, Row,
+    Action, Cell, CellPart, CellSetting, CellState, ChoicePreview, PanelCell, PresetSample, PropValue, Properties, ReferenceRole, Row,
     RowKind,
 };
 use serde_json::{Value, json};
@@ -1426,6 +1426,9 @@ pub(crate) struct CardState<'a> {
     /// film's times, when they are for an error in the step's template.
     pub cues: &'a [protocol::Cue],
     pub cue_note: Option<&'a str>,
+    /// The cues each sound's step names, by the sound's file: a sound marks
+    /// only those, or every cue when its step names none.
+    pub sound_cues: Option<&'a HashMap<String, Vec<String>>>,
 }
 
 /// A reference's small image, with words for its corner, such as a
@@ -1645,7 +1648,7 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
         .input
         .iter()
         .filter(|part| is_reference(part) && part_media_type(part).starts_with("audio/"))
-        .flat_map(|part| sound_cues(part, state.previews.and_then(|previews| previews.get(&reference_key(part))), state.cues))
+        .flat_map(|part| sound_cues(part, state.previews.and_then(|previews| previews.get(&reference_key(part))), &own_cues(part, state)))
         .collect();
     if let Some(text) = prompt_field(ui, id, cell, &declared.hint, width, &cues) {
         events.push(CardEvent::Edit { cell: id.to_string(), input: with_prompt(&cell.input, &text), settings: cell.settings.clone() });
@@ -1656,8 +1659,15 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
 
     references(ui, declared, cell, state, width, sent, events);
 
-    // The settings, drawn as the panel's rows.
-    if !declared.settings.is_empty() {
+    // The settings, drawn as the panel's rows: a draft's every declared
+    // row; a step's only those whose keys its step's settings hold, as the
+    // step's model names them.
+    let shown: Vec<&CellSetting> = declared
+        .settings
+        .iter()
+        .filter(|setting| cell.step.is_none() || cell.settings.as_ref().is_some_and(|settings| settings.get(&setting.key).is_some()))
+        .collect();
+    if !shown.is_empty() {
         ui.add_space(S.of(8.0));
         hairline(ui, width);
         ui.add_space(S.of(8.0));
@@ -1666,7 +1676,7 @@ fn prompt_card(ui: &mut egui::Ui, declared: &PanelCell, state: &CardState, sent:
         ui.add_space(S.of(4.0));
         let none = Action::new("");
         let mut edits = Vec::new();
-        for (index, setting) in declared.settings.iter().enumerate() {
+        for (index, setting) in shown.iter().enumerate() {
             if index > 0 {
                 ui.add_space(ROW_GAP);
             }
@@ -1858,6 +1868,15 @@ pub(crate) fn beats(text: &str) -> Vec<(std::ops::Range<usize>, f64, f64)> {
     spans
 }
 
+/// The project's cue facts a sound reference marks: those its step names
+/// in its template, or every one when its step names none.
+fn own_cues(part: &CellPart, state: &CardState) -> Vec<protocol::Cue> {
+    match state.sound_cues.and_then(|named| named.get(&reference_key(part))) {
+        Some(named) => state.cues.iter().filter(|cue| named.contains(&cue.label)).cloned().collect(),
+        None => state.cues.to_vec(),
+    }
+}
+
 /// A sound reference's cues. The project's canon cue facts come first, as
 /// Spumcake-Skills holds a cue's time as canon. Without any, the file's own
 /// cue points, and then, for a project from before the facts such as Last
@@ -2018,7 +2037,7 @@ fn references(
                     && let Some(preview) = preview
                     && let Some(length) = preview.length.filter(|length| *length > 0.0)
                 {
-                    sound_strip(ui, width, preview, &sound_cues(parts[reference], Some(preview), state.cues), length);
+                    sound_strip(ui, width, preview, &sound_cues(parts[reference], Some(preview), &own_cues(parts[reference], state)), length);
                     // Why its cues are at the film's times, in gray under it.
                     if let Some(note) = state.cue_note.filter(|_| !state.cues.is_empty()) {
                         let galley = ui.painter().layout(note.to_string(), card_small(), MUTED, width);
@@ -2674,6 +2693,14 @@ mod tests {
         let eight = ReferencePreview { length: Some(8.0), ..own.clone() };
         assert_eq!(sound_cues(&sound, Some(&eight), &shot), shot);
         assert!(sound_cues(&sound, Some(&eight), &film).iter().all(|cue| cue.at <= 8.0), "a cue past the sound's end was marked");
+        // A sound marks only the cues its step names, or every one when it
+        // names none.
+        assert_eq!(crate::prompt_page::named_cues("Water, then {{the bell: start}}, {{shot 1: in}}, {{the bell: start}}."), ["the bell"]);
+        let named = HashMap::from([(String::from("prompts/resources/door.wav"), vec![String::from("the bell")])]);
+        let state = CardState { cues: &film, sound_cues: Some(&named), ..Default::default() };
+        assert_eq!(own_cues(&sound, &state).iter().map(|cue| cue.label.as_str()).collect::<Vec<_>>(), ["the bell"]);
+        let other = CellPart::Path { path: "library/rain.wav".into(), media_type: "audio/wav".into(), role: None, field: None };
+        assert_eq!(own_cues(&other, &state).len(), film.len());
         let job = prompt_job(prompt, egui::FontId::proportional(14.0), 300.0, &cues);
         let lit: Vec<&str> = job.sections.iter().filter(|section| section.format.background != Color32::TRANSPARENT).map(|section| &prompt[section.byte_range.start.0..section.byte_range.end.0]).collect();
         assert_eq!(lit, ["[3s–4.2s] The door bangs open behind him."]);

@@ -502,8 +502,8 @@ fn a_video_opens_as_new_work() {
 /// outside it is not; opened by its path in the project, as the project
 /// panel opens an animatic in `library/`, it is a tab of one take that
 /// plays, with its transport row, and nothing is written in `work/`;
-/// it has no Prompt page cell, as a delivered film has no prompt or seed,
-/// and its Prompt page is off; opened again, its tab is shown and no second
+/// with no round, its Prompt page is off, as a delivered film has no
+/// prompt or seed; opened again, its tab is shown and no second
 /// one made; and once its gallery changes, it is kept in `work/` as a new
 /// tab is.
 #[test]
@@ -536,7 +536,6 @@ fn a_video_in_the_project_opens_to_play() {
         said.push(message.clone());
         matches!(message, AppMessage::Pong).then_some(())
     });
-    assert!(!said.iter().any(|message| matches!(message, AppMessage::Cells { tab: own, cells, .. } if *own == tab && !cells.is_empty())), "a video opened to play was given a draft");
     let pages = said.iter().rev().find_map(|message| match message {
         AppMessage::Properties(properties) => Some(properties.pages.clone()),
         _ => None,
