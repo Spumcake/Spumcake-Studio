@@ -425,6 +425,7 @@ impl Server {
                 id,
                 thumbnail: None,
                 badge: String::new(),
+                length: None,
                 cues: Vec::new(),
                 error: Some("This workspace makes no previews.".into()),
             }),

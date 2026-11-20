@@ -1473,6 +1473,126 @@ fn use_this_take_asks_the_host_to_use_it() {
     let _ = std::fs::remove_dir_all(folder);
 }
 
+/// Catches a take drawn as a file rather than as its asset: a take with
+/// iterations shows its latest, as a stack with its count, its badge
+/// opening the iterations as a run "Take 1 · 2 iterations", numbered, the
+/// latest sealed while in use, the take out of its round meanwhile, and the
+/// latest's badge closing it again; an out-of-date take
+/// is outlined, and its menu adds Ignore, which sends `ignore_take`, and
+/// the assistant's fix, which puts it in the composer with the cell; a
+/// take nothing records is captioned Unverified, with no outline.
+#[test]
+fn a_take_shows_its_asset_its_stack_and_its_outline() {
+    let folder = with_takes("asset");
+    std::fs::copy(folder.join("library/r2-1.png"), folder.join("library/r1-1-edit.png")).unwrap();
+    let mut program = Program::start(false);
+    program.send(in_project(&folder));
+    let cell = cell_of(&program);
+    let iteration = protocol::Iteration { file: "library/r1-1-edit.png".into(), published: Some(1_793_146_100), fix: false };
+    let stacked = protocol::TakeFile { iterations: vec![iteration], outlined: true, ..take("library/r1-1.png", true) };
+    let unverified = protocol::TakeFile { unverified: true, ..take("library/r1-2.png", false) };
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![stacked, unverified])]);
+    let (_, film) = strip(&program, |film| !film.groups.is_empty());
+    let (first, second) = (&film.items[0], &film.items[1]);
+    let labels = |item: &protocol::FilmItem| item.menu.iter().map(|row| row.label.clone()).collect::<Vec<_>>();
+    assert_eq!(first.stack.as_ref().map(|stack| stack.count), Some(2), "a take with an iteration is no stack");
+    assert!(first.outlined && first.mark.is_some() && first.caption.is_empty(), "{first:?}");
+    assert!(labels(first).contains(&"Ignore".to_string()) && labels(first).contains(&"Ask the assistant to fix the dependency chain".to_string()), "{:?}", labels(first));
+    assert!(second.stack.is_none() && !second.outlined && second.caption == "Unverified", "{second:?}");
+    assert!(!labels(second).contains(&"Ignore".to_string()), "{:?}", labels(second));
+    // The tile's rows name the file it shows, the asset's latest.
+    let latest = first.menu.iter().find(|row| row.label == "Ignore").and_then(|row| row.action.clone()).unwrap();
+    assert_eq!(latest.arg.as_ref().and_then(|arg| arg.get("take")).and_then(|take| take.as_str()), Some("library/r1-1-edit.png"));
+    let item = protocol::ItemRef { path: "work/Untitled Image.ipx".into(), item: Some(cell.clone()) };
+
+    program.command("take_ignore", json!({ "take": "library/r1-1-edit.png" }));
+    let ignored = program.wait(|message| match message {
+        AppMessage::IgnoreTake { cell, path, .. } => Some((cell.clone(), path.clone())),
+        _ => None,
+    });
+    assert_eq!(ignored, (item.clone(), "library/r1-1-edit.png".to_string()));
+    program.command("take_fix", json!({ "take": "library/r1-1-edit.png" }));
+    let asked = program.wait(|message| match message {
+        AppMessage::AskAssistant { text, items } => Some((text.clone(), items.clone())),
+        _ => None,
+    });
+    assert_eq!(asked, ("Fix the dependency chain.".to_string(), vec![item]));
+
+    // The badge opens the stack after its round, and closes it.
+    let open = first.stack.as_ref().unwrap().open.clone();
+    program.command(&open.id, open.arg.clone().unwrap());
+    let (_, film) = strip(&program, |film| film.groups.iter().any(|group| group.label == "Take 1 · 2 iterations"));
+    let at = runs(&film).iter().take_while(|(label, _)| label != "Take 1 · 2 iterations").map(|(_, count)| count).sum::<usize>();
+    let run: Vec<(&str, bool)> = film.items[at..at + 2].iter().map(|item| (item.caption.as_str(), item.mark.is_some())).collect();
+    assert_eq!(run, [("1", false), ("2", true)], "the opened stack is not numbered with its latest sealed");
+    // The take is out of its round meanwhile, as ig-iteration-stack-open
+    // shows, and the stack's latest stands for it, its badge closing it.
+    assert_eq!(runs(&film)[0].1, 1, "the opened stack's take stayed in its round: {:?}", runs(&film));
+    assert!(film.items[at + 1].stack.is_some() && film.items[at].stack.is_none() && film.items[at].menu.iter().all(|row| row.label != "Use this take"));
+    // The take itself, which no tile showed before, is read for its tile.
+    assert!(!film.items[at].thumbnail.path.is_empty(), "the opened stack's first iteration has no thumbnail");
+    program.command(&open.id, open.arg.clone().unwrap());
+    strip(&program, |film| !film.groups.is_empty() && !film.groups.iter().any(|group| group.label.starts_with("Take ")));
+    drop(program);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// Catches an edit that never becomes an iteration, or one saved again
+/// unchanged: Save on an image opened with Edit from a take writes it as a
+/// PNG in `work/` and sends `save_iteration` with the take and that file,
+/// only once it differs from the take, and not again until it changes after
+/// the host says it was saved, when the PNG goes; and an edit kept by
+/// itself and reopened after a restart is still saved.
+#[test]
+fn save_makes_an_edit_the_takes_next_iteration() {
+    let folder = with_takes("save-iteration");
+    let mut program = Program::start(false);
+    program.send(in_project(&folder));
+    let cell = cell_of(&program);
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![take("library/r1-1.png", true)])]);
+    strip(&program, |film| !film.groups.is_empty());
+    program.command("take_edit", json!({ "take": "library/r1-1.png" }));
+    // An edit of a take has Save on the toolbar, as ig-dependency-warning shows.
+    program.wait(|message| match message {
+        AppMessage::Toolbar(bar) => bar.items.iter().any(|item| matches!(item, protocol::ToolItem::Button { icon, action: Some(action), .. } if icon == "floppy-disk" && action.id == "save")).then_some(()),
+        _ => None,
+    });
+    let saved_as = |program: &mut Program| {
+        program.command("save", json!({}));
+        until_pong(program).into_iter().find_map(|message| match message {
+            AppMessage::SaveIteration { path, source, cell, .. } => Some((path, source, cell)),
+            _ => None,
+        })
+    };
+    assert_eq!(saved_as(&mut program), None, "an unchanged edit was saved as an iteration");
+    let paint = |program: &mut Program, y: f64| {
+        program.command("tool", json!({ "tool": "brush" }));
+        program.send(HostMessage::RasterGesture { tab: "1".into(), gesture: RasterGesture::Stroke { points: vec![[20.0, y, 1.0], [120.0, y, 1.0]] } });
+    };
+    paint(&mut program, 30.0);
+    let (path, source, item) = saved_as(&mut program).expect("an edit saved made no iteration");
+    assert_eq!((path.as_str(), item.item.as_deref()), ("library/r1-1.png", Some(cell.as_str())));
+    assert!(source.starts_with("work/") && source.ends_with(".png") && folder.join(&source).is_file(), "{source}");
+    program.send(HostMessage::IterationSaved { tab: "1".into(), path: path.clone(), file: Some("library/r1-1-2.png".into()), error: None });
+    assert_eq!(saved_as(&mut program), None, "an iteration was saved again unchanged");
+    assert!(!folder.join(&source).exists(), "the PNG written for the iteration was left in work/");
+    paint(&mut program, 60.0);
+    assert!(saved_as(&mut program).is_some(), "a changed iteration was not saved");
+
+    // Kept by itself, never saved as an iteration, and reopened.
+    paint(&mut program, 90.0);
+    let file = keep(&mut program, "1");
+    drop(program);
+    let mut again = Program::start(true);
+    again.send(in_project(&folder));
+    again.send(HostMessage::Open { path: Some(file.display().to_string()) });
+    send_takes(&mut again, &cell, vec![round("q1", 1, vec![take("library/r1-1.png", true)])]);
+    strip(&again, |film| !film.groups.is_empty());
+    assert!(saved_as(&mut again).is_some(), "an edit reopened after a restart was not saved as an iteration");
+    drop(again);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 /// The draft output of the tab `pick` takes, from the next `cells` that
 /// names a draft for it: the tab, and the selected cell's output.
 fn draft_output(program: &Program, mut pick: impl FnMut(&str, &[protocol::CellPart]) -> bool) -> (String, Vec<protocol::CellPart>) {

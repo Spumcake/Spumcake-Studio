@@ -1589,7 +1589,7 @@ fn a_sound_is_previewed_with_its_waveform_and_cues() {
     program.send(in_project(&dir));
     program.send(HostMessage::Preview { id: "s1".into(), path: "takes/Rain.wav".into(), media_type: "audio/wav".into() });
     let (thumbnail, badge, cues, error) = program.wait("the sound's preview", |message| match message {
-        AppMessage::Previewed { id, thumbnail, badge, cues, error } if id == "s1" => Some((thumbnail.clone(), badge.clone(), cues.clone(), error.clone())),
+        AppMessage::Previewed { id, thumbnail, badge, cues, error, .. } if id == "s1" => Some((thumbnail.clone(), badge.clone(), cues.clone(), error.clone())),
         _ => None,
     });
     assert_eq!(error, None);
@@ -2050,6 +2050,37 @@ fn a_draft_says_the_file_its_take_was_opened_from() {
     program.send(HostMessage::Open { path: Some(kept) });
     let (_, again) = draft_output(&program, "the draft after a restart", |_, output| !output.is_empty());
     assert_eq!(again, opened, "after a restart, the draft does not say its file");
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Catches a video take drawn as a file rather than as its asset, as the
+/// Image Generator's: its latest iteration as a stack whose badge opens the
+/// iterations as a run after its round, an out-of-date take outlined with
+/// Ignore sending `ignore_take`, and a take nothing records Unverified.
+#[test]
+fn a_take_shows_its_asset_its_stack_and_its_outline() {
+    let (dir, mut program, cell) = requests("asset");
+    let iteration = protocol::Iteration { file: "takes/Dusk.mp4".into(), published: None, fix: true };
+    let stacked = protocol::TakeFile { iterations: vec![iteration], outlined: true, ..take_file("takes/Dawn.mp4", true) };
+    let unverified = protocol::TakeFile { unverified: true, ..take_file("takes/Dusk.mp4", false) };
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![stacked, unverified])]);
+    let film = film_of(&program, "the round", |film| !film.groups.is_empty());
+    let (first, second) = (&film.items[0], &film.items[1]);
+    assert!(first.outlined && first.stack.as_ref().is_some_and(|stack| stack.count == 2), "{first:?}");
+    assert!(first.menu.iter().any(|row| row.label == "Ignore"), "an out-of-date take's menu has no Ignore");
+    assert!(!second.outlined && second.stack.is_none() && second.caption == "Unverified", "{second:?}");
+    program.command("take_ignore", json!({ "take": "takes/Dusk.mp4" }));
+    let ignored = program.wait("ignore_take", |message| match message {
+        AppMessage::IgnoreTake { path, .. } => Some(path.clone()),
+        _ => None,
+    });
+    assert_eq!(ignored, "takes/Dusk.mp4");
+    let open = first.stack.as_ref().unwrap().open.clone();
+    program.command(&open.id, open.arg.clone().unwrap());
+    let film = film_of(&program, "the stack opened", |film| film.groups.iter().any(|group| group.label == "Take 1 · 2 iterations"));
+    let captions: Vec<&str> = film.items.iter().map(|item| item.caption.as_str()).filter(|caption| !caption.is_empty()).collect();
+    assert_eq!(captions, ["Unverified", "1", "2"]);
     drop(program);
     let _ = std::fs::remove_dir_all(&dir);
 }

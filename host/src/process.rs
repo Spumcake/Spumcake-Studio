@@ -712,8 +712,8 @@ impl Running {
             AppMessage::RunSkillScript { id, skill, script, args } => declared.skill_scripts.push_back((id, skill, script, args)),
             AppMessage::AskAssistant { text, items } => declared.ask_assistant.push_back((text, items)),
             // A failed preview keeps the row's own icon.
-            AppMessage::Previewed { id, thumbnail, badge, cues, error: None } => {
-                declared.previewed.push_back((id, crate::panel::ReferencePreview { thumbnail, badge, cues }));
+            AppMessage::Previewed { id, thumbnail, badge, length, cues, error: None } => {
+                declared.previewed.push_back((id, crate::panel::ReferencePreview { thumbnail, badge, length, cues }));
             }
             AppMessage::Previewed { id, .. } => declared.previewed.push_back((id, crate::panel::ReferencePreview::default())),
         }
