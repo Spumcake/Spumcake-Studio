@@ -75,8 +75,6 @@ if [ "${1:-}" != "--again" ] && [ -z "$(git status --porcelain)" ]; then
     fi
 fi
 
-.project/scripts/claim-build.sh || fail "claim-build"
-
 echo "== build"
 cargo build --workspace 2>&1 | tail -3
 [ "${PIPESTATUS[0]}" -eq 0 ] || fail "cargo build"
