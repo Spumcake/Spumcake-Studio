@@ -140,8 +140,14 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
     let _ = &ran;
     for records in records_files(folder) {
         for line in std::fs::read_to_string(&records).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
-            named.extend(files_named(&line));
+            named.extend(files_within(&line));
         }
+    }
+    // So is every file the project's build scripts name, such as the
+    // delivered film's soundtrack its mix reads, as the owner settled on
+    // 2026-11-20.
+    for script in build_scripts(folder) {
+        named.extend(files_within(&Value::String(std::fs::read_to_string(&script).unwrap_or_default())));
     }
     let mut others: Vec<String> = named.into_iter().filter(|file| is_reference(file) && !iterated.contains(file.as_str()) && held(folder, file)).collect();
     others.sort();
@@ -195,7 +201,37 @@ fn files_named(value: &Value) -> Vec<String> {
 
 /// Every `records.jsonl` in the project, outside Studio's and the agent's
 /// own folders and its working files.
+/// Every file a record names, as `files_named`, and every path inside a
+/// longer string, such as an export command a record keeps
+/// (`--reference far-end-wall=prompts/resources/…door-swing.mp4`), as the
+/// port's inventory reads them.
+fn files_within(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) => text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-'))
+            .filter(|word| is_reference(word))
+            .map(String::from)
+            .collect(),
+        Value::Array(values) => values.iter().flat_map(files_within).collect(),
+        Value::Object(fields) => fields.values().flat_map(files_within).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn records_files(folder: &Path) -> Vec<std::path::PathBuf> {
+    project_files(folder, &["agent", ".git", "work", ".spumcake", "target"], &|name| name == "records.jsonl")
+}
+
+/// The project's build scripts, the shell and Python scripts filed in
+/// `prompts/resources/` that build its results, such as the delivered
+/// film's mix. The agent's own scripts in `agent/` are not the record.
+fn build_scripts(folder: &Path) -> Vec<std::path::PathBuf> {
+    project_files(&folder.join("prompts/resources"), &[], &|name| name.ends_with(".sh") || name.ends_with(".py"))
+}
+
+/// Every file in the project whose name is `wanted`, outside the folders
+/// at its top that `skipped` names.
+fn project_files(folder: &Path, skipped: &[&str], wanted: &dyn Fn(&str) -> bool) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut waiting = vec![folder.to_path_buf()];
     while let Some(at) = waiting.pop() {
@@ -203,10 +239,10 @@ fn records_files(folder: &Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
-                if !(at == folder && ["agent", ".git", "work", ".spumcake", "target"].contains(&name.as_str())) {
+                if !(at == folder && skipped.contains(&name.as_str())) {
                     waiting.push(path);
                 }
-            } else if name == "records.jsonl" {
+            } else if wanted(&name) {
                 found.push(path);
             }
         }
@@ -242,9 +278,11 @@ mod tests {
     use serde_json::json;
 
     /// Catches Library leaving out a file Last order's reports or records
-    /// name, or showing one nothing records, as the plan's rule of
-    /// 2026-11-20 and the port's inventory count them: 615 assets, and 4
-    /// stray files nothing records. It only reads: set `LAST_ORDER` and
+    /// or build scripts name, or showing one nothing records, as the plan's
+    /// rule of 2026-11-20 and the port's inventory count them: 617 assets,
+    /// a path inside a record's export command and the soundtrack the
+    /// film's mix scripts read among them, and 2 superseded drafts nothing
+    /// records. It only reads: set `LAST_ORDER` and
     /// `SPUMCAKE_SKILLS_SCRIPTS`.
     #[test]
     fn last_orders_assets_are_every_file_its_records_name() {
@@ -253,7 +291,7 @@ mod tests {
         let pipeline = crate::prompt_page::living_pipeline(&project).unwrap();
         let found = read_assets(&scripts, &project, &[], &pipeline).unwrap();
         let covered: HashSet<String> = found.iter().flat_map(|asset| asset.files().cloned().collect::<Vec<_>>()).collect();
-        assert_eq!(covered.len(), 615, "Library covers {} files, where the port's inventory counts 615", covered.len());
+        assert_eq!(covered.len(), 617, "Library covers {} files, where the port's inventory counts 617", covered.len());
         fn walk(at: &Path, root: &Path, into: &mut Vec<String>) {
             for entry in std::fs::read_dir(at).into_iter().flatten().flatten() {
                 let path = entry.path();
@@ -274,9 +312,7 @@ mod tests {
             stray,
             [
                 "prompts/resources/2026-11-12_21-22-last-order-animatic-4.mp4",
-                "prompts/resources/2026-11-14_19-13-previs-far-end-door-swing.mp4",
                 "prompts/resources/2026-11-14_21-07-soundtrack-door-cue.wav",
-                "prompts/resources/2026-11-14_21-16-final-shot-mixed-1.wav",
             ],
             "Library's strays are not the port's inventory's"
         );
