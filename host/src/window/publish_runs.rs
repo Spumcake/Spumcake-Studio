@@ -280,7 +280,7 @@ fn record_inputs(place: &Place, file: &str) -> Option<Vec<String>> {
 /// Whether a delivery may be shown on its card: its film's record names
 /// what it was mixed from, and each of those is published canon.
 fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
-    let inputs = record_inputs(place, &delivery.file).ok_or_else(|| String::from("This film has no record of what it was mixed from, so it cannot be delivered."))?;
+    let inputs = record_inputs(place, &delivery.file).ok_or_else(|| String::from(NO_MIX_RECORD))?;
     let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
     if inputs.iter().any(|input| !canon.published.contains(input)) {
         return Err(String::from(NOT_CANON));
@@ -705,7 +705,7 @@ fn step_as_made(place: &Place, canon: &crate::prompt_page::Canon, step: &protoco
 /// sentences as it is, Skills' known refusals as sentences, and anything
 /// else as `otherwise`, never the script's own words.
 fn plain_refusal(error: &str, otherwise: &str) -> String {
-    let own = [IN_NO_RECIPE, NO_ARTIFACT, NO_ASSET, "This project has no pipeline yet."];
+    let own = [IN_NO_RECIPE, NO_ARTIFACT, NO_ASSET, NOT_CANON, NO_MIX_RECORD, "This project has no pipeline yet."];
     if own.contains(&error) {
         return error.to_string();
     }
@@ -726,6 +726,8 @@ const NO_RECORD: &str = "Nothing records what this was made from, so it can't be
 const NOT_USED: &str = "The take could not be put in use.";
 const NOT_SAVED: &str = "The iteration could not be saved.";
 const NOT_IGNORED: &str = "The take's outline could not be cleared.";
+const NOT_DELIVERED: &str = "The film could not be delivered.";
+const NO_MIX_RECORD: &str = "This film has no record of what it was mixed from, so it cannot be delivered.";
 
 /// Whether a Save on the asset at `path` waits on the warning: the asset is
 /// in use and other work in use was made from it. Returns the warning's
@@ -1106,7 +1108,7 @@ impl HostWindow {
         match done {
             Done::Checked(delivery, Ok(())) => self.publish_runs.deliver_card = Some(delivery),
             Done::Checked(delivery, Err(sentence)) | Done::Delivered(delivery, Err(sentence)) => {
-                self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error: Some(sentence) });
+                self.send(delivery.app, HostMessage::Delivered { tab: delivery.tab, file: String::new(), error: Some(plain_refusal(&sentence, NOT_DELIVERED)) });
             }
             Done::Delivered(delivery, Ok(output)) => {
                 // Canon changed: the Prompt page reads it again.
