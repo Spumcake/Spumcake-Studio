@@ -1625,7 +1625,8 @@ impl HostWindow {
     }
 
     /// A workspace asked to open a project file in the workspace that edits
-    /// its media type, which opens it as new and is shown.
+    /// its media type, which opens it, to play when it is a video and as new
+    /// work otherwise, and is shown.
     fn take_open_ins(&mut self) {
         let mut asked = Vec::new();
         for started in &mut self.apps {
@@ -1658,7 +1659,15 @@ impl HostWindow {
             self.toggle_workspace();
         }
         self.selected = app;
-        self.send(app, HostMessage::OpenAsNew { path: file.display().to_string(), name, from: None });
+        // A video opens to play, as a workspace opens a project's video with
+        // `open`: a tab that keeps nothing until it changes, with no new
+        // work made of a film delivered or an animatic. Anything else opens
+        // as new work.
+        if media.starts_with("video/") {
+            self.send(app, HostMessage::Open { path: Some(file.display().to_string()) });
+        } else {
+            self.send(app, HostMessage::OpenAsNew { path: file.display().to_string(), name, from: None });
+        }
         Ok(())
     }
 
