@@ -293,16 +293,33 @@ fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
 /// copied into `output/`, and, in git, what that wrote committed by path.
 /// Returns the file in `output/`.
 fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
-    // The mix is an asset of its own, made from the shot, as finishing is
-    // and Last order's mixes are: "<shot>, mixed", made from the shot in a
-    // role that says how its shot was finished, as Last order's 60 fps
-    // mix records it. The shot's own asset in use is never replaced.
+    // Each finishing of the shot the mix was made from is published first,
+    // as generate-finished-shot has it, "<shot>, 60 fps", then "<shot>, 60
+    // fps, 4K", each made from the one before; then the mix, an asset of
+    // its own, "<shot>, mixed", made from the last of them. The shot's own
+    // asset in use is never replaced.
     let (shot, file) = (delivery.artifact.as_str(), delivery.file.as_str());
     let artifact = format!("{shot}, mixed");
     let artifact = artifact.as_str();
-    let role = mix_source_role(place, shot, file);
-    let made_from = sources_of(place, artifact, None, file, &[(shot.to_string(), role)])?;
     let chain = chain_of(place, shot)?;
+    let mut finished_as = shot.to_string();
+    for (take, request, part) in finishing_of(place, shot, file) {
+        let name = format!("{finished_as}, {part}");
+        let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
+        if canon.files.get(&name) != Some(&take) || !canon.published.contains(&take) {
+            let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), name.as_str(), "--file", take.as_str(), "--from", finished_as.as_str(), FINISHES];
+            if let Some(chain) = &chain {
+                args.extend(["--chain", chain.as_str()]);
+            }
+            if let Some(request) = &request {
+                args.extend(["--request", request.as_str()]);
+            }
+            place.script("pipeline.py", &args)?;
+        }
+        finished_as = name;
+    }
+    let role = if finished_as == shot { format!("{MIX_SOURCE}, {UNTOUCHED}") } else { MIX_SOURCE.to_string() };
+    let made_from = sources_of(place, artifact, None, file, &[(finished_as.clone(), role)])?;
     let mut args: Vec<&str> = vec!["publish", place.pipeline.as_str(), artifact, "--file", file];
     if let Some(chain) = &chain {
         args.extend(["--chain", chain.as_str()]);
@@ -317,39 +334,47 @@ fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).map(String::from).ok_or_else(|| String::from("The film was published, but where it was delivered was not given."))
 }
 
-/// The role a mix names its shot in, as Last order records it, so Claude
-/// Code and the finishing rule find Studio's mixes as they find its: the
-/// shot as it is, or how it was finished first.
+/// The role a mix names what it was made from in, as Last order records it, so
+/// Claude Code and the finishing rule find Studio's mixes as they find its:
+/// the shot as it is, or the last of its finishings.
 const MIX_SOURCE: &str = "the picture"; // Skills' stored spelling
 const UNTOUCHED: &str = "untouched";
 
-/// The role the mix at `file` names `shot` in: from the video its record
-/// says it was mixed from, back through each finishing request that made
-/// it, to the shot's own file, each finishing in turn as Last order words
-/// it, "retimed to 60 fps", "upscaled to 4K"; or "untouched".
-fn mix_source_role(place: &Place, shot: &str, file: &str) -> String {
+/// The role each finishing names the take it finishes in.
+const FINISHES: &str = "the take it finishes";
+
+/// The finishings between the shot and the video the mix at `file` was
+/// made from, the first first: each take, the request that made it, and
+/// its part of the name as generate-finished-shot words it, "60 fps" or
+/// "4K", followed back through each finishing request's `video_url` to
+/// the shot's own file. None when the mix used the shot as it is.
+fn finishing_of(place: &Place, shot: &str, file: &str) -> Vec<(String, Option<String>, String)> {
     let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline).unwrap_or_default();
     let shot_file = canon.files.get(shot).cloned().unwrap_or_default();
-    let mixed_from = record_inputs(place, file).unwrap_or_default().into_iter().find(|input| crate::prompt_page::media_type(input).starts_with("video/"));
-    let mut finished: Vec<String> = Vec::new();
-    let mut at = mixed_from.unwrap_or_default();
+    let mut at = record_inputs(place, file).unwrap_or_default().into_iter().find(|input| crate::prompt_page::media_type(input).starts_with("video/")).unwrap_or_default();
+    let mut found = Vec::new();
     for _ in 0..8 {
         if at.is_empty() || at == shot_file {
             break;
         }
         let Some(record) = place.script("request.py", &["show", &at]).ok().and_then(|shown| serde_json::from_str::<Value>(&shown).ok()) else { break };
         let settings = record.pointer("/endpoint/settings").cloned().unwrap_or(Value::Null);
-        if let Some(fps) = settings.get("target_fps").and_then(Value::as_f64) {
-            finished.push(format!("retimed to {fps:.0} fps"));
-        }
-        if settings.get("upscale_factor").is_some() {
-            finished.push(String::from("upscaled to 4K"));
-        }
+        let part = match (settings.get("target_fps").and_then(Value::as_f64), settings.get("upscale_factor")) {
+            (Some(fps), _) => format!("{fps:.0} fps"),
+            (None, Some(_)) => String::from("4K"),
+            _ => break,
+        };
+        let request = record.get("id").and_then(Value::as_str).map(String::from);
+        found.push((at.clone(), request, part));
         let Some(source) = record.get("references").and_then(Value::as_array).and_then(|references| references.iter().find(|reference| reference.get("field").and_then(Value::as_str) == Some("video_url"))).and_then(|reference| reference.get("file").and_then(Value::as_str)) else { break };
         at = source.to_string();
     }
-    finished.reverse();
-    if finished.is_empty() { format!("{MIX_SOURCE}, {UNTOUCHED}") } else { format!("{MIX_SOURCE}, {}", finished.join(", then ")) }
+    // The mix's video was not finished from the shot: none of it counts.
+    if at != shot_file {
+        return Vec::new();
+    }
+    found.reverse();
+    found
 }
 
 /// The chain an artifact belongs to: its step's, or its own row's.
@@ -1227,6 +1252,58 @@ mod tests {
         std::fs::write(folder.join("agent/old-mix.wav"), b"RIFF old mix").unwrap();
         let old_mix = last(skills("request.py", &["resource", "agent/old-mix.wav", "--name", "old-mix", "--from", &take]));
         assert_eq!(check_delivery(&place, &delivery(&old_mix)), Err(String::from(NOT_CANON)));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches a film mixed from a retimed take refused, or published as if
+    /// made from the shot as it is: its finishing is published first, as
+    /// generate-finished-shot has it, "<shot>, 60 fps", made from the shot,
+    /// and the mix is made from that.
+    #[test]
+    fn a_film_mixed_from_a_retimed_take_is_delivered_with_its_finishing() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let scripts = PathBuf::from(scripts);
+        let folder = std::env::temp_dir().join(format!("deliver-retimed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests", "agent"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        let skills = |script: &str, args: &[&str]| {
+            let out = Command::new("python3").arg(scripts.join(script)).args(args).current_dir(&folder).output().unwrap();
+            assert!(out.status.success(), "{script} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let last = |printed: String| printed.lines().last().unwrap().trim().to_string();
+        skills("pipeline.py", &["new", "001"]);
+        skills("pipeline.py", &["element", "001", "the line", "--kind", "story"]);
+        skills("pipeline.py", &["chain", "001", "the line", "--order", "01"]);
+        skills("pipeline.py", &["step", "001", "the line", "take", "--order", "1", "--skill", "create-final-animation", "--artifact", "the line: take"]);
+        std::fs::write(folder.join("agent/take.mp4"), b"take").unwrap();
+        let take = last(skills("request.py", &["resource", "agent/take.mp4", "--name", "take"]));
+        skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take, "--chain", "the line"]);
+        // The take retimed on the stand-in, as the Video Generator asks it.
+        let spec = serde_json::json!({ "name": "take-60", "skill": "generate-finished-shot", "endpoint": { "kind": "fal", "model": "topaz/interpolate/video", "settings": { "target_fps": 60 } }, "prompt": "", "references": [{ "file": take, "role": "the take", "field": "video_url" }] });
+        std::fs::write(folder.join("agent/retime.json"), spec.to_string()).unwrap();
+        skills("request.py", &["run", "agent/retime.json", "--stand-in"]);
+        let report: Value = serde_json::from_str(&skills("request.py", &["show", "take-60"]).trim().to_string()).unwrap_or(Value::Null);
+        let retimed = std::fs::read_dir(folder.join("requests")).unwrap().flatten().filter_map(|entry| entry.file_name().to_str().and_then(|name| name.strip_suffix(".html")).map(String::from)).find(|id| id.contains("take-60")).map(|id| {
+            let shown: Value = serde_json::from_str(&skills("request.py", &["show", &id])).unwrap();
+            shown["outputs"][0].as_str().unwrap().to_string()
+        }).unwrap_or_else(|| panic!("the retime made no report: {report}"));
+        std::fs::write(folder.join("agent/mix.mp4"), b"mix").unwrap();
+        let mix = last(skills("request.py", &["resource", "agent/mix.mp4", "--name", "mix", "--from", &retimed]));
+        let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
+        let delivery = Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: take"), file: mix.clone(), uses: String::from("Take 1 · 60 fps"), size: String::from("1280 × 720"), frame_rate: String::from("60 fps"), format: String::from("H.264 with AAC sound") };
+        let output = deliver(&place, &delivery).unwrap_or_else(|error| panic!("a mix of a retimed take was refused: {error}"));
+        assert!(output.starts_with("output/"), "{output}");
+        let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
+        assert_eq!(canon.files.get("the line: take, 60 fps"), Some(&retimed), "the retime was not published as the shot's finishing");
+        assert_eq!(canon.files.get("the line: take, mixed"), Some(&mix));
+        assert_eq!(canon.files.get("the line: take"), Some(&take), "the delivery replaced the shot in use");
+        let made = skills("pipeline.py", &["sql", "001", "SELECT source FROM made_from WHERE artifact='the line: take, mixed'", "--read-only"]);
+        assert!(made.contains("the line: take, 60 fps"), "the mix was not made from the retime: {made}");
+        let finished = skills("pipeline.py", &["sql", "001", "SELECT source FROM made_from WHERE artifact='the line: take, 60 fps'", "--read-only"]);
+        assert_eq!(finished.trim(), "the line: take", "the retime was not made from the shot");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
