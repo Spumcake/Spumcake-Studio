@@ -424,7 +424,8 @@ fn finishing_of(place: &Place, shot: &str, file: &str) -> Vec<(String, Option<St
             break;
         }
         let Some(record) = place.script("request.py", &["show", &at]).ok().and_then(|shown| serde_json::from_str::<Value>(&shown).ok()) else { break };
-        let settings = record.pointer("/endpoint/settings").cloned().unwrap_or(Value::Null);
+        // What was sent, as a report keeps it, or else the spec's.
+        let settings = record.pointer("/sent/settings").or_else(|| record.pointer("/endpoint/settings")).cloned().unwrap_or(Value::Null);
         let part = match (settings.get("target_fps").and_then(Value::as_f64), settings.get("upscale_factor")) {
             (Some(fps), _) => format!("{fps:.0} fps"),
             (None, Some(_)) => String::from("4K"),
@@ -742,8 +743,14 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
     let step = named.or(cell_step).ok_or_else(|| String::from(IN_NO_RECIPE))?;
     let artifact = canon.step_artifacts.get(&(step.chain.clone(), step.step.clone())).cloned().ok_or_else(|| String::from(NO_ARTIFACT))?;
     // The asset is put in use at its latest iteration, canon as the guide
-    // has it; one already in use stays as it is.
-    let asset = asset_at(assets_of(place)?, path)?;
+    // has it; one already in use stays as it is. A file filed for a cell
+    // that has just joined a recipe, with a record of what it was made
+    // from, is a new asset of its own.
+    let asset = match asset_at(assets_of(place)?, path) {
+        Ok(asset) => asset,
+        Err(_) if place.script("request.py", &["show", path]).is_ok() => crate::assets::Asset { first: path.to_string(), ..Default::default() },
+        Err(error) => return Err(error),
+    };
     if let Some(in_use) = asset.artifact.clone().filter(|_| asset.in_use) {
         return Ok(in_use);
     }
@@ -1359,15 +1366,18 @@ mod tests {
         std::fs::write(folder.join("agent/take.mp4"), b"take").unwrap();
         let take = last(skills("request.py", &["resource", "agent/take.mp4", "--name", "take"]));
         skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take, "--chain", "the line"]);
-        // The take retimed on the stand-in, as the Video Generator asks it.
-        let spec = serde_json::json!({ "name": "take-60", "skill": "generate-finished-shot", "endpoint": { "kind": "fal", "model": "topaz/interpolate/video", "settings": { "target_fps": 60 } }, "prompt": "", "references": [{ "file": take, "role": "the take", "field": "video_url" }] });
-        std::fs::write(folder.join("agent/retime.json"), spec.to_string()).unwrap();
-        skills("request.py", &["run", "agent/retime.json", "--stand-in"]);
-        let report: Value = serde_json::from_str(&skills("request.py", &["show", "take-60"]).trim().to_string()).unwrap_or(Value::Null);
-        let retimed = std::fs::read_dir(folder.join("requests")).unwrap().flatten().filter_map(|entry| entry.file_name().to_str().and_then(|name| name.strip_suffix(".html")).map(String::from)).find(|id| id.contains("take-60")).map(|id| {
-            let shown: Value = serde_json::from_str(&skills("request.py", &["show", &id])).unwrap();
-            shown["outputs"][0].as_str().unwrap().to_string()
-        }).unwrap_or_else(|| panic!("the retime made no report: {report}"));
+        // The take retimed: a report as fal's Topaz retime of Last order's
+        // final shot left one, its settings under what was sent.
+        let retimed = String::from("library/take-60fps.mp4");
+        std::fs::write(folder.join(&retimed), b"take at 60 fps").unwrap();
+        let report = serde_json::json!({
+            "id": "take-60fps", "name": "take-60fps", "skill": "generate-finished-shot", "pipeline": "001",
+            "started": "2026-11-20T10:00:00Z", "finished": "2026-11-20T10:01:00Z", "prompt": "",
+            "sent": { "service": "fal", "model": "topaz/interpolate/video", "settings": { "target_fps": 60, "model": "Apollo" } },
+            "references": [{ "file": take, "role": "the take", "field": "video_url" }],
+            "outputs": [retimed], "result": { "cost": "not returned by the endpoint" },
+        });
+        std::fs::write(folder.join("requests/take-60fps.html"), format!("<script type=\"application/json\" id=\"request\">{report}</script>")).unwrap();
         std::fs::write(folder.join("agent/mix.mp4"), b"mix").unwrap();
         let mix = last(skills("request.py", &["resource", "agent/mix.mp4", "--name", "mix", "--from", &retimed]));
         let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
@@ -1615,6 +1625,15 @@ mod tests {
         let refused = use_take(&place, 0, "1", None, &fifth).expect_err("a take made from an image changed since was put in use");
         assert_eq!(plain_refusal(&refused, NOT_USED), TAKE_INPUT_CHANGED, "{refused}");
         assert_eq!(skills("pipeline.py", &["sql", "001", "SELECT count(*) FROM step", "--read-only"]), steps, "a refused Use left a step behind");
+        // A conversation cell's image, filed when the cell joins a recipe,
+        // goes into use as the first asset of the step just made for it:
+        // filed from the files its step refers to, so Skills accepts it.
+        skills("pipeline.py", &["step", "001", "the diner", "keeper", "--order", "9", "--skill", "generate-keyframe", "--template", "The keeper.", "--refs", r#"[{"artifact": "the diner: layout", "role": "image 1"}]"#, "--artifact", "the diner: Untitled Image"]);
+        std::fs::write(folder.join("work/keeper.png"), b"\x89PNG\r\n\x1a\nkeeper").unwrap();
+        let layout_now = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap().files["the diner: layout"].clone();
+        let keeper = skills("request.py", &["resource", "work/keeper.png", "--name", "keeper", "--from", &layout_now]).lines().last().unwrap().trim().to_string();
+        let keeper_step = protocol::StepRef { chain: String::from("the diner"), step: String::from("keeper") };
+        assert_eq!(use_take(&place, 0, "1", Some(keeper_step), &keeper), Ok(String::from("the diner: Untitled Image")), "a conversation cell's filed image was not put in use for its new step");
         // Ignore clears the first keyframe's outline, and not the second's.
         ignore_take(&place, &first).unwrap();
         let assets = assets_of(&place).unwrap();
