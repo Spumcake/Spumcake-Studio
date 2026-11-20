@@ -295,7 +295,7 @@ fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
 fn deliver(place: &Place, delivery: &Delivery) -> Result<String, String> {
     // The mix is an asset of its own, made from the shot, as finishing is
     // and Last order's mixes are: "<shot>, mixed", made from the shot in a
-    // role that says how its picture was finished, as Last order's 60 fps
+    // role that says how its shot was finished, as Last order's 60 fps
     // mix records it. The shot's own asset in use is never replaced.
     let (shot, file) = (delivery.artifact.as_str(), delivery.file.as_str());
     let artifact = format!("{shot}, mixed");
@@ -330,9 +330,9 @@ const UNTOUCHED: &str = "untouched";
 fn mix_source_role(place: &Place, shot: &str, file: &str) -> String {
     let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline).unwrap_or_default();
     let shot_file = canon.files.get(shot).cloned().unwrap_or_default();
-    let picture = record_inputs(place, file).unwrap_or_default().into_iter().find(|input| crate::prompt_page::media_type(input).starts_with("video/"));
+    let mixed_from = record_inputs(place, file).unwrap_or_default().into_iter().find(|input| crate::prompt_page::media_type(input).starts_with("video/"));
     let mut finished: Vec<String> = Vec::new();
-    let mut at = picture.unwrap_or_default();
+    let mut at = mixed_from.unwrap_or_default();
     for _ in 0..8 {
         if at.is_empty() || at == shot_file {
             break;
