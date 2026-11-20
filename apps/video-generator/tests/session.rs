@@ -525,7 +525,19 @@ fn a_video_in_the_project_opens_to_play() {
     assert!(!claimed(&mut program, "c2", &outside), "a video outside the project was claimed");
 
     program.send(HostMessage::Open { path: Some("takes/Dawn.mp4".into()) });
-    let (view, _) = program.view("the take to play", |view, image| names(view) == ["Dawn"] && is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0));
+    // Its draft's cell is noted on the way, for its round below.
+    let mut drafted = None;
+    let view = program.wait("the take to play", |message| match message {
+        AppMessage::Cells { selected: Some(cell), .. } => {
+            drafted = Some(cell.clone());
+            None
+        }
+        AppMessage::Raster(view) => {
+            let image = Image::read(view);
+            (names(view) == ["Dawn"] && is(image.at(ALONE.0, ALONE.1), dawn, DAWN_FRAMES, 0)).then(|| view.clone())
+        }
+        _ => None,
+    });
     let tab = view.tab.clone();
     let declared = transport(&view).expect("no transport row");
     assert_eq!((declared.length, declared.fps), (2.0, 24.0));
@@ -541,6 +553,20 @@ fn a_video_in_the_project_opens_to_play() {
         _ => None,
     });
     assert!(pages.is_some_and(|pages| !pages[3].enabled), "a video opened to play has its Prompt page on");
+    let card = said.iter().rev().find_map(|message| match message {
+        AppMessage::Properties(properties) => Some(properties.cell.is_some()),
+        _ => None,
+    });
+    assert_eq!(card, Some(false), "a video opened to play with no round shows a Prompt page card");
+    // Once its cell has a round, as a step's take has, its page comes on.
+    let cell = drafted.expect("its draft was not sent");
+    let at = protocol::ItemRef { path: String::new(), item: Some(cell.clone()) };
+    program.send(HostMessage::Takes { cell: at, rounds: vec![round("q1", 1, vec![take_file("takes/Dawn.mp4", false)])] });
+    let on = program.wait("its Prompt page on", |message| match message {
+        AppMessage::Properties(properties) if properties.pages[3].enabled => Some(properties.cell.is_some()),
+        _ => None,
+    });
+    assert!(on, "a take with its round shows no Prompt page card");
     program.command("transport_play", json!({ "value": true }));
     program.view("playing", |view, _| transport(view).is_some_and(|transport| transport.playing));
     program.command("transport_play", json!({ "value": false }));

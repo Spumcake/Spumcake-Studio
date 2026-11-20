@@ -382,7 +382,8 @@ pub fn properties(session: &Session) -> Option<Properties> {
             // Off for a video opened to play that is no take.
             page("Prompt", 3, tab.prompts().then_some(Page::Prompt)),
         ],
-        cell: (shown == Page::Prompt).then(|| tab.gallery.current_cell().map(|cell| prompt_cell(cell, session.has_animatic()))).flatten(),
+        // No card for a video opened to play until its cell has a round.
+        cell: (shown == Page::Prompt && tab.prompts()).then(|| tab.gallery.current_cell().map(|cell| prompt_cell(cell, session.has_animatic()))).flatten(),
     })
 }
 
