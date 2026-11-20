@@ -15,23 +15,23 @@ use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, pos2, vec2};
 use serde_json::Value;
 use std::collections::HashMap;
 
-const WIDTH: f32 = 560.0;
-const PAD: f32 = 28.0;
-const RADIUS: f32 = 14.0;
+pub(crate) const WIDTH: f32 = 560.0;
+pub(crate) const PAD: f32 = 28.0;
+pub(crate) const RADIUS: f32 = 14.0;
 const BOX_FILL: Color32 = Color32::from_rgb(243, 244, 246);
 const THUMB_W: f32 = 104.0;
 const THUMB_H: f32 = 60.0;
-const BUTTON_H: f32 = 46.0;
+pub(crate) const BUTTON_H: f32 = 46.0;
 const DARK: Color32 = Color32::from_rgb(24, 25, 28);
 /// The overlay behind the card, faint, so the work stays readable.
-const OVERLAY: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 40);
+pub(crate) const OVERLAY: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 40);
 /// The fill behind a preview's corner words, as on the Prompt page.
-const BADGE_FILL: Color32 = Color32::from_rgba_premultiplied(17, 18, 20, 190);
+pub(crate) const BADGE_FILL: Color32 = Color32::from_rgba_premultiplied(17, 18, 20, 190);
 /// The tallest the prompt's box grows before it scrolls.
 const PROMPT_MOST: f32 = 220.0;
 
 /// One line of the card, painted later in order.
-enum Line {
+pub(crate) enum Line {
     Title(String),
     Muted(String),
     Label(String),
@@ -273,7 +273,7 @@ fn card(ctx: &egui::Context, lines: &[Line], send: &str, previews: &HashMap<Stri
     answer
 }
 
-fn paint_line(ui: &mut egui::Ui, line: &Line, width: f32, previews: &HashMap<String, ReferencePreview>) {
+pub(crate) fn paint_line(ui: &mut egui::Ui, line: &Line, width: f32, previews: &HashMap<String, ReferencePreview>) {
     match line {
         Line::Title(text) => {
             let galley = ui.painter().layout(text.clone(), widgets::semibold(ts::heading(2).0), TEXT, width);

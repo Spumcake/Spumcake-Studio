@@ -25,6 +25,7 @@ mod flows;
 mod canon_steps;
 pub(crate) use canon_steps::StepFields;
 mod previews;
+mod project_tab;
 mod prompt_runs;
 mod publish_runs;
 mod publishing;
@@ -95,7 +96,7 @@ struct Project {
 pub fn run(specs: Vec<AppSpec>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Spumcake Studio")
+            .with_title("Spumcake for Desktop")
             // The desktop matches the window to its launcher entry and icon by
             // this id, which is the desktop file's name.
             .with_app_id(APP_ID)
@@ -170,6 +171,13 @@ struct HostWindow {
     publishing: publishing::Publishing,
     /// The Prompt page's reference previews, asked of the workspaces.
     previews: previews::Previews,
+    /// The conversation column's Project tab.
+    project_panel: crate::project_panel::ProjectPanel,
+    /// The Project tab was shown last frame, so showing it again reads the
+    /// project again.
+    project_tab_shown: bool,
+    /// A request's report, shown as its card.
+    report_card: Option<project_tab::ReportCard>,
     publish_runs: publish_runs::Runs,
     /// Canon reads and skill scripts answered off the window's thread.
     canon_answers: canon_steps::Answers,
@@ -311,6 +319,9 @@ impl HostWindow {
             prompt_page: crate::prompt_page::PromptPage::default(),
             publishing: publishing::Publishing::default(),
             previews: previews::Previews::default(),
+            project_panel: crate::project_panel::ProjectPanel::default(),
+            project_tab_shown: false,
+            report_card: None,
             publish_runs: publish_runs::Runs::default(),
             canon_answers: canon_steps::Answers::default(),
             probes: crate::endpoints::Probes::default(),
@@ -800,6 +811,18 @@ impl eframe::App for HostWindow {
         }
         let mut menu = std::mem::take(&mut self.sessions);
         let mut bar_pressed = false;
+        // A model's name as the cards and the panel show it: its endpoint's
+        // list's, or a skill's models.json, or its id as it is.
+        let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&self.settings.skill_folders));
+        let model_name = |model: &str| {
+            let shown = crate::cells::model_name(&ctx, model);
+            if shown != model.rsplit('/').next().unwrap_or(model) {
+                return shown;
+            }
+            crate::prices::local_name(&skills, model).unwrap_or_else(|| model.to_string())
+        };
+        self.chat.tabs = self.project.is_some();
+        let mut panel_events = Vec::new();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -823,6 +846,11 @@ impl eframe::App for HostWindow {
                     &mut cell_actions,
                 );
                 self.note_cell_actions(cell_actions);
+                if let Some(area) = self.chat.project_area {
+                    let shown_before = self.project_tab_shown;
+                    panel_events = self.draw_project_tab(ui, area, shown_before, &model_name);
+                }
+                self.project_tab_shown = self.chat.project_area.is_some();
                 if workspace_open {
                     ui.scope_builder(egui::UiBuilder::new().max_rect(shell), |ui| {
                         self.shell(ui, &ctx, app, tab.clone(), dismissing, &mut chosen, &mut sent);
@@ -848,16 +876,6 @@ impl eframe::App for HostWindow {
         self.draw_settings(&ctx, frame);
         // What the runner asks the person, over the conversation.
         self.runner.wake_with(&ctx);
-        // A model's name as the card shows it: its endpoint's list's, or a
-        // skill's models.json, or its id as it is.
-        let skills = crate::skills_setup::listed_skills(&crate::skills_checkout::skill_folders(&self.settings.skill_folders));
-        let model_name = |model: &str| {
-            let shown = crate::cells::model_name(&ctx, model);
-            if shown != model.rsplit('/').next().unwrap_or(model) {
-                return shown;
-            }
-            crate::prices::local_name(&skills, model).unwrap_or_else(|| model.to_string())
-        };
         self.ask_plan_previews();
         if let Some(asking) = self.runner.asking()
             && let Some(approved) = crate::plan_card::show(&ctx, asking, &model_name, &self.previews.shown)
@@ -868,6 +886,8 @@ impl eframe::App for HostWindow {
                 self.assistant.send(Command::Result(answer));
             }
         }
+        self.draw_report_card(&ctx, &model_name);
+        self.project_panel_events(panel_events);
         self.show_publishing(&ctx);
         self.show_iteration_warning(&ctx);
         self.draw_model_menu(&ctx);
@@ -1593,9 +1613,7 @@ impl HostWindow {
         }
     }
 
-    /// A workspace asked to show a request's report. Until the window draws
-    /// reports, the report's page opens with the system's own opener, as a
-    /// link does.
+    /// A workspace asked to show a request's report: its card.
     fn take_reports(&mut self) {
         let mut asked = Vec::new();
         for started in &mut self.apps {
@@ -1644,12 +1662,9 @@ impl HostWindow {
         Ok(())
     }
 
-    /// Opens a request's report page, or says why there is none.
+    /// Shows a request's report as its card, or says why there is none.
     fn open_report(&mut self, request: &str) {
-        match self.report_page(request) {
-            Ok(page) => self.ctx.open_url(egui::OpenUrl::new_tab(page.display().to_string())),
-            Err(reason) => self.tell(reason),
-        }
+        self.show_report(request);
     }
 
     /// A request's report page, `requests/<request>.html` in the project.

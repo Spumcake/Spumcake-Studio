@@ -79,6 +79,14 @@ pub(crate) struct Chat {
     pub started: Option<u64>,
     /// Messages sent while a request ran, each waiting its turn.
     pub queued: Vec<(String, Vec<PathBuf>)>,
+    /// A project is open, so the column has its two tabs, Conversation and
+    /// Project, as pp-anchor shows them beside the workspace.
+    pub tabs: bool,
+    /// The Project tab is chosen.
+    pub project_tab: bool,
+    /// Where the project panel goes this frame, under the tabs, while the
+    /// Project tab is chosen; the window draws it there.
+    pub project_area: Option<Rect>,
 }
 
 /// One level, as the picker shows it.
@@ -193,14 +201,46 @@ pub(crate) fn show(
             chat,
             &mut events,
         );
+        let mut top = inner.top() + LOGO_ROW;
+        chat.project_area = None;
+        if chat.tabs && !fills {
+            top = column_tabs(ui, column, top, chat);
+            if chat.project_tab {
+                // The input box is hidden while the Project tab shows.
+                chat.project_area = Some(Rect::from_min_max(pos2(inner.left(), top), inner.max));
+                return events;
+            }
+        }
         let frame = input_box(ui, column, chat, false, &mut events);
-        let talk = Rect::from_min_max(
-            pos2(column.left(), inner.top() + LOGO_ROW),
-            pos2(column.right(), frame.top() - 8.0),
-        );
+        let talk = Rect::from_min_max(pos2(column.left(), top), pos2(column.right(), frame.top() - 8.0));
         conversation(ui, talk, chat, board, cell_actions, &mut events);
     }
     events
+}
+
+/// The column's two tabs under the session's name, Conversation and
+/// Project, each half the column, as pp-anchor shows them: the chosen one
+/// dark and underlined, the other grey. Returns where what they show starts.
+fn column_tabs(ui: &mut egui::Ui, column: Rect, top: f32, chat: &mut Chat) -> f32 {
+    let row = Rect::from_min_size(pos2(column.left(), top), vec2(column.width(), crate::panel::PAGE_TOP + crate::panel::PAGE_H));
+    let half = column.width() / 2.0;
+    for (index, (label, project)) in [("Conversation", false), ("Project", true)].into_iter().enumerate() {
+        let tab = Rect::from_min_size(pos2(column.left() + index as f32 * half, row.top()), vec2(half, row.height()));
+        let chosen = chat.project_tab == project;
+        let response = ui.interact(tab, ui.id().with(("column-tab", index)), if chosen { Sense::hover() } else { Sense::click() });
+        let font = if chosen { widgets::semibold(ts::body_size()) } else { ts::body() };
+        let color = if chosen || response.hovered() { TEXT } else { MUTED };
+        ui.painter().text(pos2(tab.center().x, tab.center().y + 2.0), Align2::CENTER_CENTER, label, font, color);
+        if chosen {
+            ui.painter().rect_filled(Rect::from_min_max(pos2(tab.left() + 8.0, tab.bottom() - 2.0), pos2(tab.right() - 8.0, tab.bottom())), 0.0, widgets::INK);
+        }
+        if response.clicked() {
+            chat.project_tab = project;
+        }
+    }
+    // The hairline under the tabs, across the column, as pp-anchor draws it.
+    ui.painter().hline(column.x_range(), row.bottom() - 0.5, (1.0, BORDER));
+    row.bottom()
 }
 
 /// The centred column messages use when the conversation fills the window.
@@ -252,7 +292,7 @@ fn logo_button(ui: &mut egui::Ui, center: Pos2, chat: &mut Chat, events: &mut Ve
         );
     }
     widgets::chevron(ui.painter(), chevron, MUTED, widgets::Scale(1.15));
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Spumcake Studio"));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Spumcake for Desktop"));
 
     let waits = !chat.working;
     egui::Popup::menu(&response).show(|ui| {
@@ -1004,12 +1044,12 @@ fn tool_line(ui: &mut egui::Ui, entry: &Entry, width: f32) {
 /// A tool's key, `<application>__<skill>__<tool>`, as words: the tool in
 /// lowercase and the application by name. An application's id is its name
 /// in lowercase with hyphens, as the conventions guide sets, so each word
-/// takes its capital back; the host's own tools are Spumcake Studio's.
+/// takes its capital back; the host's own tools are Spumcake for Desktop's.
 fn step_words(key: &str) -> String {
     let mut parts = key.split("__");
     let id = parts.next().unwrap_or(key);
     let app = if id == crate::route::HOST_ID {
-        String::from("Spumcake Studio")
+        String::from("Spumcake for Desktop")
     } else {
         id.split('-')
             .map(|word| {
@@ -1234,7 +1274,7 @@ mod tests {
     #[test]
     fn a_step_names_its_workspace_as_people_read_it() {
         assert_eq!(step_words("lantern-room__light__add_beam"), "add beam · Lantern Room");
-        assert_eq!(step_words(&format!("{}__prompt__edit_image", crate::route::HOST_ID)), "edit image · Spumcake Studio");
+        assert_eq!(step_words(&format!("{}__prompt__edit_image", crate::route::HOST_ID)), "edit image · Spumcake for Desktop");
     }
 
     /// Catches a turn split or merged wrongly: everything the assistant did

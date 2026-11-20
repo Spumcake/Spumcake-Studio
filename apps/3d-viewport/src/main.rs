@@ -27,6 +27,9 @@ const CAMERAS_HEADING: u64 = 2;
 const RENDERS_HEADING: u64 = 3;
 const CAMERA: u64 = 100;
 const RENDER: u64 = 1000;
+/// The ids of this program's canon reads.
+const CANON: &str = "canon";
+const TOUCHES: &str = "touches";
 /// A render's thumbnail in the list, in pixels.
 const THUMB: (u32, u32) = (72, 40);
 const LOOKS: [&str; 3] = ["Grey", "Colour-coded", "Simple"];
@@ -59,6 +62,10 @@ struct Viewport {
     /// The decoded render's file, and the video frame it holds, if any.
     decoded: Option<(PathBuf, Option<u32>)>,
     problems: Vec<String>,
+    /// Which render of each camera is in use, and what is out of date.
+    canon: places::Canon,
+    /// Reads of the canon asked for since the last declaration.
+    asks: Vec<AppMessage>,
 }
 
 impl Viewport {
@@ -80,6 +87,8 @@ impl Viewport {
             panel_open: true,
             decoded: None,
             problems: Vec::new(),
+            canon: places::Canon::default(),
+            asks: Vec::new(),
         }
     }
 
@@ -88,7 +97,7 @@ impl Viewport {
     }
 
     fn renders(&self) -> Vec<Render> {
-        self.places.get(self.place).map(Place::renders).unwrap_or_default()
+        self.places.get(self.place).map(|place| place.renders(&self.canon)).unwrap_or_default()
     }
 
     fn shown(&self) -> Option<&places::SceneFile> {
@@ -113,6 +122,36 @@ impl Viewport {
         self.time = 0.0;
         self.playing = false;
         self.decoded = None;
+        self.canon = places::Canon::default();
+        self.ask_canon();
+        let _ = self.write_thumbnails();
+    }
+
+    /// Asks the host for the place's canon: each camera's canon artifact's
+    /// latest iteration, with `pipeline.py sql --read-only`, and what is out
+    /// of date, with `pipeline.py touches`. Both run without asking.
+    fn ask_canon(&mut self) {
+        let artifacts = self.places.get(self.place).map(Place::artifacts).unwrap_or_default();
+        self.asks.clear();
+        let Some(query) = places::Canon::query(&artifacts) else { return };
+        self.asks.push(AppMessage::ReadCanon { id: CANON.into(), query });
+        self.asks.push(AppMessage::ReadTouches { id: TOUCHES.into(), artifact: None });
+    }
+
+    /// The canon arrived: the render chosen stays chosen, wherever its row
+    /// now is, and any new row gets its thumbnail.
+    fn canon_read(&mut self, read: impl FnOnce(&mut places::Canon)) {
+        let chosen = match self.pick {
+            Pick::Render(i) => self.renders().get(i).map(|r| r.file.clone()),
+            _ => None,
+        };
+        read(&mut self.canon);
+        if let Some(file) = chosen {
+            match self.renders().iter().position(|r| r.file == file) {
+                Some(i) => self.pick = Pick::Render(i),
+                None => self.pick = Pick::Free,
+            }
+        }
         let _ = self.write_thumbnails();
     }
 
@@ -161,7 +200,7 @@ impl Viewport {
                     rows.push(row(CAMERA + i as u64, Some(CAMERAS_HEADING), "camera", &camera.name, picked, None, None));
                 }
             }
-            let renders = place.renders();
+            let renders = place.renders(&self.canon);
             if !renders.is_empty() {
                 rows.push(heading(RENDERS_HEADING, "Pre-vis renders"));
             }
@@ -174,7 +213,13 @@ impl Viewport {
                 });
                 let picked = self.pick == Pick::Render(i);
                 let id = RENDER + i as u64;
-                rows.push(row(id, Some(RENDERS_HEADING), "media-image", &render.label, picked, thumbnail, Some(render.date.clone())));
+                let mut line = row(id, Some(RENDERS_HEADING), "media-image", &render.label, picked, thumbnail, Some(render.date.clone()));
+                // The seal marks the render in use, as it marks each asset in
+                // use everywhere.
+                line.mark = render.in_use.then(|| String::from("badge-check"));
+                line.dim = render.dim;
+                line.outlined = render.outlined;
+                rows.push(line);
             }
         }
         rows
@@ -295,7 +340,8 @@ impl Viewport {
             image: file.strip_prefix(project).unwrap_or(file).display().to_string(),
             width,
             height,
-            show: if self.over { ReferenceShow::Over { opacity: self.opacity } } else { ReferenceShow::Beside },
+            // Only the render the shown scene's builder made is laid over it.
+            show: if self.over && render.from_builder { ReferenceShow::Over { opacity: self.opacity } } else { ReferenceShow::Beside },
             caption: Some(View3dCaption { view: "3D view".into(), reference: format!("Pre-vis render · {}", render.date) }),
         }
     }
@@ -336,10 +382,12 @@ impl Viewport {
             View3dLook::Simple => 2,
         };
         let render = matches!(self.pick, Pick::Render(_));
-        let file = match &self.pick {
-            Pick::Render(i) => self.renders().get(*i).map(|r| r.file.rsplit('/').next().unwrap_or(&r.file).to_string()),
+        let chosen = match &self.pick {
+            Pick::Render(i) => self.renders().get(*i).cloned(),
             _ => None,
         };
+        let file = chosen.as_ref().map(|r| r.file.rsplit('/').next().unwrap_or(&r.file).to_string());
+        let over = self.over && chosen.as_ref().is_some_and(|r| r.from_builder);
         Toolbar {
             items: vec![
                 button("rotate-camera-right", "Orbit", self.tool == View3dTool::Orbit, Action::with_arg("tool", json!("orbit"))),
@@ -367,7 +415,7 @@ impl Viewport {
                                 segmented: true,
                                 preview: protocol::ChoicePreview::Label,
                             },
-                            value: PropValue::Index(u8::from(self.over)),
+                            value: PropValue::Index(u8::from(over)),
                         },
                         Row {
                             prop: json!("opacity"),
@@ -442,14 +490,16 @@ impl Viewport {
         }
     }
 
-    /// Everything the tab declares, after any change.
+    /// Everything the tab declares, after any change, and any canon reads
+    /// asked for since.
     fn declare(&mut self) -> Vec<AppMessage> {
-        let mut out = vec![
+        let mut out: Vec<AppMessage> = self.asks.drain(..).collect();
+        out.extend([
             tabs(&self.label()),
             AppMessage::Toolbar(self.toolbar()),
             AppMessage::Menu { rows: self.menu() },
             AppMessage::Properties(self.properties()),
-        ];
+        ]);
         out.extend(self.view());
         out
     }
@@ -587,8 +637,17 @@ fn main() {
                 viewport.read_project(&folder);
                 if open { viewport.declare() } else { Vec::new() }
             }
+            Ok(HostMessage::CanonRows { id, rows, .. }) if id == CANON => {
+                viewport.canon_read(|canon| canon.read_rows(&rows));
+                if open { viewport.declare() } else { Vec::new() }
+            }
+            Ok(HostMessage::TouchesRead { id, touches, .. }) if id == TOUCHES => {
+                viewport.canon_read(|canon| canon.read_touches(&touches));
+                if open { viewport.declare() } else { Vec::new() }
+            }
             Ok(HostMessage::Open { .. }) if !open => {
                 open = true;
+                viewport.ask_canon();
                 let mut replies = declare_tab();
                 replies.extend(viewport.declare());
                 replies

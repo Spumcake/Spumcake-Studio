@@ -212,7 +212,7 @@ pub fn read_vgx(path: &Path) -> Result<Read, String> {
     let line = rest.split(|byte| *byte == b'\n').next().unwrap_or_default();
     let header: Header = serde_json::from_slice(line).map_err(|error| format!("The file is damaged: {error}."))?;
     if header.version > VERSION {
-        return Err("This file was written by a newer Spumcake Studio.".into());
+        return Err("This file was written by a newer Spumcake for Desktop.".into());
     }
     let takes: Vec<(String, Link)> =
         header.takes.into_iter().map(|take| (take.name, Link { path: take.link.path, sha256: take.link.sha256 })).collect();
