@@ -49,6 +49,19 @@ pub(crate) fn service_name(kind: &str) -> String {
     }
 }
 
+/// One setting as the card says it: a finishing's target as the
+/// conventions guide words it, "To 60 fps" and "To 4K", since an upscale
+/// is named 4K and its exact size depends on its source; any other by its
+/// name and value, a number with no more places than it needs.
+fn setting_words(name: &str, value: &Value) -> String {
+    let number = |value: &Value| value.as_f64().map(|number| if number.fract() == 0.0 { format!("{number:.0}") } else { format!("{:.3}", number).trim_end_matches('0').to_string() });
+    match name {
+        "target_fps" => format!("To {} fps", number(value).unwrap_or_else(|| value.to_string())),
+        "upscale_factor" => String::from("To 4K"),
+        _ => format!("{name} {}", value.as_str().map(String::from).or_else(|| number(value)).unwrap_or_else(|| value.to_string())),
+    }
+}
+
 /// A plan's cost as the card says it: the estimate, or "Cost unknown",
 /// never the script's own words for having no price.
 fn cost_words(estimate: &str) -> String {
@@ -124,7 +137,7 @@ fn lines(asking: &Asking, model_name: &dyn Fn(&str) -> String) -> (Vec<Line>, St
                 if let Some(Value::Object(settings)) = endpoint.get("settings")
                     && !settings.is_empty()
                 {
-                    let shown: Vec<String> = settings.iter().map(|(name, value)| format!("{name} {}", value.as_str().map(String::from).unwrap_or_else(|| value.to_string()))).collect();
+                    let shown: Vec<String> = settings.iter().map(|(name, value)| setting_words(name, value)).collect();
                     lines.push(Line::Muted(format!("Settings: {}", shown.join(", "))));
                 }
                 if let Some(scripts) = plan.get("scripts").and_then(Value::as_array)
@@ -360,6 +373,17 @@ mod tests {
 
     /// Catches the card reading a script's own words for having no price,
     /// or a request kind where the user knows a service.
+    /// Catches a finishing's settings shown raw, as "upscale_factor
+    /// 2.857142857142857", rather than as its target.
+    #[test]
+    fn a_finishings_settings_read_as_its_target() {
+        assert_eq!(setting_words("target_fps", &serde_json::json!(60)), "To 60 fps");
+        assert_eq!(setting_words("upscale_factor", &serde_json::json!(2.857142857142857)), "To 4K");
+        assert_eq!(setting_words("seed", &serde_json::json!(1114)), "seed 1114");
+        assert_eq!(setting_words("strength", &serde_json::json!(0.3333333)), "strength 0.333");
+        assert_eq!(setting_words("size", &serde_json::json!("1536x864")), "size 1536x864");
+    }
+
     #[test]
     fn the_card_names_its_cost_and_service_as_the_user_reads_them() {
         assert_eq!(cost_words("unknown: no price for this endpoint"), "Cost unknown");

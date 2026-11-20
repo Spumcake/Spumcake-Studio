@@ -756,7 +756,12 @@ mod tests {
         assert_eq!(listing.brief.len(), walk("brief"));
         let assets = crate::assets::read_assets(&scripts.scripts, project, &[], &crate::prompt_page::living_pipeline(project).unwrap()).unwrap();
         assert_eq!(listing.library.len(), assets.len(), "Library shows each asset once");
-        assert!(listing.library.len() <= walk("library") + walk("prompts/resources"));
+        // Library holds no more than the files where Skills files media,
+        // `sources/` included since the plan's rule of 2026-11-20.
+        fn deep(at: &Path) -> usize {
+            std::fs::read_dir(at).into_iter().flatten().flatten().map(|entry| if entry.path().is_dir() { deep(&entry.path()) } else { usize::from(!entry.file_name().to_string_lossy().starts_with('.')) }).sum()
+        }
+        assert!(listing.library.len() <= ["library", "prompts/resources", "sources"].iter().map(|sub| deep(&project.join(sub))).sum::<usize>());
         assert!(listing.library.iter().any(|tile| tile.cell.is_some()), "an asset in a recipe names its cell");
         // The animatic, canon in prompts/resources/, is one of Library's
         // tiles, so it plays from there as the film plays from Output.
