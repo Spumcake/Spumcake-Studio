@@ -278,6 +278,47 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Catches Library leaving out a file Last order's reports or records
+    /// name, or showing one nothing records, as the plan's rule of
+    /// 2026-11-20 and the port's inventory count them: 615 assets, and 4
+    /// stray files nothing records. It only reads: set `LAST_ORDER` and
+    /// `SPUMCAKE_SKILLS_SCRIPTS`.
+    #[test]
+    fn last_orders_assets_are_every_file_its_records_name() {
+        let (Some(project), Some(scripts)) = (std::env::var_os("LAST_ORDER"), std::env::var_os("SPUMCAKE_SKILLS_SCRIPTS")) else { return };
+        let (project, scripts) = (std::path::PathBuf::from(project), std::path::PathBuf::from(scripts));
+        let pipeline = crate::prompt_page::living_pipeline(&project).unwrap();
+        let found = read_assets(&scripts, &project, &[], &pipeline).unwrap();
+        let covered: HashSet<String> = found.iter().flat_map(|asset| asset.files().cloned().collect::<Vec<_>>()).collect();
+        assert_eq!(covered.len(), 615, "Library covers {} files, where the port's inventory counts 615", covered.len());
+        fn walk(at: &Path, root: &Path, into: &mut Vec<String>) {
+            for entry in std::fs::read_dir(at).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, into);
+                } else {
+                    into.push(path.strip_prefix(root).unwrap().display().to_string());
+                }
+            }
+        }
+        let mut held_files = Vec::new();
+        for folder in ["library", "prompts/resources", "sources"] {
+            walk(&project.join(folder), &project, &mut held_files);
+        }
+        let mut stray: Vec<String> = held_files.into_iter().filter(|file| is_reference(file) && !covered.contains(file)).collect();
+        stray.sort();
+        assert_eq!(
+            stray,
+            [
+                "prompts/resources/2026-11-12_21-22-last-order-animatic-4.mp4",
+                "prompts/resources/2026-11-14_19-13-previs-far-end-door-swing.mp4",
+                "prompts/resources/2026-11-14_21-07-soundtrack-door-cue.wav",
+                "prompts/resources/2026-11-14_21-16-final-shot-mixed-1.wav",
+            ],
+            "Library's strays are not the port's inventory's"
+        );
+    }
+
     /// Catches an edit or a fix shown as an asset of its own rather than an
     /// iteration, another take put in use counted as an iteration, a take
     /// in use not marked so, an outline on an asset not in use, and a
