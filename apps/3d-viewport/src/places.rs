@@ -1,8 +1,12 @@
 //! A project's places, read from their scene files, and what the camera list
 //! shows for one: Free, the newest scene's cameras, and every published
 //! pre-vis render across the place's scene files, each with its date, as the
-//! approved camera list (vp-camera-list) shows.
+//! approved camera list (vp-camera-list) shows. Which render is in use is
+//! the project's canon's: each camera's canon artifact's latest iteration,
+//! as the scene contract has it since the owner's data model of 2026-11-18.
 
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Where a project keeps its scene files, and every other resource.
@@ -39,9 +43,18 @@ impl Place {
         self.scenes.len().saturating_sub(1)
     }
 
+    /// The canon artifacts the place's cameras were published as, each once.
+    pub fn artifacts(&self) -> Vec<String> {
+        let found: BTreeSet<String> =
+            self.scenes.iter().flat_map(|file| file.scene.cameras.iter().filter_map(|camera| camera.canon.clone())).collect();
+        found.into_iter().collect()
+    }
+
     /// Every published render across the place's scene files, each from the
-    /// scene whose own builder made it, in date order.
-    pub fn renders(&self) -> Vec<Render> {
+    /// scene whose own builder made it, and each camera's latest iteration
+    /// that no builder made, in date order; each marked in use when it is its
+    /// artifact's latest iteration, and outlined when that is out of date.
+    pub fn renders(&self, canon: &Canon) -> Vec<Render> {
         let mut renders: Vec<Render> = self
             .scenes
             .iter()
@@ -49,19 +62,32 @@ impl Place {
             .flat_map(|(index, file)| {
                 file.scene.cameras.iter().enumerate().filter_map(move |(order, camera)| {
                     let reference = camera.reference_file.clone()?;
-                    let name = reference.rsplit('/').next().unwrap_or(&reference).to_string();
-                    Some(Render {
-                        scene: index,
-                        order,
-                        camera: camera.name.clone(),
-                        label: render_label(&camera.name, &name),
-                        date: date_of(&name),
-                        video: is_video(&name),
-                        file: reference,
-                    })
+                    Some(Render::of(index, order, camera, reference, true))
                 })
             })
             .collect();
+        // A newer iteration of a camera's render, such as one made in a
+        // workspace, was made by no scene here: it is listed with the newest
+        // scene that has its camera, and is never laid over it.
+        for artifact in self.artifacts() {
+            let Some(latest) = canon.latest.get(&artifact) else { continue };
+            if renders.iter().any(|r| r.file == *latest) {
+                continue;
+            }
+            let newest = self.scenes.iter().enumerate().rev().find_map(|(index, file)| {
+                let order = file.scene.cameras.iter().position(|c| c.canon.as_deref() == Some(artifact.as_str()))?;
+                Some((index, order, &file.scene.cameras[order]))
+            });
+            if let Some((index, order, camera)) = newest {
+                renders.push(Render::of(index, order, camera, latest.clone(), false));
+            }
+        }
+        for render in &mut renders {
+            let artifact = render.canon.as_deref().unwrap_or_default();
+            render.in_use = render.canon.is_some() && canon.latest.get(artifact) == Some(&render.file);
+            render.outlined = render.in_use && canon.out_of_date.contains(artifact);
+            render.dim = !render.in_use && canon.latest.contains_key(artifact);
+        }
         // By the time in each file's name, then in the builder's own camera
         // order, as the approved list has them.
         let made = |r: &Render| r.file.rsplit('/').next().and_then(|n| n.get(..16)).unwrap_or_default().to_string();
@@ -86,6 +112,82 @@ pub struct Render {
     pub video: bool,
     /// Its path in the project.
     pub file: String,
+    /// The canon artifact its camera was published as, if any.
+    pub canon: Option<String>,
+    /// Made by the builder of the scene it is listed with, so it may be laid
+    /// over that scene; a later iteration is only ever shown beside it.
+    pub from_builder: bool,
+    /// Its artifact's latest iteration, the render in use.
+    pub in_use: bool,
+    /// In use, and out of date, as `pipeline.py touches` says.
+    pub outlined: bool,
+    /// An earlier iteration of an artifact whose latest is known: an asset
+    /// not in use, drawn dimmer.
+    pub dim: bool,
+}
+
+impl Render {
+    fn of(scene: usize, order: usize, camera: &scene::Camera, file: String, from_builder: bool) -> Self {
+        let name = file.rsplit('/').next().unwrap_or(&file).to_string();
+        Self {
+            scene,
+            order,
+            camera: camera.name.clone(),
+            label: render_label(&camera.name, &name),
+            date: date_of(&name),
+            video: is_video(&name),
+            file,
+            canon: camera.canon.clone(),
+            from_builder,
+            in_use: false,
+            outlined: false,
+            dim: false,
+        }
+    }
+}
+
+/// What the project's canon says of the place's renders, read with
+/// `pipeline.py sql --read-only` and `pipeline.py touches --json`: each
+/// artifact's latest iteration, and which artifacts are out of date. Empty
+/// while unread, or where the project has no pipeline, so nothing is marked.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Canon {
+    /// Each artifact's latest iteration: its file in the project.
+    pub latest: BTreeMap<String, String>,
+    pub out_of_date: BTreeSet<String>,
+}
+
+impl Canon {
+    /// The query that reads each artifact's latest iteration, one
+    /// `[id, file]` line each, or none when there are no artifacts.
+    pub fn query(artifacts: &[String]) -> Option<String> {
+        if artifacts.is_empty() {
+            return None;
+        }
+        let list: Vec<String> = artifacts.iter().map(|a| format!("'{}'", a.replace('\'', "''"))).collect();
+        Some(format!("SELECT json_array(id, file) FROM artifact WHERE id IN ({})", list.join(", ")))
+    }
+
+    /// The rows the query printed.
+    pub fn read_rows(&mut self, rows: &[Value]) {
+        self.latest = rows
+            .iter()
+            .filter_map(|row| {
+                let pair = row.as_array()?;
+                Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()))
+            })
+            .filter(|(_, file)| !file.is_empty())
+            .collect();
+    }
+
+    /// `pipeline.py touches --json`'s answer: what is out of date now.
+    pub fn read_touches(&mut self, touches: &Value) {
+        self.out_of_date = touches
+            .get("out_of_date")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(|entry| entry.get("artifact")?.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+    }
 }
 
 /// Finds every place in a project from its scene files,
@@ -266,6 +368,88 @@ mod tests {
         assert_eq!(Place { key: "diner".into(), scenes: Vec::new() }.name(), "Diner");
     }
 
+    fn camera(name: &str, canon: &str, reference: Option<&str>) -> scene::Camera {
+        scene::Camera {
+            name: name.into(),
+            position: [0.0; 3],
+            target: [1.0, 0.0, 0.0],
+            hfov: 60.0,
+            image_size: [1664, 928],
+            canon: Some(canon.into()),
+            reference_file: reference.map(str::to_string),
+            reference_look: None,
+        }
+    }
+
+    fn scene_with(builder: &str, cameras: Vec<scene::Camera>) -> scene::Scene {
+        let edges = scene::Edges { grey: 0, coded: 0, simple: None };
+        let shading = scene::Shading { ambient: 0.5, diffuse: 0.5, light: [0.0, 0.0, 1.0] };
+        scene::Scene {
+            builder: builder.into(),
+            builder_sha256: String::new(),
+            image_size: [1664, 928],
+            door_note: None,
+            looks: scene::Looks { grey: BTreeMap::new(), coded: BTreeMap::new(), shading, edges, background: None, simple: None },
+            objects: Vec::new(),
+            cameras,
+            swing: None,
+        }
+    }
+
+    /// A camera rendered by two builders, and a third iteration made after
+    /// both, as a workspace's Save makes one.
+    fn wall() -> Place {
+        const ARTIFACT: &str = "the diner: pre-vis far-end-wall";
+        let old = scene_with("git:4195103:a.py", vec![camera("far-end-wall", ARTIFACT, Some("prompts/resources/2026-11-10_05-21-previs-far-end-wall-grey.png"))]);
+        let new = scene_with("prompts/resources/b.py", vec![camera("far-end-wall", ARTIFACT, Some("prompts/resources/2026-11-11_17-20-previs-far-end-wall-grey.png"))]);
+        Place {
+            key: "diner".into(),
+            scenes: vec![SceneFile { path: "a.glb".into(), scene: old }, SceneFile { path: "b.glb".into(), scene: new }],
+        }
+    }
+
+    #[test]
+    fn the_render_in_use_is_its_artifacts_latest_iteration() {
+        let place = wall();
+        assert_eq!(place.artifacts(), vec![String::from("the diner: pre-vis far-end-wall")]);
+        let marks = |canon: &Canon| -> Vec<(String, bool, bool, bool, bool)> {
+            place.renders(canon).into_iter().map(|r| (r.date, r.from_builder, r.in_use, r.dim, r.outlined)).collect()
+        };
+        // Unread, nothing is marked or dimmed.
+        assert_eq!(marks(&Canon::default()), vec![("10 Nov".into(), true, false, false, false), ("11 Nov".into(), true, false, false, false)]);
+
+        // The latest iteration is the 11 Nov render, out of date: in use and
+        // outlined, the earlier one dimmer.
+        let mut canon = Canon::default();
+        canon.read_rows(&[serde_json::json!(["the diner: pre-vis far-end-wall", "prompts/resources/2026-11-11_17-20-previs-far-end-wall-grey.png"])]);
+        canon.read_touches(&serde_json::json!({ "out_of_date": [{ "artifact": "the diner: pre-vis far-end-wall", "why": "its inputs changed" }], "unverified": [] }));
+        assert_eq!(marks(&canon), vec![("10 Nov".into(), true, false, true, false), ("11 Nov".into(), true, true, false, true)]);
+
+        // A later iteration no builder made is listed last, in use, with the
+        // newest scene that has its camera, and is never laid over it.
+        canon.read_rows(&[serde_json::json!(["the diner: pre-vis far-end-wall", "library/2026-11-19_10-00-far-end-wall-iteration.png"])]);
+        canon.read_touches(&serde_json::json!({ "out_of_date": [] }));
+        let renders = place.renders(&canon);
+        assert_eq!(renders.len(), 3);
+        let latest = &renders[2];
+        assert_eq!((latest.date.as_str(), latest.from_builder, latest.in_use, latest.dim, latest.outlined), ("19 Nov", false, true, false, false));
+        assert_eq!((latest.scene, latest.camera.as_str()), (1, "far-end-wall"));
+        assert!(renders[..2].iter().all(|r| r.dim && !r.in_use));
+    }
+
+    #[test]
+    fn the_canon_query_names_each_artifact_once() {
+        assert_eq!(Canon::query(&[]), None);
+        assert_eq!(
+            Canon::query(&["the diner: pre-vis far-end-wall".into(), "Rosa's bar".into()]).unwrap(),
+            "SELECT json_array(id, file) FROM artifact WHERE id IN ('the diner: pre-vis far-end-wall', 'Rosa''s bar')"
+        );
+        // A line that is not an [id, file] pair, or names no file, is left out.
+        let mut canon = Canon::default();
+        canon.read_rows(&[serde_json::json!("a | b"), serde_json::json!(["x", ""]), serde_json::json!(["y", "library/y.png"])]);
+        assert_eq!(canon.latest.into_iter().collect::<Vec<_>>(), vec![(String::from("y"), String::from("library/y.png"))]);
+    }
+
     /// Last order's diner, where Last order is on disk: set `LAST_ORDER` to
     /// its folder. Without it, the test says so and checks nothing.
     #[test]
@@ -293,7 +477,7 @@ mod tests {
         assert!(newest.builder.ends_with("2026-11-14_19-56-build-previs.py"), "{}", newest.builder);
         assert_eq!(newest.cameras.len(), 7);
         assert!(diner.scenes[0].scene.builder.starts_with("git:4195103"));
-        let rows: Vec<(String, String)> = diner.renders().into_iter().map(|r| (r.label, r.date)).collect();
+        let rows: Vec<(String, String)> = diner.renders(&Canon::default()).into_iter().map(|r| (r.label, r.date)).collect();
         let expected = [
             ("location", "10 Nov"),
             ("back-wall", "10 Nov"),
