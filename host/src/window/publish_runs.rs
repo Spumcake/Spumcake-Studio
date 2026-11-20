@@ -749,9 +749,12 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
     // has it; one already in use stays as it is. A file filed for a cell
     // that has just joined a recipe, with a record of what it was made
     // from, is a new asset of its own.
+    // An asset outside any cell that no request made, such as a mix or a
+    // reference a report sent, is not a take of this cell: it goes into use
+    // here only when it was filed for this very step.
     let asset = match asset_at(assets_of(place)?, path) {
-        Ok(asset) => asset,
-        Err(error) => filed_for_step(place, &canon, &step, &artifact, path).ok_or(error)?,
+        Ok(asset) if asset.cell.is_some() || asset.in_use || request_of(place, &asset.first).is_some() => asset,
+        Ok(_) | Err(_) => filed_for_step(place, &canon, &step, &artifact, path).ok_or_else(|| String::from(NO_ASSET))?,
     };
     if let Some(in_use) = asset.artifact.clone().filter(|_| asset.in_use) {
         return Ok(in_use);

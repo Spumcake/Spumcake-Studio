@@ -107,21 +107,27 @@ fn iterations_of(folder: &Path) -> HashMap<String, Vec<(String, String, bool)>> 
 pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset> {
     let next = iterations_of(folder);
     let iterated: HashSet<&str> = next.values().flatten().map(|(_, file, _)| file.as_str()).collect();
-    // Each take, with the step its report names.
+    // Each take, with the step its report names; and every file a report
+    // names as a reference it sent, an asset too, outside any cell. Research
+    // files its reports beside its sources.
     let mut takes: Vec<(String, String, Option<(String, String)>)> = Vec::new();
-    for entry in std::fs::read_dir(folder.join("requests")).into_iter().flatten().flatten() {
-        if entry.path().extension().and_then(|extension| extension.to_str()) != Some("html") {
-            continue;
-        }
-        let Some(record) = std::fs::read_to_string(entry.path()).ok().as_deref().and_then(crate::skills_setup::record_of) else { continue };
-        let text = |key: &str| record.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()).map(String::from);
-        let step = text("chain").zip(text("step"));
-        for output in record.get("outputs").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-            // A file an asset's own iteration is never an asset of its own,
-            // and a written document is no reference asset.
-            if !iterated.contains(output) && is_reference(output) {
-                takes.push((text("started").unwrap_or_default(), output.to_string(), step.clone()));
+    let mut named: HashSet<String> = HashSet::new();
+    for reports in ["requests", "sources"] {
+        for entry in std::fs::read_dir(folder.join(reports)).into_iter().flatten().flatten() {
+            if entry.path().extension().and_then(|extension| extension.to_str()) != Some("html") {
+                continue;
             }
+            let Some(record) = std::fs::read_to_string(entry.path()).ok().as_deref().and_then(crate::skills_setup::record_of) else { continue };
+            let text = |key: &str| record.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()).map(String::from);
+            let step = text("chain").zip(text("step"));
+            for output in files_named(record.get("outputs").unwrap_or(&Value::Null)) {
+                // A file an asset's own iteration is never an asset of its
+                // own, and a written document is no reference asset.
+                if !iterated.contains(output.as_str()) && is_reference(&output) {
+                    takes.push((text("started").unwrap_or_default(), output, step.clone()));
+                }
+            }
+            named.extend(files_named(record.get("references").unwrap_or(&Value::Null)));
         }
     }
     // A script step's take, such as a pre-vis render, is filed with a
@@ -163,21 +169,19 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             takes.push((String::new(), file.clone(), None));
         }
     }
-    // And so is a file filed with nothing it was made from, an import or an
-    // export, that no report or step made and canon does not name: an asset
-    // outside any cell. A file filed from others, such as a mix of its shot,
-    // is that one's finishing, and a file nothing records stays out.
-    let records = std::fs::read_to_string(folder.join("prompts/resources/records.jsonl")).unwrap_or_default();
-    let mut filed: Vec<String> = records
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|record| record.get("inputs").and_then(Value::as_array).is_none_or(Vec::is_empty))
-        .filter_map(|record| record.get("file").and_then(Value::as_str).map(String::from))
-        .filter(|file| is_reference(file) && !iterated.contains(file.as_str()) && !ran.contains(file))
-        .collect();
-    filed.sort();
-    filed.dedup();
-    for file in filed {
+    // And so is every other file the project's records name, a filed
+    // resource, what one was made from, or a reference a report sent, as
+    // the plan has it since 2026-11-20: outside any cell. Only a file the
+    // project holds counts, and a file nothing records stays out.
+    let _ = &ran;
+    for records in records_files(folder) {
+        for line in std::fs::read_to_string(&records).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
+            named.extend(files_named(&line));
+        }
+    }
+    let mut others: Vec<String> = named.into_iter().filter(|file| is_reference(file) && !iterated.contains(file.as_str()) && held(folder, file)).collect();
+    others.sort();
+    for file in others {
         if seen.insert(file.clone()) {
             takes.push((String::new(), file, None));
         }
@@ -212,6 +216,45 @@ pub(crate) fn assets(folder: &Path, canon: &Canon, touches: &Value) -> Vec<Asset
             asset
         })
         .collect()
+}
+
+/// Every file a record names, at any depth: a path ending in a known
+/// image, video, or sound extension.
+fn files_named(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) if is_reference(text) => vec![text.clone()],
+        Value::Array(values) => values.iter().flat_map(files_named).collect(),
+        Value::Object(fields) => fields.values().flat_map(files_named).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every `records.jsonl` in the project, outside Studio's and the agent's
+/// own folders and its working files.
+fn records_files(folder: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut waiting = vec![folder.to_path_buf()];
+    while let Some(at) = waiting.pop() {
+        for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if !(at == folder && ["agent", ".git", "work", ".spumcake", "target"].contains(&name.as_str())) {
+                    waiting.push(path);
+                }
+            } else if name == "records.jsonl" {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Whether the project holds a file where Skills files media: in
+/// `library/`, `prompts/resources/`, or `sources/`.
+fn held(folder: &Path, file: &str) -> bool {
+    ["library/", "prompts/resources/", "sources/"].iter().any(|place| file.starts_with(place)) && folder.join(file).is_file()
 }
 
 /// Whether a file is a reference asset's: an image, a video, or a sound.
@@ -286,6 +329,9 @@ mod tests {
         std::fs::write(folder.join("pipeline/002/runs.jsonl"), log).unwrap();
         std::fs::write(folder.join("prompts/resources/records.jsonl"), records).unwrap();
         std::fs::write(folder.join("prompts/resources/stray.png"), b"stray").unwrap();
+        for held in ["prompts/resources/animatic-export-1.mp4", "prompts/resources/shot-mixed.mp4"] {
+            std::fs::write(folder.join(held), b"held").unwrap();
+        }
         let mut canon = Canon::default();
         for (step, artifact, order) in [("keyframe, the bell", "Last order: keyframe, the bell", 3), ("keyframe, the bell (2)", "Last order: keyframe, the bell (2)", 3), ("pre-vis, the bell", "Last order: pre-vis, the bell", 2)] {
             let key = (String::from("the animatic"), step.to_string());
@@ -297,7 +343,7 @@ mod tests {
         let touches = json!({ "out_of_date": [{ "artifact": "Last order: keyframe, the bell", "why": ["x"] }, { "artifact": "Last order: keyframe, the bell (2)", "why": ["x"] }], "unverified": [] });
         let found = assets(&folder, &canon, &touches);
         let firsts: Vec<&str> = found.iter().map(|asset| asset.first.as_str()).collect();
-        assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/previs-render.png", "prompts/resources/layout.png", "prompts/resources/animatic-export-1.mp4"], "an iteration became an asset, a document, a stray file, or a mix was taken for one, or a filed export or a script step's take was left out");
+        assert_eq!(firsts, ["library/bell.png", "library/bell-alt.png", "prompts/resources/previs-render.png", "prompts/resources/layout.png", "prompts/resources/animatic-export-1.mp4", "prompts/resources/shot-mixed.mp4"], "an iteration became an asset, a document or a stray file was taken for one, or a filed file, a script step's take, or a mix was left out");
         assert_eq!(found[2].cell, Some((String::from("the animatic"), 2)), "a script step's take was left outside its step's cell");
         let bell = &found[0];
         let files: Vec<&str> = bell.iterations.iter().map(|iteration| iteration.file.as_str()).collect();
@@ -312,6 +358,7 @@ mod tests {
         assert_eq!(alternative.cell, Some((String::from("the animatic"), 3)), "the second asset lost its cell");
         assert!(found[3].in_use && found[3].cell.is_none(), "a published resource no step makes was given a cell");
         assert!(!found[4].in_use && found[4].cell.is_none(), "a filed export was put in a cell, or in use");
+        assert!(found[5].cell.is_none(), "a mix filed from a take was put in a cell");
         let _ = std::fs::remove_dir_all(&folder);
     }
 }
