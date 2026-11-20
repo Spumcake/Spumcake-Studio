@@ -282,8 +282,11 @@ fn record_inputs(place: &Place, file: &str) -> Option<Vec<String>> {
 fn check_delivery(place: &Place, delivery: &Delivery) -> Result<(), String> {
     let inputs = record_inputs(place, &delivery.file).ok_or_else(|| String::from(NO_MIX_RECORD))?;
     let canon = crate::prompt_page::read_canon(&place.scripts, &place.folder, &place.vars, &place.pipeline)?;
-    if inputs.iter().any(|input| !canon.published.contains(input)) {
-        return Err(String::from(NOT_CANON));
+    // A finishing of the shot is published by the delivery itself, as the
+    // shot's finishing, so it need not be published yet.
+    let finishing: Vec<String> = finishing_of(place, &delivery.artifact, &delivery.file).into_iter().map(|(take, _, _)| take).collect();
+    if inputs.iter().any(|input| !canon.published.contains(input) && !finishing.contains(input)) {
+        return Err(String::from(MIXED_FROM_UNUSED));
     }
     Ok(())
 }
@@ -748,8 +751,7 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
     // from, is a new asset of its own.
     let asset = match asset_at(assets_of(place)?, path) {
         Ok(asset) => asset,
-        Err(_) if place.script("request.py", &["show", path]).is_ok() => crate::assets::Asset { first: path.to_string(), ..Default::default() },
-        Err(error) => return Err(error),
+        Err(error) => filed_for_step(place, &canon, &step, &artifact, path).ok_or(error)?,
     };
     if let Some(in_use) = asset.artifact.clone().filter(|_| asset.in_use) {
         return Ok(in_use);
@@ -783,6 +785,30 @@ fn use_take(place: &Place, app: usize, tab: &str, cell_step: Option<protocol::St
     let made = record.or_else(|| request_of(place, &asset.first).and_then(|request| place.script("request.py", &["show", &request]).ok()).and_then(|shown| serde_json::from_str::<Value>(&shown).ok()));
     step_as_made(place, &canon, &step, &name, order, &alternative, made.as_ref())?;
     Ok(alternative)
+}
+
+/// A file filed for a step that has nothing in use yet, as a conversation
+/// cell's image is when the cell joins a recipe: its record names this very
+/// file, it iterates nothing, and it was made only from what the step refers
+/// to; a new asset of its own. A mix, a hold, or another asset's iteration
+/// is none of these.
+fn filed_for_step(place: &Place, canon: &crate::prompt_page::Canon, step: &protocol::StepRef, artifact: &str, path: &str) -> Option<crate::assets::Asset> {
+    if canon.files.get(artifact).is_some_and(|file| canon.published.contains(file)) {
+        return None;
+    }
+    let shown: Value = serde_json::from_str(&place.script("request.py", &["show", path]).ok()?).ok()?;
+    let lines = match shown {
+        Value::Array(lines) => lines,
+        line => vec![line],
+    };
+    let record = lines.iter().rev().find(|line| line.get("file").and_then(Value::as_str) == Some(path))?;
+    if record.get("iterates").is_some_and(|iterates| !iterates.is_null()) {
+        return None;
+    }
+    let refs: Vec<Value> = place.rows(&format!("SELECT refs FROM step WHERE chain={} AND name={}", quoted(&step.chain), quoted(&step.step))).ok()?.into_iter().next().and_then(|row| row.into_iter().next()).and_then(|refs| serde_json::from_str(&refs).ok()).unwrap_or_default();
+    let referred: Vec<String> = refs.iter().filter_map(|reference| reference.get("file").and_then(Value::as_str).map(String::from).or_else(|| canon.files.get(reference.get("artifact")?.as_str()?).cloned())).collect();
+    let inputs: Vec<&str> = record.get("inputs").and_then(Value::as_array).into_iter().flatten().filter_map(|input| input.get("file").and_then(Value::as_str)).collect();
+    inputs.iter().all(|input| referred.iter().any(|known| known == input)).then(|| crate::assets::Asset { first: path.to_string(), ..Default::default() })
 }
 
 /// What Skills says when a take's step was edited after the take was made.
@@ -835,7 +861,7 @@ fn step_as_made(place: &Place, canon: &crate::prompt_page::Canon, step: &protoco
 /// sentences as it is, Skills' known refusals as sentences, and anything
 /// else as `otherwise`, never the script's own words.
 fn plain_refusal(error: &str, otherwise: &str) -> String {
-    let own = [IN_NO_RECIPE, NO_ARTIFACT, NO_ASSET, NOT_CANON, NO_MIX_RECORD, "This project has no pipeline yet."];
+    let own = [IN_NO_RECIPE, NO_ARTIFACT, NO_ASSET, MIXED_FROM_UNUSED, NO_MIX_RECORD, "This project has no pipeline yet."];
     if own.contains(&error) {
         return error.to_string();
     }
@@ -857,6 +883,8 @@ const NOT_USED: &str = "The take could not be put in use.";
 const NOT_SAVED: &str = "The iteration could not be saved.";
 const NOT_IGNORED: &str = "The take's outline could not be cleared.";
 const NOT_DELIVERED: &str = "The film could not be delivered.";
+/// A mix made from something neither in use nor a finishing of its shot.
+const MIXED_FROM_UNUSED: &str = "This film was mixed from something not in use, so it can't be delivered.";
 const NO_MIX_RECORD: &str = "This film has no record of what it was mixed from, so it cannot be delivered.";
 
 /// Whether a Save on the asset at `path` waits on the warning: the asset is
@@ -1324,7 +1352,7 @@ mod tests {
         skills("pipeline.py", &["publish", "001", "the line: take", "--file", &take2, "--chain", "the line"]);
         std::fs::write(folder.join("agent/old-mix.wav"), b"RIFF old mix").unwrap();
         let old_mix = last(skills("request.py", &["resource", "agent/old-mix.wav", "--name", "old-mix", "--from", &take]));
-        assert_eq!(check_delivery(&place, &delivery(&old_mix)), Err(String::from(NOT_CANON)));
+        assert_eq!(check_delivery(&place, &delivery(&old_mix)), Err(String::from(MIXED_FROM_UNUSED)));
         let _ = std::fs::remove_dir_all(&folder);
     }
 
@@ -1382,6 +1410,7 @@ mod tests {
         let mix = last(skills("request.py", &["resource", "agent/mix.mp4", "--name", "mix", "--from", &retimed]));
         let place = Place { folder: folder.clone(), scripts: scripts.clone(), vars: Vec::new(), pipeline: String::from("001") };
         let delivery = Delivery { app: 0, tab: String::from("1"), artifact: String::from("the line: take"), file: mix.clone(), uses: String::from("Take 1 · 60 fps"), size: String::from("1280 × 720"), frame_rate: String::from("60 fps"), format: String::from("H.264 with AAC sound") };
+        check_delivery(&place, &delivery).unwrap_or_else(|error| panic!("the card for a mix of a retimed take was refused: {error}"));
         let output = deliver(&place, &delivery).unwrap_or_else(|error| panic!("a mix of a retimed take was refused: {error}"));
         assert!(output.starts_with("output/"), "{output}");
         let canon = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap();
@@ -1633,6 +1662,12 @@ mod tests {
         let layout_now = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap().files["the diner: layout"].clone();
         let keeper = skills("request.py", &["resource", "work/keeper.png", "--name", "keeper", "--from", &layout_now]).lines().last().unwrap().trim().to_string();
         let keeper_step = protocol::StepRef { chain: String::from("the diner"), step: String::from("keeper") };
+        // A file made from something the step does not refer to, such as a
+        // mix of another take, is not taken for the cell's image.
+        let first_now = crate::prompt_page::read_canon(&scripts, &folder, &[], "001").unwrap().files["the diner: keyframe"].clone();
+        std::fs::write(folder.join("work/keyframe-mix.png"), b"\x89PNG\r\n\x1a\nmix").unwrap();
+        let mix = skills("request.py", &["resource", "work/keyframe-mix.png", "--name", "keyframe-mix", "--from", &first_now]).lines().last().unwrap().trim().to_string();
+        assert_eq!(use_take(&place, 0, "1", Some(keeper_step.clone()), &mix), Err(String::from(NO_ASSET)), "a mix was put in use as a cell's image");
         assert_eq!(use_take(&place, 0, "1", Some(keeper_step), &keeper), Ok(String::from("the diner: Untitled Image")), "a conversation cell's filed image was not put in use for its new step");
         // Ignore clears the first keyframe's outline, and not the second's.
         ignore_take(&place, &first).unwrap();
