@@ -315,7 +315,7 @@ fn host_target(settings: &Settings, project: Option<&Path>, listed: &crate::endp
     tool_groups.extend(your_skills(settings));
     Target {
         app: HOST_ID.into(),
-        name: "Spumcake Studio".into(),
+        name: "Spumcake for Desktop".into(),
         tabs: Vec::new(),
         tool_groups,
         tabless: true,

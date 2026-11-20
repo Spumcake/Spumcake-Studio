@@ -292,7 +292,7 @@ fn logo_button(ui: &mut egui::Ui, center: Pos2, chat: &mut Chat, events: &mut Ve
         );
     }
     widgets::chevron(ui.painter(), chevron, MUTED, widgets::Scale(1.15));
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Spumcake Studio"));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Spumcake for Desktop"));
 
     let waits = !chat.working;
     egui::Popup::menu(&response).show(|ui| {
@@ -1044,12 +1044,12 @@ fn tool_line(ui: &mut egui::Ui, entry: &Entry, width: f32) {
 /// A tool's key, `<application>__<skill>__<tool>`, as words: the tool in
 /// lowercase and the application by name. An application's id is its name
 /// in lowercase with hyphens, as the conventions guide sets, so each word
-/// takes its capital back; the host's own tools are Spumcake Studio's.
+/// takes its capital back; the host's own tools are Spumcake for Desktop's.
 fn step_words(key: &str) -> String {
     let mut parts = key.split("__");
     let id = parts.next().unwrap_or(key);
     let app = if id == crate::route::HOST_ID {
-        String::from("Spumcake Studio")
+        String::from("Spumcake for Desktop")
     } else {
         id.split('-')
             .map(|word| {
@@ -1274,7 +1274,7 @@ mod tests {
     #[test]
     fn a_step_names_its_workspace_as_people_read_it() {
         assert_eq!(step_words("lantern-room__light__add_beam"), "add beam · Lantern Room");
-        assert_eq!(step_words(&format!("{}__prompt__edit_image", crate::route::HOST_ID)), "edit image · Spumcake Studio");
+        assert_eq!(step_words(&format!("{}__prompt__edit_image", crate::route::HOST_ID)), "edit image · Spumcake for Desktop");
     }
 
     /// Catches a turn split or merged wrongly: everything the assistant did

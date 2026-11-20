@@ -1,6 +1,6 @@
-# AGENTS.md — Spumcake Studio
+# AGENTS.md — Spumcake for Desktop
 
-Spumcake Studio is the open-source production software of Spumcake, an AI-native entertainment and technology company: a Codex for creatives, the computer graphics (CG) authoring application behind the Spumcake platform. Its earlier name was Inpainter, which the program, its app ID, the keyring entry, and the data folders still use until a version moves them; what a person reads on screen says Spumcake Studio. One host program draws a shared shell, and each kind of work is a separate sub-application that the host starts and draws through one protocol. This repository holds the code, and what Studio is lives in `docs/overview.md`. Spumcake's mission, which says how Studio fits with Spumcake's productions, community platform, and streaming platform, and Studio's version documents live in the team repository, https://github.com/Spumcake/spumcake-team.
+Spumcake for Desktop is the open-source production software of Spumcake, an AI-native entertainment and technology company: a Codex for creatives, the computer graphics (CG) authoring application behind the Spumcake platform. Its earlier name was Inpainter, which the program, its app ID, the keyring entry, and the data folders still use until a version moves them; what a person reads on screen says Spumcake for Desktop. One host program draws a shared shell, and each kind of work is a separate sub-application that the host starts and draws through one protocol. This repository holds the code, and what Studio is lives in `docs/overview.md`. Spumcake's mission, which says how Studio fits with Spumcake's productions, community platform, and streaming platform, and Studio's version documents live in the team repository, https://github.com/Spumcake/spumcake-team.
 
 The stack is Rust, egui through eframe, and Iconoir icons.
 
@@ -53,9 +53,9 @@ These hold for every agent building Studio, in every session, as the owner set o
 
 Developer skills for working on this code are in `skills/`, one folder each with a `SKILL.md`. Read the one that matches the task before starting.
 
-- `skills/scaffolding/` — when a task creates a new sub-application, or brings an existing program into Spumcake Studio as one.
+- `skills/scaffolding/` — when a task creates a new sub-application, or brings an existing program into Spumcake for Desktop as one.
 
-These are for agents developing Spumcake Studio. They are not the tool groups a sub-application declares to Studio's assistant through the protocol, nor the agent skills Studio's assistant loads.
+These are for agents developing Spumcake for Desktop. They are not the tool groups a sub-application declares to Studio's assistant through the protocol, nor the agent skills Studio's assistant loads.
 
 ## Commands
 
