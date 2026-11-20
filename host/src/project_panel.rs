@@ -225,8 +225,8 @@ pub(crate) fn read(project: &Path, scripts: Option<&Scripts>, known: &Mutex<Hash
     let mut requests = Vec::new();
     {
         let mut known = known.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        for name in names("requests").into_iter().filter(|name| name.ends_with(".html")) {
-            let path = format!("requests/{name}");
+        // Every report Skills lists: requests, and research in `sources/`.
+        for path in crate::report::pages(project) {
             let changed = std::fs::metadata(project.join(&path)).and_then(|meta| meta.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
             match known.get(&path) {
                 Some((at, row)) if *at == changed => requests.push(row.clone()),
@@ -240,7 +240,8 @@ pub(crate) fn read(project: &Path, scripts: Option<&Scripts>, known: &Mutex<Hash
             }
         }
     }
-    requests.reverse();
+    // Newest first across both folders, by the time each id starts with.
+    requests.sort_by(|a, b| b.id.cmp(&a.id));
     let output = names("output").into_iter().map(|name| {
         let path = format!("output/{name}");
         let length = if Kind::of(&name) == Some(Kind::Video) { mp4_seconds(&project.join(&path)) } else { None };
@@ -756,18 +757,36 @@ mod tests {
         assert_eq!(listing.brief.len(), walk("brief"));
         let assets = crate::assets::read_assets(&scripts.scripts, project, &[], &crate::prompt_page::living_pipeline(project).unwrap()).unwrap();
         assert_eq!(listing.library.len(), assets.len(), "Library shows each asset once");
-        // Library holds no more than the files where Skills files media,
-        // `sources/` included since the plan's rule of 2026-11-20.
-        fn deep(at: &Path) -> usize {
-            std::fs::read_dir(at).into_iter().flatten().flatten().map(|entry| if entry.path().is_dir() { deep(&entry.path()) } else { usize::from(!entry.file_name().to_string_lossy().starts_with('.')) }).sum()
-        }
-        assert!(listing.library.len() <= ["library", "prompts/resources", "sources"].iter().map(|sub| deep(&project.join(sub))).sum::<usize>());
+        // Library draws every file the grouping covers, each asset once at
+        // its latest iteration with its count of iterations: by the plan's
+        // rule of 2026-11-20, the 615 files the port's inventory counts in
+        // Last order, research in `sources/` included.
+        let mut drawn: Vec<&str> = listing.library.iter().map(|tile| tile.file.as_str()).collect();
+        let mut latest: Vec<&str> = assets.iter().map(|asset| asset.canonical()).collect();
+        drawn.sort();
+        latest.sort();
+        assert_eq!(drawn, latest, "Library's tiles are not the assets at their latest iterations");
+        let covered: usize = listing.library.iter().map(|tile| tile.iterations).sum();
+        assert_eq!(covered, assets.iter().map(|asset| asset.files().count()).sum::<usize>());
+        assert_eq!(covered, 615, "Library covers {covered} files, where the port's inventory counts 615");
+        assert!(listing.library.iter().any(|tile| tile.file.starts_with("sources/")), "no research source is in Library");
         assert!(listing.library.iter().any(|tile| tile.cell.is_some()), "an asset in a recipe names its cell");
         // The animatic, canon in prompts/resources/, is one of Library's
         // tiles, so it plays from there as the film plays from Output.
         let animatic = crate::prompt_page::script(&scripts.scripts, project, &[], "pipeline.py", &["sql", &crate::prompt_page::living_pipeline(project).unwrap(), "SELECT file FROM artifact WHERE role = 'animatic'", "--read-only"]).unwrap();
         assert!(listing.library.iter().any(|tile| tile.file == animatic.trim()), "the animatic {animatic} is not in Library");
-        assert_eq!(listing.requests.len(), walk("requests"));
+        // Requests holds every report Skills' own `all_reports` lists,
+        // research in `sources/` included.
+        let listed = std::process::Command::new("python3")
+            .args(["-c", "import os, sys; sys.path.insert(0, sys.argv[1]); import request; print(len(list(request.all_reports(os.getcwd()))))"])
+            .arg(&scripts.scripts)
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr));
+        assert_eq!(listing.requests.len().to_string(), String::from_utf8_lossy(&listed.stdout).trim(), "Requests lists other reports than Skills does");
+        assert!(walk("sources") > 0 && listing.requests.len() > walk("requests"), "the research reports in sources/ are not listed");
+        assert!(listing.requests.windows(2).all(|pair| pair[0].id >= pair[1].id), "Requests is newest first");
         assert_eq!(listing.output.len(), walk("output"));
         let name = |tile: &Tile| tile.file.rsplit('/').next().unwrap().to_string();
         assert!(listing.library.windows(2).all(|pair| name(&pair[0]) >= name(&pair[1])), "Library is newest first");
