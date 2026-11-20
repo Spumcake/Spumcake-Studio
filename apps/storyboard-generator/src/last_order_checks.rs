@@ -89,47 +89,6 @@ impl Copy {
         Ok(printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().to_string())
     }
 
-    /// Publishes a workspace's file as the host's runner does on the
-    /// publish card's yes: filed, then published as made from the canon
-    /// files it names.
-    fn publish(&self, artifact: &str, source: &str, from: &[String]) -> Result<String, String> {
-        let filed = self.file(source, from)?;
-        let mut args = vec!["publish", artifact, "--file", filed.as_str()];
-        let canon = self.pipeline(&["sql", "SELECT id || char(31) || file FROM artifact WHERE file IS NOT NULL", "--read-only"])?;
-        let names: Vec<String> = from.iter().filter_map(|input| canon.lines().find_map(|line| line.split_once('\u{1f}').filter(|(_, file)| file == input).map(|(name, _)| name.to_string()))).collect();
-        for name in &names {
-            args.extend(["--from", name.as_str(), "input"]);
-        }
-        self.pipeline(&args)?;
-        Ok(filed)
-    }
-
-    /// Publishes a step's take as the host's runner does on the publish
-    /// card's yes: made from what the step refers to, with their roles.
-    fn publish_take(&self, artifact: &str, take: &str) -> Result<String, String> {
-        let quoted = artifact.replace('\'', "''");
-        let chain = self.pipeline(&["sql", &format!("SELECT chain FROM step WHERE artifact = '{quoted}'"), "--read-only"])?;
-        let refs = self.pipeline(&["sql", &format!("SELECT refs FROM step WHERE artifact = '{quoted}'"), "--read-only"])?;
-        // A file no step makes, such as a filed sound, has no chain and
-        // nothing it was made from.
-        let refs: Vec<Value> = serde_json::from_str(refs.trim()).unwrap_or_default();
-        let chain = chain.trim().to_string();
-        let mut args = vec!["publish", artifact, "--file", take];
-        if !chain.is_empty() {
-            args.extend(["--chain", chain.as_str()]);
-        }
-        let mut seen: Vec<&str> = Vec::new();
-        for reference in &refs {
-            let (Some(name), Some(role)) = (reference["artifact"].as_str(), reference["role"].as_str()) else { continue };
-            if !seen.contains(&name) {
-                seen.push(name);
-                args.extend(["--from", name, role]);
-            }
-        }
-        self.pipeline(&args)?;
-        Ok(take.to_string())
-    }
-
     /// Runs a step again as the host's runner does, giving the take.
     fn rerun(&self, chain: &str, step: &str) -> Result<Value, String> {
         let ran = self.pipeline(&["rerun", "--step", chain, step, "--json"])?;
@@ -181,17 +140,10 @@ impl Copy {
                     Ok(file) => HostMessage::Filed { id: id.clone(), file, error: None },
                     Err(error) => HostMessage::Filed { id: id.clone(), file: String::new(), error: Some(error) },
                 }),
-                AppMessage::Publish { tab, artifact, source, from, .. } => {
-                    let published = if source.starts_with("work/") { self.publish(artifact, source, from) } else { self.publish_take(artifact, source) };
-                    Some(match published {
-                        Ok(file) => HostMessage::Published { tab: tab.clone(), artifact: artifact.clone(), file, version: None, error: None },
-                        Err(error) => HostMessage::Published { tab: tab.clone(), artifact: artifact.clone(), file: String::new(), version: None, error: Some(error) },
-                    })
-                }
-                AppMessage::RunStep { id, step, .. } => Some(match self.rerun(&step.chain, &step.step) {
-                    Ok(take) => HostMessage::StepRan { id: id.clone(), take: take["files"][0].as_str().map(str::to_string), error: None },
-                    Err(error) => HostMessage::StepRan { id: id.clone(), take: None, error: Some(error) },
-                }),
+                // The storyboard publishes nothing.
+                AppMessage::Publish { .. } => panic!("the storyboard asked to publish: {message:?}"),
+                // The storyboard runs no step: its export runs the step's script.
+                AppMessage::RunStep { .. } => panic!("the storyboard asked to run a step: {message:?}"),
                 _ => None,
             };
             seen.push(message);
@@ -217,17 +169,19 @@ fn copy_or_skip() -> Option<Copy> {
 #[test]
 fn last_order_on_a_test_copy() {
     let Some(copy) = copy_or_skip() else { return };
-    let checks: [(&str, fn(&Copy)); 10] = [
+    let checks: [(&str, fn(&Copy)); 12] = [
         ("opens and saves back unchanged", opens_from_its_step_and_saves_back_unchanged),
         ("the step decides, not the newest file", the_step_decides_not_the_newest_file),
         ("Studio's retime is what build-animatic assembles", studios_retime_is_what_build_animatic_assembles),
         ("a retime in Claude Code shows in Studio", a_retime_in_claude_code_shows_in_studio),
         ("Claude Code's retime with Studio's files gone", claude_codes_retime_needs_none_of_studios_files),
         ("the step found by its skill", the_step_is_found_by_its_skill),
-        ("drawing reaches the animatic through canon", drawing_reaches_the_animatic_through_canon),
+        ("drawing reaches the animatic as a filed hold", drawing_reaches_the_animatic_through_canon),
         ("import and export through the project", import_and_export_through_the_project),
         ("playback is what the step's take is", playback_is_the_take),
         ("a first save records the animatic's step", a_first_save_records_the_animatic_step),
+        ("what is placed follows its own iterations", a_new_iteration_shows_by_itself),
+        ("a new film's image follows its iteration", a_new_film_s_image_follows_its_iteration),
     ];
     for (name, check) in checks {
         copy.reset();
@@ -251,14 +205,15 @@ fn tool_and_tab(server: &mut Server, copy: &Copy, tab: &str, name: &str, input: 
             group: format!("check-{name}"),
         })
         .unwrap();
-    let mut output = Value::Null;
-    for reply in &replies {
-        if let AppMessage::ToolResult(result) = reply {
-            output = result.output.clone();
-        }
-    }
-    let shown = shown_tab(&copy.host(server, replies)).unwrap_or_else(|| tab.to_string());
-    (output, shown)
+    // Its answer, sent at once or, as an export's is, once its work is done.
+    let call = format!("check-{name}");
+    let seen = copy.host(server, replies);
+    let output = seen.iter().rev().find_map(|reply| match reply {
+        AppMessage::ToolResult(result) if result.call == call => Some(result.output.clone()),
+        _ => None,
+    });
+    let shown = shown_tab(&seen).unwrap_or_else(|| tab.to_string());
+    (output.unwrap_or(Value::Null), shown)
 }
 
 fn shown_tab(seen: &[AppMessage]) -> Option<String> {
@@ -279,11 +234,12 @@ fn command(server: &mut Server, copy: &Copy, tab: &str, id: &str) -> Vec<AppMess
 /// tab it opened in.
 fn opened(copy: &Copy) -> (Server, String) {
     let mut server = Server::new(None);
-    server.greeting();
-    // Told the project, it shows the project's animatic.
+    let greeted = server.greeting();
+    // Told the project, it shows the project's animatic; a project with
+    // none keeps the blank it greeted with.
     let replies = server.handle(HostMessage::Project { folder: copy.project.display().to_string() }).unwrap();
     let seen = copy.host(&mut server, replies);
-    let tab = shown_tab(&seen).expect("a tab");
+    let tab = shown_tab(&seen).or_else(|| shown_tab(&greeted)).expect("a tab");
     (server, tab)
 }
 
@@ -496,9 +452,9 @@ fn apart(a: &[u8], b: &[u8]) -> f64 {
     a.iter().zip(b).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / a.len().max(1) as f64
 }
 
-/// Check 4: a mark drawn on shot 2 is refused until its hold is published
-/// as "Last order: rough board, Shot 2", made from shot 2's keyframe; saved, the step
-/// assembles it, and `touches` follows the rough board to the animatic.
+/// Check 4: a mark drawn on shot 2 is filed as a plain file when the timing
+/// is saved, made from shot 2's keyframe and never published; the step
+/// assembles it, and the take joins the step's gallery with canon unchanged.
 fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
     // The animatic from the keyframes alone, assembled beside the copy,
     // which files nothing.
@@ -517,29 +473,24 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
         assert!(drawn.get("error").is_none(), "{drawn}");
     }
     tool(&mut server, copy, &tab, "leave_clip", json!({}));
-    let refused = tool(&mut server, copy, &tab, "save_timing", json!({}));
-    assert_eq!(refused["error"], "Shot 2 has drawing that is not published yet. Publish it first.");
-    tool(&mut server, copy, &tab, "edit_clip", json!({ "clip": second }));
-    let asked = tool(&mut server, copy, &tab, "publish_hold", json!({}));
-    assert_eq!(asked["made"]["artifact"], "Last order: rough board, Shot 2", "{asked}");
-    tool(&mut server, copy, &tab, "leave_clip", json!({}));
-    let made_from = copy.pipeline(&["sql", "SELECT source FROM made_from WHERE artifact = 'Last order: rough board, Shot 2'", "--read-only"]).unwrap();
-    assert_eq!(made_from.trim(), "Last order: keyframe, the bell");
-    // Filed with the keyframe as its input, and not from work/.
-    let board = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: rough board, Shot 2'", "--read-only"]).unwrap();
-    let record = copy.run(&copy.scripts.join("request.py"), &["show".to_string(), board.trim().to_string()]).unwrap();
-    assert!(record.contains("library/2026-11-14_16-04-keyframe-the-bell.png") && !record.contains("\"work/"), "{record}");
-    // Export animatic video saves the timing, runs the step, and publishes
-    // its take on the card's yes.
+    // Export animatic video files the drawn hold, saves the timing, and
+    // runs the step; nothing is published.
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
-    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    assert!(exported["made"]["file"].as_str().is_some_and(|file| file.starts_with("prompts/resources/") && file.ends_with(".mp4")), "{exported}");
     let (_, refs) = step(copy);
-    assert_eq!(refs[1]["artifact"], "Last order: rough board, Shot 2", "{refs}");
-    let take = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: animatic'", "--read-only"]).unwrap();
-    let touched = copy.pipeline(&["touches", "--artifact", "Last order: rough board, Shot 2", "--json"]).unwrap();
-    assert!(touched.contains("Last order: animatic"), "{touched}");
-    assert_ne!(take.trim(), published.trim(), "the take was not published");
-    let after = copy.project.join(take.trim());
+    let hold = refs[1]["file"].as_str().unwrap_or_else(|| panic!("the drawn hold is not named by its file: {refs}")).to_string();
+    assert!(refs[1].get("artifact").is_none() && hold.starts_with("prompts/resources/"), "{refs}");
+    // Filed with the keyframe as its input, and not from work/.
+    let record = copy.run(&copy.scripts.join("request.py"), &["show".to_string(), hold.clone()]).unwrap();
+    assert!(record.contains("library/2026-11-14_16-04-keyframe-the-bell.png") && !record.contains("\"work/"), "{record}");
+    let canon = copy.pipeline(&["sql", &format!("SELECT count(*) FROM artifact WHERE file = '{hold}'"), "--read-only"]).unwrap();
+    assert_eq!(canon.trim(), "0", "the drawn hold was published");
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    assert_eq!(film["animatic"]["state"], "done", "{}", film["animatic"]);
+    let take = film["animatic"]["file"].as_str().unwrap().to_string();
+    let now = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: animatic'", "--read-only"]).unwrap();
+    assert_eq!(now.trim(), published.trim(), "the take was published");
+    let after = copy.project.join(&take);
     // Shot 1 is as it was; shot 2 has the mark.
     let (shot_1, shot_2) = (apart(&before.0, &frame_at(&after, 30)), apart(&before.1, &frame_at(&after, 85)));
     assert!(shot_1 < 0.5 && shot_2 > 1.0, "the mark is not in shot 2 alone: shot 1 {shot_1:.2}, shot 2 {shot_2:.2}");
@@ -551,16 +502,31 @@ fn drawing_reaches_the_animatic_through_canon(copy: &Copy) {
 }
 
 /// Check 10: a sound from outside is filed into the project, never into
-/// sounds/, and Export animatic video runs the step, never writing exports/.
+/// sounds/ and never published, and Export animatic video runs the step,
+/// never writing exports/.
 fn import_and_export_through_the_project(copy: &Copy) {
     let (mut server, tab) = opened(copy);
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
-    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    assert!(exported["made"]["file"].as_str().is_some_and(|file| file.starts_with("prompts/resources/") && file.ends_with(".mp4")), "{exported}");
     // The step made the animatic, and it is the animatic's file now.
     let film = tool(&mut server, copy, &tab, "read_film", json!({}));
     assert_eq!(film["animatic"]["state"], "done", "{}", film["animatic"]);
     let take = film["animatic"]["file"].as_str().unwrap();
     assert!(copy.project.join(take).is_file() && !take.starts_with("exports/"), "{take}");
+    // A video of its own: filed with no inputs, published as nothing, and
+    // the animatic step's own artifact left alone.
+    let record = copy.run(&copy.scripts.join("request.py"), &["show".to_string(), take.to_string()]).unwrap();
+    let record: Value = serde_json::from_str(&record).unwrap_or_else(|_| panic!("no record of the export: {record}"));
+    assert!(record["inputs"].as_array().is_none_or(|inputs| inputs.is_empty()), "{record}");
+    let canon = copy.pipeline(&["sql", &format!("SELECT count(*) FROM artifact WHERE file = '{take}'"), "--read-only"]).unwrap();
+    assert_eq!(canon.trim(), "0", "the export was published");
+    // A keyframe changed: touches never lists the export.
+    let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+    let work = darkened(copy, bell, "bell-for-export.png");
+    let filed = copy.file(&work, &[bell.to_string()]).unwrap();
+    copy.pipeline(&["publish", "Last order: keyframe, the bell", "--file", filed.as_str(), "--from", "Last order: keyframe, the bell", "edited"]).unwrap();
+    let touched = copy.pipeline(&["touches", "--json"]).unwrap() + &copy.pipeline(&["touches", "--artifact", "Last order: keyframe, the bell", "--json"]).unwrap();
+    assert!(!touched.contains(take), "touches lists the export: {touched}");
     let outside = std::env::temp_dir().join(format!("storyboard-outside-sound-{}.wav", std::process::id()));
     std::fs::write(&outside, crate::sounds::wav_bytes(crate::sounds::RATE, &crate::sounds::clicks(24, &[]))).unwrap();
     let filing = tool(&mut server, copy, &tab, "import_sound", json!({ "path": outside.display().to_string() }));
@@ -580,12 +546,139 @@ fn import_and_export_through_the_project(copy: &Copy) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let placed = placed.expect("the sound was not placed");
-    // Offered as canon, and published on the card's yes, under the film.
-    let published = copy.pipeline(&["sql", &format!("SELECT id FROM artifact WHERE file = '{placed}'"), "--read-only"]).unwrap();
-    assert!(published.trim().starts_with("Last order: storyboard-outside-sound-") && published.trim().ends_with(", sound"), "{published}");
+    // Filed outside any cell, and never published.
+    let published = copy.pipeline(&["sql", &format!("SELECT count(*) FROM artifact WHERE file = '{placed}'"), "--read-only"]).unwrap();
+    assert_eq!(published.trim(), "0", "the sound was published");
     assert!(placed.starts_with("prompts/resources/"), "{placed}");
     assert!(!copy.project.join("sounds").exists() && !copy.project.join("exports").exists());
     assert!(!copy.project.join("work").join(outside.file_name().unwrap()).exists(), "the copy in work/ was kept");
+}
+
+/// The argument `request.py resource` names what a file iterates with: the
+/// iteration flag, as Skills Work sets it.
+const ITERATION_FLAG: &str = "--iterates";
+
+/// Whether this Skills checkout's `request.py resource` takes the iteration
+/// flag; a check that needs it says it was skipped until it does.
+fn has_iteration_flag(copy: &Copy) -> bool {
+    let usage = copy.run(&copy.scripts.join("request.py"), &["--help".to_string()]).unwrap_or_else(|usage| usage);
+    let found = usage.contains(ITERATION_FLAG);
+    if !found {
+        eprintln!("skipped: a take no step uses follows its iteration, until Skills' request.py resource takes {ITERATION_FLAG}");
+    }
+    found
+}
+
+/// Writes `image` with a dark band across it as `work/<name>`, a new
+/// iteration as the image workspace's Save makes one.
+fn darkened(copy: &Copy, image: &str, name: &str) -> String {
+    let mut pixels = image::open(copy.project.join(image)).unwrap().to_rgb8();
+    for y in 100..140.min(pixels.height()) {
+        for x in 0..pixels.width() {
+            pixels.put_pixel(x, y, image::Rgb([20, 20, 20]));
+        }
+    }
+    std::fs::create_dir_all(copy.project.join("work")).unwrap();
+    pixels.save(copy.project.join("work").join(name)).unwrap();
+    format!("work/{name}")
+}
+
+/// Waits, ticking as the host does, until the storyboard shows `file`.
+fn follows(server: &mut Server, copy: &Copy, file: &str) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let replies = server.tick();
+        copy.host(server, replies);
+        if server.session.film().files().contains(file) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check 11: what is placed follows its own iterations, never its step's
+/// artifact. The bell's keyframe edited in canon, as the image workspace's
+/// Save publishes an edit of what is in use, shows by itself, and the next
+/// save names it; another take put in use for the line's step leaves what
+/// was placed; and a take no step uses, inserted by hand, follows the
+/// iteration filed naming it.
+fn a_new_iteration_shows_by_itself(copy: &Copy) {
+    let bell = "library/2026-11-14_16-04-keyframe-the-bell.png";
+    let line = "library/2026-11-14_15-37-keyframe-the-line.png";
+    let (mut server, tab) = opened(copy);
+    // The bell edited: filed from its file, published as the artifact's
+    // next version naming the artifact itself, so the run log says which
+    // version it was edited from.
+    let work = darkened(copy, bell, "bell-iteration.png");
+    let filed = copy.file(&work, &[bell.to_string()]).unwrap();
+    copy.pipeline(&["publish", "Last order: keyframe, the bell", "--file", filed.as_str(), "--from", "Last order: keyframe, the bell", "edited"]).unwrap();
+    assert!(follows(&mut server, copy, &filed), "the storyboard did not follow the bell's new iteration");
+    assert!(!server.session.film().files().contains(bell));
+    // Another take put in use for the line's step: not an iteration.
+    let other = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE id = 'Last order: keyframe, waiting'", "--read-only"]).unwrap();
+    copy.pipeline(&["publish", "Last order: keyframe, the line", "--file", other.trim()]).unwrap();
+    let replies = server.tick();
+    copy.host(&mut server, replies);
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let replies = server.tick();
+    copy.host(&mut server, replies);
+    assert!(server.session.film().files().contains(line), "another take put in use replaced what was placed");
+    // Saved, the timing names the bell's new iteration under its artifact.
+    let saved = tool(&mut server, copy, &tab, "save_timing", json!({}));
+    assert!(saved.get("error").is_none(), "{saved}");
+    let (script, refs) = step(copy);
+    assert_eq!(refs[1]["artifact"], "Last order: keyframe, the bell", "{refs}");
+    let assembly: Value = serde_json::from_slice(&std::fs::read(copy.project.join(crate::assembly::named_in(&script).unwrap())).unwrap()).unwrap();
+    assert_eq!(assembly["frames"][1]["image"], filed.as_str(), "{assembly}");
+    if !has_iteration_flag(copy) {
+        return;
+    }
+    // A take no step uses, inserted by hand on shot 3, then edited.
+    let canon = copy.pipeline(&["sql", "SELECT file FROM artifact WHERE file IS NOT NULL", "--read-only"]).unwrap();
+    let mut library: Vec<String> = std::fs::read_dir(copy.project.join("library")).unwrap().flatten().map(|entry| format!("library/{}", entry.file_name().to_string_lossy())).collect();
+    library.sort();
+    let take = library.into_iter().find(|file| file.ends_with(".png") && file.contains("keyframe") && !canon.lines().any(|line| line.trim() == file)).expect("a keyframe take no step uses");
+    let film = tool(&mut server, copy, &tab, "read_film", json!({}));
+    let third = film["clips"][2]["id"].as_u64().unwrap();
+    tool(&mut server, copy, &tab, "edit_clip", json!({ "clip": third }));
+    let inserted = tool(&mut server, copy, &tab, "insert_image_key", json!({ "image": take }));
+    assert!(inserted.get("error").is_none(), "{inserted}");
+    tool(&mut server, copy, &tab, "leave_clip", json!({}));
+    let work = darkened(copy, &take, "take-iteration.png");
+    let printed = copy.run(&copy.scripts.join("request.py"), &["resource".to_string(), work, "--name".to_string(), "take-iteration".to_string(), "--from".to_string(), take.clone(), ITERATION_FLAG.to_string(), take.clone()]).unwrap();
+    let iteration = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap().to_string();
+    assert!(follows(&mut server, copy, &iteration), "a take no step uses did not follow its iteration");
+}
+
+/// Check 12, on a new film made with `request.py init`, whose canon is
+/// empty: an image filed only with `request.py resource`, placed as an image
+/// key, follows the iteration filed naming it.
+fn a_new_film_s_image_follows_its_iteration(copy: &Copy) {
+    if !has_iteration_flag(copy) {
+        return;
+    }
+    let root = copy.root.join("harbor-film");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let harbor = Copy { root: root.clone(), project: root.join("Harbor"), scripts: copy.scripts.clone(), skills: copy.skills.clone() };
+    std::fs::create_dir_all(&harbor.project).unwrap();
+    harbor.run(&harbor.scripts.join("request.py"), &["init".to_string()]).unwrap();
+    let source = "library/2026-11-14_16-04-keyframe-the-bell.png";
+    std::fs::copy(copy.project.join(source), harbor.project.join("harbour.png")).unwrap();
+    let printed = harbor.run(&harbor.scripts.join("request.py"), &["resource".to_string(), "harbour.png".to_string(), "--name".to_string(), "harbour".to_string()]).unwrap();
+    let image = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap().to_string();
+    let (mut server, tab) = opened(&harbor);
+    let clip = tool(&mut server, &harbor, &tab, "add_clip", json!({ "start": 1, "length": 48 }));
+    let clip = clip["made"]["clip"].as_u64().or_else(|| clip["made"].as_u64()).unwrap_or_else(|| panic!("no clip: {clip}"));
+    tool(&mut server, &harbor, &tab, "edit_clip", json!({ "clip": clip }));
+    let inserted = tool(&mut server, &harbor, &tab, "insert_image_key", json!({ "image": image }));
+    assert!(inserted.get("error").is_none(), "{inserted}");
+    tool(&mut server, &harbor, &tab, "leave_clip", json!({}));
+    let work = darkened(&harbor, &image, "harbour-iteration.png");
+    let printed = harbor.run(&harbor.scripts.join("request.py"), &["resource".to_string(), work, "--name".to_string(), "harbour".to_string(), "--from".to_string(), image.clone(), ITERATION_FLAG.to_string(), image.clone()]).unwrap();
+    let iteration = printed.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap().to_string();
+    assert!(follows(&mut server, &harbor, &iteration), "the new film's image did not follow its iteration");
 }
 
 fn tool_in(server: &mut Server, copy: &Copy, tab: &str, group: &str, name: &str, input: Value) -> Value {
@@ -626,7 +719,7 @@ fn loudness(samples: &[f32], rate: u32, frames: usize) -> Vec<f64> {
 fn playback_is_the_take(copy: &Copy) {
     let (mut server, tab) = opened(copy);
     let exported = tool(&mut server, copy, &tab, "export_animatic", json!({}));
-    assert_eq!(exported["made"]["step"], "the animatic: animatic", "{exported}");
+    assert!(exported["made"]["file"].as_str().is_some_and(|file| file.starts_with("prompts/resources/") && file.ends_with(".mp4")), "{exported}");
     let film = tool(&mut server, copy, &tab, "read_film", json!({}));
     assert_eq!(film["animatic"]["state"], "done", "{}", film["animatic"]);
     let take = copy.project.join(film["animatic"]["file"].as_str().unwrap());

@@ -244,15 +244,12 @@ pub(crate) fn check(dir: &Path) -> Result<PathBuf, String> {
     pair.refused("clips__render_again", json!({"item": "animatic"}), r0)?;
     // An image key names an image of the project, and there is none here.
     pair.refused("clips__insert_image_key", json!({"image": "library/keyframe.png"}), r0)?;
-    pair.refused("clips__publish_hold", json!({}), r0)?;
-    // With no project, a sound has nowhere to be published.
-    pair.refused("clips__publish_sound", json!({"sound": sound}), r0)?;
     pair.refused("clips__save_timing", json!({}), r0)?;
     pair.refused("clips__follow_retime", json!({}), r0)?;
     for tool in [
         "import_sound", "read_sound", "move_sound", "trim_sound", "set_sound_volume", "select_sounds", "rename_sound_track", "set_track",
-        "delete_sound", "publish_sound", "add_sound_track", "delete_sound_track", "set_listening_volume", "export_animatic", "list_items",
-        "render_again", "insert_image_key", "publish_hold", "save_timing", "follow_retime",
+        "delete_sound", "add_sound_track", "delete_sound_track", "set_listening_volume", "export_animatic", "list_items",
+        "render_again", "insert_image_key", "save_timing", "follow_retime",
     ] {
         note(&format!("clips__{tool}"));
     }

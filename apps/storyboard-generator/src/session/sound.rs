@@ -27,13 +27,6 @@ pub struct Import {
     result: Receiver<Result<Imported, String>>,
 }
 
-/// An imported sound's canon artifact: under the film, named after its file,
-/// as the Studio session manager set on 2026-11-18, such as
-/// "Last order: door creak, sound".
-pub fn sound_artifact(film: &str, file_stem: &str) -> String {
-    format!("{film}: {file_stem}, sound")
-}
-
 /// A sound from outside the project, copied into `work/` and being
 /// filed into the project by the host: placed once it is filed.
 pub struct Filing {
@@ -135,12 +128,6 @@ impl Session {
         self.file_intent = Some(crate::session::FileIntent::ImportSound);
     }
 
-    /// Whether a sound's file is canon already, under some artifact, so it
-    /// has nothing to publish.
-    pub fn is_canon(&self, file: &str) -> bool {
-        self.canon_files.contains_key(file)
-    }
-
     /// Whether a sound is from outside the project, so it is filed into the
     /// project before it is placed.
     pub fn outside_project(&self, path: &Path) -> bool {
@@ -192,17 +179,9 @@ impl Session {
         let _ = std::fs::remove_file(&filing.copy);
         match (error, self.project.clone()) {
             (None, Some(project)) if !file.is_empty() => {
+                // Filed outside any cell, never published here: it
+                // becomes canon only when a recipe cell uses it.
                 self.begin_import(project.join(file), filing.storyboard, filing.at, filing.track, Some(filing.name.clone()));
-                // Offered as canon, so the animatic can name it: under the
-                // film, after its file.
-                let stem = Path::new(&filing.name).file_stem().map_or_else(|| filing.name.clone(), |stem| stem.to_string_lossy().into_owned());
-                self.outgoing.push(protocol::AppMessage::Publish {
-                    tab: filing.storyboard.get().to_string(),
-                    artifact: sound_artifact(&self.film_name(), &stem),
-                    source: file.to_string(),
-                    from: Vec::new(),
-                    with: Vec::new(),
-                });
             }
             (error, _) => self.keep_failed(filing.notice, "Sound not imported", error.unwrap_or_default()),
         }
@@ -337,34 +316,6 @@ impl Session {
     /// Whether an import is under way.
     pub fn importing(&self) -> bool {
         !self.imports.is_empty()
-    }
-
-    /// Publish sound: offers a placed sound on the publish card as canon,
-    /// under the film and named after the file it came from, as importing
-    /// one from outside does, so the animatic can name it. Returns the
-    /// artifact asked for.
-    pub fn publish_sound(&mut self, sound: u64) -> Result<String, String> {
-        if self.project.is_none() {
-            return Err("No project is open.".to_string());
-        }
-        let (_, clip) = self.film().sound(sound).ok_or("no such sound")?;
-        if let Some(artifact) = self.canon_files.get(&clip.file) {
-            return Err(format!("that sound is already canon, as {artifact}"));
-        }
-        if Path::new(&clip.file).is_absolute() {
-            return Err("that sound is outside the project, so it is filed first, as Import sound… does".to_string());
-        }
-        let (file, name) = (clip.file.clone(), clip.name.clone());
-        let stem = Path::new(&name).file_stem().map_or_else(|| name.clone(), |stem| stem.to_string_lossy().into_owned());
-        let artifact = sound_artifact(&self.film_name(), &stem);
-        self.outgoing.push(protocol::AppMessage::Publish {
-            tab: self.active_id().get().to_string(),
-            artifact: artifact.clone(),
-            source: file,
-            from: Vec::new(),
-            with: Vec::new(),
-        });
-        Ok(artifact)
     }
 
     /// Places a sound an import decoded, as one undo step.
