@@ -1001,6 +1001,13 @@ const OUTPUT_LINES: usize = 8;
 /// tool showed the model, with its full path.
 fn tool_row(ui: &mut egui::Ui, entry: &Entry, width: f32) {
     tool_line(ui, entry, width);
+    // Why it failed, in Small failure-colored text, as the conversation
+    // guide has an error.
+    if let Some(reason) = &entry.reason {
+        let galley = ui.painter().layout(reason.clone(), ts::small(), ts::FAILED, width - 20.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, galley.size().y + 4.0), Sense::hover());
+        ui.painter().galley(pos2(rect.left() + 20.0, rect.top() + 2.0), galley, ts::FAILED);
+    }
     if !entry.text.trim().is_empty() {
         let lines: Vec<&str> = entry.text.lines().collect();
         let shown = lines[lines.len().saturating_sub(OUTPUT_LINES)..].join("\n");
@@ -1290,6 +1297,7 @@ mod tests {
             ok: None,
             cell: None,
             aside: false,
+            reason: None,
         };
         let entries = vec![
             entry(Role::Note, "Restored."),

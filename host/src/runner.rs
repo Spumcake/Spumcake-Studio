@@ -174,7 +174,7 @@ pub(crate) fn tools() -> Vec<Tool> {
 
 /// Whether `name` is one of the runner's tools.
 pub(crate) fn is_runner_tool(name: &str) -> bool {
-    matches!(name, RUN_COMMAND | SEND_REQUEST | RERUN_STEP | WEB_SEARCH | FETCH_PAGE | DOWNLOAD_FILE)
+    matches!(name, RUN_COMMAND | SEND_REQUEST | RERUN_STEP | FIX_CHAIN | WEB_SEARCH | FETCH_PAGE | DOWNLOAD_FILE)
 }
 
 /// What a script is run with: its folder, and its environment.
@@ -493,10 +493,17 @@ fn skills_argv(scripts: &Path, script: &str, args: &[&str]) -> Vec<String> {
 fn skills_run(argv: &[String], cwd: &Path, vars: &[(String, String)]) -> Result<String, String> {
     let out = Command::new(&argv[0]).args(&argv[1..]).current_dir(cwd).envs(vars.iter().map(|(name, value)| (name.as_str(), value.as_str()))).output().map_err(|error| format!("Could not run {}: {error}", argv[1]))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        // A script that failed saying nothing on its error output is said
+        // by its last line of output, or else plainly.
+        let said = [&out.stderr, &out.stdout].into_iter().map(|text| String::from_utf8_lossy(text).trim().to_string()).find(|text| !text.is_empty());
+        return Err(said.map(|text| text.lines().last().unwrap_or("").to_string()).unwrap_or_else(|| String::from(STOPPED_WITHOUT_WORDS)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
+
+/// What a failure that gave no reason says, so none reaches the user with
+/// no words.
+pub(crate) const STOPPED_WITHOUT_WORDS: &str = "It stopped without saying why.";
 
 /// The steps to fix: each step whose artifact Skills finds out of date and
 /// was not ignored, as `touches --json` lists them, in the order of what
@@ -926,7 +933,9 @@ pub(crate) enum Begun {
 }
 
 fn failed(call: &str, reason: impl Into<String>) -> ToolResult {
-    ToolResult { call: call.to_string(), ok: false, output: json!({ "error": reason.into() }), images: Vec::new() }
+    let reason = reason.into();
+    let reason = if reason.trim().is_empty() { String::from(STOPPED_WITHOUT_WORDS) } else { reason };
+    ToolResult { call: call.to_string(), ok: false, output: json!({ "error": reason }), images: Vec::new() }
 }
 
 impl Runner {
@@ -1842,6 +1851,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// Catches a tool the runner offers the assistant that the window never
+    /// sends to it, as the fix of the dependency chain once was: it reached
+    /// no plan card and failed with no words.
+    #[test]
+    fn every_tool_the_runner_offers_is_routed_to_it() {
+        for tool in tools() {
+            assert!(is_runner_tool(&tool.name), "{} is offered but never routed to the runner", tool.name);
+        }
+        assert_eq!(failed("c1", " ").output["error"], STOPPED_WITHOUT_WORDS, "a failure with no reason has no words");
+    }
+
     /// Catches a command that spends passed as a plain one through a
     /// shell, and a plan with no hash run unbound.
     #[test]
@@ -2304,3 +2324,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 }
+

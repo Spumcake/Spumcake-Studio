@@ -238,6 +238,7 @@ fn note(text: String) -> Entry {
         ok: None,
         cell: None,
         aside: true,
+        reason: None,
     }
 }
 

@@ -537,6 +537,7 @@ fn migration_note(line: String) -> assistant::Entry {
         ok: None,
         cell: None,
         aside: true,
+        reason: None,
     }
 }
 
@@ -1723,6 +1724,7 @@ mod tests {
             ok: None,
             cell: None,
             aside: false,
+            reason: None,
         }
     }
 

@@ -18,6 +18,25 @@ use crate::{NO_KEY, NO_MODEL};
 use crate::STOPPED;
 const NOT_RUN_STOPPED: &str = "Not run: the person stopped the request.";
 const NO_REPLY: &str = "The model ended without a reply.";
+/// What a failed tool's row says when the tool gave no reason and no
+/// output.
+const STOPPED_WITHOUT_WORDS: &str = "It stopped without saying why.";
+
+/// Why a tool failed, shown under its row: its `error`, in its own words.
+/// A command that ended badly says so by its output, already on the row;
+/// a card the user cancelled is no failure to explain; and a failure with
+/// neither words nor output says so, so none reaches the user wordless.
+pub(crate) fn failure_reason(result: &protocol::ToolResult) -> Option<String> {
+    let said = |key: &str| result.output.get(key).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty());
+    if result.ok || result.output.get("declined").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    match said("error") {
+        Some(error) => Some(error.to_string()),
+        None if said("output").is_some() => None,
+        None => Some(String::from(STOPPED_WITHOUT_WORDS)),
+    }
+}
 
 fn limit_note() -> String {
     format!("Stopped after {MAX_CALLS} tool calls, the most one request may make.")
@@ -147,6 +166,7 @@ impl Agent {
             ok: None,
             cell: None,
             aside,
+            reason: None,
         }));
     }
 
@@ -258,6 +278,7 @@ impl Agent {
             ok: None,
             cell: None,
             aside: false,
+            reason: None,
         }));
         compact(&mut self.history);
         let parts = request.attachments.iter().map(attachment_part).collect();
@@ -411,13 +432,13 @@ impl Agent {
         let (app, tab, input) = match routed {
             Ok(routed) => routed,
             Err(error) => {
-                self.tool_entry(name, Some(false), Vec::new());
+                self.tool_entry(name, Some(false), Vec::new(), Some(error.to_string()));
                 return Some((tool_error(&error), Vec::new()));
             }
         };
         let call = format!("{}.{}", busy.group, busy.calls);
         // The host can show the call, as a cell, before it finishes.
-        self.tool_entry(name, None, Vec::new());
+        self.tool_entry(name, None, Vec::new(), None);
         self.emit(Event::Call {
             call: call.clone(),
             app,
@@ -439,7 +460,7 @@ impl Agent {
             Some(path) if !result.images.is_empty() => vec![path.to_string()],
             _ => Vec::new(),
         };
-        self.tool_entry(name, Some(result.ok), shown);
+        self.tool_entry(name, Some(result.ok), shown, failure_reason(&result));
         let mut content = json!({"ok": result.ok, "output": result.output});
         if !result.images.is_empty() {
             content["images"] = json!(format!(
@@ -450,7 +471,7 @@ impl Agent {
         Some((content.to_string(), result.images))
     }
 
-    fn tool_entry(&self, tool: &str, ok: Option<bool>, shown: Vec<String>) {
+    fn tool_entry(&self, tool: &str, ok: Option<bool>, shown: Vec<String>, reason: Option<String>) {
         self.emit(Event::Entry(Entry {
             role: Role::Tool,
             text: String::new(),
@@ -460,6 +481,7 @@ impl Agent {
             ok,
             cell: None,
             aside: false,
+            reason,
         }));
     }
 

@@ -1145,6 +1145,7 @@ impl HostWindow {
                 ok: None,
                 cell: None,
                 aside: false,
+                reason: None,
             });
         }
     }
@@ -1164,6 +1165,9 @@ impl HostWindow {
         {
             pending.ok = entry.ok;
             pending.attachments = entry.attachments;
+            // A failure's reason, said under its row; a command's output
+            // stays in its text.
+            pending.reason = entry.reason;
             return;
         }
         self.chat.conversation.push(entry);
@@ -3438,6 +3442,7 @@ mod tests {
             ok: None,
             cell: None,
             aside: false,
+            reason: None,
         }
     }
 

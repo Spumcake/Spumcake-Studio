@@ -248,6 +248,10 @@ pub struct Entry {
     /// about a file. It never marks a reply as failed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub aside: bool,
+    /// For a tool entry that failed: why, in the tool's own words, shown
+    /// under its row. A command's output stays in `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

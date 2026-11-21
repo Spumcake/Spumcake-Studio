@@ -766,6 +766,7 @@ fn restore_rebuilds_the_conversation_and_clear_empties_it() {
             ok: None,
             cell: None,
             aside: false,
+            reason: None,
         },
         Entry {
             role: Role::Tool,
@@ -776,6 +777,7 @@ fn restore_rebuilds_the_conversation_and_clear_empties_it() {
             ok: Some(true),
             cell: None,
             aside: false,
+            reason: None,
         },
         Entry {
             role: Role::Assistant,
@@ -786,6 +788,7 @@ fn restore_rebuilds_the_conversation_and_clear_empties_it() {
             ok: None,
             cell: None,
             aside: false,
+            reason: None,
         },
         Entry {
             role: Role::Note,
@@ -796,6 +799,7 @@ fn restore_rebuilds_the_conversation_and_clear_empties_it() {
             ok: None,
             cell: None,
             aside: false,
+            reason: None,
         },
     ];
     assistant.send(Command::Restore(saved.clone()));
@@ -974,4 +978,18 @@ fn a_tool_call_in_fragments_arrives_whole() {
     assert_eq!(call["function"]["name"], "fixture-notes__writing__add");
     let arguments: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(arguments, json!({"tab": "n1", "text": "North"}));
+}
+
+/// Catches a failed tool's row left with no words, or given words that
+/// are not true: a command that ended badly keeps its own output on the
+/// row, with no reason laid over it, and a cancelled card is no failure.
+#[test]
+fn a_failed_tool_says_why_in_its_own_words() {
+    let result = |ok: bool, output: Value| ToolResult { call: String::from("c1"), ok, output, images: Vec::new() };
+    let reason = |ok: bool, output: Value| crate::agent::failure_reason(&result(ok, output));
+    assert_eq!(reason(false, json!({ "error": "No such project tool." })).as_deref(), Some("No such project tool."));
+    assert_eq!(reason(false, json!({ "command": "build.py", "exit": 1, "output": "boom" })), None, "a command's own output was covered");
+    assert_eq!(reason(false, json!({ "error": "The user did not approve it, so nothing ran.", "declined": true })), None, "a cancelled card was shown as a failure");
+    assert_eq!(reason(false, json!({ "error": " " })).as_deref(), Some("It stopped without saying why."));
+    assert_eq!(reason(true, json!({ "output": "done" })), None);
 }
