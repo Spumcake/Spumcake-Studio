@@ -71,8 +71,9 @@ pub struct Read {
     stamp: Option<(u64, std::time::SystemTime)>,
     /// The file itself, as an absolute path.
     pub file: PathBuf,
-    /// What `media` says it is, when it opened.
+    /// What `media` says it is, when it opened, or why it did not.
     pub info: Option<media::Info>,
+    pub error: Option<String>,
     /// The sha256 of its bytes, by which its notes are kept.
     pub sha256: String,
 }
@@ -131,11 +132,15 @@ impl Rounds {
                     RoundState::Running | RoundState::Pending => {
                         (round.count.unwrap_or(0) as usize).saturating_sub(videos.len()).max(usize::from(videos.is_empty()))
                     }
+                    // A round that made nothing this workspace plays, such as
+                    // an image from a stand-in, keeps a failed place, so the
+                    // round is still seen.
                     RoundState::Failed => usize::from(videos.is_empty()),
-                    RoundState::Done | RoundState::Cancelled => 0,
+                    RoundState::Done => usize::from(videos.is_empty() && !round.takes.is_empty()),
+                    RoundState::Cancelled => 0,
                 };
                 let pending = match round.state {
-                    RoundState::Failed => FilmPending::Failed,
+                    RoundState::Failed | RoundState::Done => FilmPending::Failed,
                     _ => FilmPending::Running { since: round.started },
                 };
                 let mut stack = Vec::new();
@@ -220,8 +225,20 @@ impl Rounds {
                 continue;
             }
             let sha256 = std::fs::read(&file).map(|bytes| layers::link::sha256(&bytes)).unwrap_or_default();
-            let info = media::Video::open(&file).ok().map(|video| video.info());
-            self.reads.insert(path, Read { stamp, file, info, sha256 });
+            // A file that opens as a stream but has no frame it can decode,
+            // such as an image named as a video, is no take it can play.
+            let (info, error) = match media::Video::open(&file) {
+                Ok(mut video) => {
+                    let info = video.info();
+                    match video.frame(0, (16, 16)) {
+                        Ok(_) if info.frames > 0 => (Some(info), None),
+                        Ok(_) => (None, Some(String::from("It has no frames."))),
+                        Err(error) => (None, Some(error.0)),
+                    }
+                }
+                Err(error) => (None, Some(error.0)),
+            };
+            self.reads.insert(path, Read { stamp, file, info, sha256, error });
         }
     }
 

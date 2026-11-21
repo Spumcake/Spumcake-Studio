@@ -152,7 +152,8 @@ pub(crate) struct Strip {
 
 /// Each labelled run of `film`, by its label and, after the first run of
 /// that label, its count among them, as two cells' rounds can be labelled
-/// alike, with whether any of its places is still being made.
+/// alike, with whether any of its places is still being made: a failed
+/// place is finished.
 fn runs_seen(film: &Film, layout: &Layout) -> Vec<(String, bool)> {
     let mut alike: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut runs = Vec::new();
@@ -163,7 +164,7 @@ fn runs_seen(film: &Film, layout: &Layout) -> Vec<(String, bool)> {
         let count = alike.entry(group.label.as_str()).or_default();
         let key = if *count == 0 { group.label.clone() } else { format!("{} ({count})", group.label) };
         *count += 1;
-        runs.push((key, film.items[span.start..span.end].iter().any(|item| item.pending.is_some())));
+        runs.push((key, film.items[span.start..span.end].iter().any(|item| matches!(item.pending, Some(FilmPending::Running { .. })))));
     }
     runs
 }
@@ -742,6 +743,11 @@ mod tests {
         assert_eq!(draw(&mut strip, "2", &rounds(&["Round 1"])), 0.0);
         let more = rounds(&["Round 1", "Round 2", "Round 3", "Round 4", "Round 5", "Round 6"]);
         assert!(draw(&mut strip, "1", &more) > 0.0, "a new round past the edge was not brought into view");
+        // A place that failed is finished, so a round that ends that way is
+        // brought into view as one that ends with its takes.
+        let mut failed = rounds(&["Round 1"]);
+        failed.items[0].pending = Some(FilmPending::Failed);
+        assert_eq!(runs_seen(&failed, &layout(&failed)), [(String::from("Round 1"), false)]);
         // Two cells' rounds labelled alike: the second cell's new round is
         // its own, not the first cell's seen again.
         let two = |second: &[&str]| {

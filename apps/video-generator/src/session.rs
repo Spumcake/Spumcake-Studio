@@ -1063,7 +1063,7 @@ impl Session {
                     return;
                 }
                 if index < tiles {
-                    self.select_take(index);
+                    self.select_take(index, out);
                     out.extend(self.emit());
                     return;
                 }

@@ -71,13 +71,19 @@ impl Session {
 
     /// A click on a take's tile shows it alone, as any take is shown.
     /// Which take of a round is shown is no change to the file.
-    pub(super) fn select_take(&mut self, tile: usize) {
+    /// A take that is no video it can play, such as a stand-in's image,
+    /// says so rather than showing a blank view.
+    pub(super) fn select_take(&mut self, tile: usize, out: &mut Vec<AppMessage>) {
         self.stop_playing();
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
         if tab.rounds.tiles.get(tile).is_some_and(|chosen| chosen.file.is_some()) {
             tab.rounds.show(Some(tile));
+            let refused = tab.rounds.tiles[tile].path().and_then(|path| tab.rounds.read(path)).filter(|read| read.info.is_none()).and_then(|read| read.error.clone());
+            if let Some(reason) = refused {
+                out.push(notice("This video could not be opened", &reason));
+            }
         }
     }
 
