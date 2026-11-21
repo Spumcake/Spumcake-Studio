@@ -505,16 +505,32 @@ fn skills_run(argv: &[String], cwd: &Path, vars: &[(String, String)]) -> Result<
 /// no words.
 pub(crate) const STOPPED_WITHOUT_WORDS: &str = "It stopped without saying why.";
 
+// The fix of the dependency chain's refusals, in plain words in place of
+// Skills' own, as the take answers' are.
+const FIX_NO_PIPELINE: &str = "This project has no pipeline <pipeline>.";
+const FIX_UNREAD: &str = "What is out of date could not be read, so nothing was planned.";
+const FIX_NOTHING: &str = "Nothing is out of date, so there is nothing to fix.";
+const FIX_NOT_PLANNED: &str = "<artifact> could not be planned, so nothing was asked.";
+const FIX_STOPPED_BY_USER: &str = "You stopped the fix before <artifact>.";
+const FIX_NOT_COLLECTED: &str = "<artifact>'s request is still at its endpoint and could not be collected yet, so the fix stopped there. A later fix collects it.";
+const FIX_PLAN_CHANGED: &str = "<artifact>'s plan changed by more than the fixes before it, so the fix stopped there.";
+const FIX_NOT_MADE: &str = "<artifact> could not be made again, so the fix stopped there.";
+const FIX_NO_FILE: &str = "<artifact> was made again but gave no file, so the fix stopped there.";
+const FIX_NOT_PUBLISHED: &str = "<artifact>'s new take could not be put in use as its fix, so the fix stopped there.";
+
 /// The steps to fix: each step whose artifact Skills finds out of date and
 /// was not ignored, as `touches --json` lists them, in the order of what
 /// each is made from, so a step runs after every fix it refers to, and in
 /// chain order where that leaves a choice; and what is out of date but made
 /// by no step.
 fn steps_to_fix(scripts: &Path, cwd: &Path, vars: &[(String, String)], pipeline: &str) -> Result<(Vec<(String, String, String, Vec<String>)>, Vec<String>, Vec<String>), String> {
-    let touches: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "pipeline.py", &["touches", pipeline, "--json"]), cwd, vars)?).map_err(|error| format!("What is out of date could not be read: {error}"))?;
+    // Skills' own words never reach the user: a pipeline the project does
+    // not have, or anything else that keeps what is out of date unread.
+    let unread = |said: String| if said.starts_with("no pipeline") { FIX_NO_PIPELINE.replace("<pipeline>", pipeline) } else { String::from(FIX_UNREAD) };
+    let touches: Value = serde_json::from_str(&skills_run(&skills_argv(scripts, "pipeline.py", &["touches", pipeline, "--json"]), cwd, vars).map_err(unread)?).map_err(|_| String::from(FIX_UNREAD))?;
     let stale: Vec<&str> = touches.get("out_of_date").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| entry.get("artifact").and_then(Value::as_str)).collect();
     let query = "SELECT json_array(c.ord, s.ord, s.chain, s.name, s.artifact, s.refs) FROM step s JOIN chain c ON c.name = s.chain WHERE s.artifact IS NOT NULL AND s.artifact != ''";
-    let mut steps: Vec<FixOrder> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, query, "--read-only"]), cwd, vars)?
+    let mut steps: Vec<FixOrder> = skills_run(&skills_argv(scripts, "pipeline.py", &["sql", pipeline, query, "--read-only"]), cwd, vars).map_err(unread)?
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| {
@@ -1101,7 +1117,7 @@ impl Runner {
                 return self.plan_later(call, move || {
                     let (found, not_fixed, waiting) = steps_to_fix(&scripts, &cwd, &vars, &pipeline)?;
                     if found.is_empty() && not_fixed.is_empty() {
-                        return Err(String::from("Nothing is out of date, so there is nothing to fix."));
+                        return Err(String::from(FIX_NOTHING));
                     }
                     if found.is_empty() {
                         let mut said = not_fixed_line(&not_fixed);
@@ -1118,7 +1134,7 @@ impl Runner {
                         if plan_stand_in {
                             argv.push(String::from("--stand-in"));
                         }
-                        let (mut plan, hash) = planned(&argv, &cwd, &vars, plan_stand_in)?;
+                        let (mut plan, hash) = planned(&argv, &cwd, &vars, plan_stand_in).map_err(|_| FIX_NOT_PLANNED.replace("<artifact>", &artifact))?;
                         // A request still at its endpoint is collected, never
                         // made again, when it was sent as the step is now and
                         // from nothing this fix replaces; else it would bring
@@ -1252,10 +1268,13 @@ impl Runner {
             let Fix { scripts, pipeline, steps, not_fixed, waiting, left_pending, .. } = fix;
             let mut published: HashMap<String, String> = HashMap::new();
             let mut done: Vec<Value> = Vec::new();
-            let mut stopped: Option<String> = None;
+            // Where it stopped: a plain sentence for the user, and what
+            // Skills said, for the assistant.
+            let mut stopped: Option<(String, String)> = None;
             for (index, step) in steps.iter().enumerate() {
+                let at = |sentence: &str, detail: String| Some((sentence.replace("<artifact>", &step.artifact), detail));
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    stopped = Some(String::from("the user stopped the fix"));
+                    stopped = at(FIX_STOPPED_BY_USER, String::new());
                     break;
                 }
                 // A request still at its endpoint: collected, never made again.
@@ -1263,12 +1282,12 @@ impl Runner {
                     let take = match collect_take(&scripts, &cwd, &vars, id) {
                         Ok(take) => take,
                         Err(reason) => {
-                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            stopped = at(FIX_NOT_COLLECTED, reason);
                             break;
                         }
                     };
                     if let Err(reason) = publish_fix(&scripts, &cwd, &vars, &pipeline, step, &take, Some(id)) {
-                        stopped = Some(reason);
+                        stopped = at(FIX_NOT_PUBLISHED, reason);
                         break;
                     }
                     published.insert(step.artifact.clone(), take.clone());
@@ -1287,7 +1306,7 @@ impl Runner {
                     match planned(&argv, &cwd, &vars, plan_stand_in).and_then(|(plan, hash)| same_but_fixed(&approved[plan_index], &plan, &published).map(|()| hash)) {
                         Ok(hash) => hash,
                         Err(reason) => {
-                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            stopped = at(FIX_PLAN_CHANGED, reason);
                             break;
                         }
                     }
@@ -1299,7 +1318,7 @@ impl Runner {
                 let made = match skills_run(&argv, &cwd, &vars) {
                     Ok(printed) => printed.lines().rev().find_map(|line| serde_json::from_str::<Value>(line.trim()).ok()).unwrap_or(Value::Null),
                     Err(reason) => {
-                        stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                        stopped = at(FIX_NOT_MADE, reason);
                         break;
                     }
                 };
@@ -1310,21 +1329,21 @@ impl Runner {
                     Some(id) => match collect_take(&scripts, &cwd, &vars, id) {
                         Ok(take) => take,
                         Err(reason) => {
-                            stopped = Some(format!("{} / {}: {reason}", step.chain, step.step));
+                            stopped = at(FIX_NOT_COLLECTED, reason);
                             break;
                         }
                     },
                     None => match made.get("files").and_then(Value::as_array).and_then(|files| files.first()).and_then(Value::as_str) {
                         Some(take) => take.to_string(),
                         None => {
-                            stopped = Some(format!("{} / {} made no file", step.chain, step.step));
+                            stopped = at(FIX_NO_FILE, String::new());
                             break;
                         }
                     },
                 };
                 let request = pending.or_else(|| made.get("report").and_then(Value::as_str).and_then(|report| Path::new(report).file_stem()).map(|stem| stem.to_string_lossy().to_string()));
                 if let Err(reason) = publish_fix(&scripts, &cwd, &vars, &pipeline, step, &take, request.as_deref()) {
-                    stopped = Some(reason);
+                    stopped = at(FIX_NOT_PUBLISHED, reason);
                     break;
                 }
                 published.insert(step.artifact.clone(), take.clone());
@@ -1340,9 +1359,13 @@ impl Runner {
             if !left_pending.is_empty() {
                 output["made_again_though_still_at_its_endpoint"] = json!(left_pending);
             }
-            if let Some(reason) = &stopped {
+            if let Some((sentence, detail)) = &stopped {
                 let left: Vec<&str> = steps.iter().skip(published.len()).map(|step| step.artifact.as_str()).collect();
-                output["stopped"] = json!(reason);
+                output["error"] = json!(sentence);
+                output["stopped"] = json!(sentence);
+                if !detail.is_empty() {
+                    output["detail"] = json!(detail);
+                }
                 output["not_fixed"] = json!(left);
                 output["next"] = json!("Tell the user where it stopped and why. A new fix_dependency_chain plans the rest on a new card.");
             }
@@ -1848,6 +1871,40 @@ mod tests {
         // Nor is a program in the project named like Python.
         assert!(!runs_skills(&argv(&["agent/python3", &*own("request.py"), "show"]), Some(&scripts), &project), "a lookalike interpreter got the keys");
         assert!(secret("OPENROUTER_API_KEY") && secret("fal_key_id") && secret("GITHUB_TOKEN") && !secret("SKILLS_SETUP") && !secret("PATH"));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Catches Skills' own command-line words reaching the user when the
+    /// fix of the dependency chain is refused, in place of plain sentences.
+    /// Runs when SPUMCAKE_SKILLS_SCRIPTS names the checkout's scripts.
+    #[test]
+    fn a_refused_fix_says_why_in_plain_words() {
+        let Ok(scripts) = std::env::var("SPUMCAKE_SKILLS_SCRIPTS") else { return };
+        let folder = std::env::temp_dir().join(format!("fix-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for sub in ["library", "requests"] {
+            std::fs::create_dir_all(folder.join(sub)).unwrap();
+        }
+        assert!(Command::new("python3").arg(Path::new(&scripts).join("pipeline.py")).args(["new", "001"]).current_dir(&folder).status().unwrap().success());
+        for (pipeline, said) in [("009", "This project has no pipeline 009."), ("001", FIX_NOTHING)] {
+            let mut runner = Runner::default();
+            runner.assume_prerequisites(&folder);
+            let env = ScriptEnv { scripts: Some(PathBuf::from(&scripts)), ..ScriptEnv::default() };
+            if let Begun::Answered(answer) = runner.begin(&folder, env, "c1", "t", FIX_CHAIN, &json!({ "pipeline": pipeline, "stand_in": true })) {
+                panic!("answered at once: {:?}", answer.output);
+            }
+            let start = std::time::Instant::now();
+            let answer = loop {
+                if let Some(answer) = runner.poll().0.pop() {
+                    break answer;
+                }
+                assert!(runner.asking().is_none(), "a fix of nothing asked a card");
+                assert!(start.elapsed().as_secs() < 60, "the fix was never answered");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            assert!(!answer.ok);
+            assert_eq!(answer.output["error"], said, "pipeline {pipeline}");
+        }
         let _ = std::fs::remove_dir_all(&folder);
     }
 
