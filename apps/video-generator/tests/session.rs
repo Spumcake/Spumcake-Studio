@@ -2094,6 +2094,32 @@ fn a_draft_says_the_file_its_take_was_opened_from() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Catches a round that made nothing this workspace plays, such as a
+/// stand-in's image, leaving the strip, and a take that is no video shown
+/// as a blank view: the round keeps a failed place, and the take says it
+/// could not be opened.
+#[test]
+fn a_round_with_nothing_to_play_is_seen_and_says_so() {
+    let (dir, mut program, cell) = requests("nothing-to-play");
+    // A stand-in's image filed as the round's one take, and a file named as
+    // a video that is none.
+    std::fs::write(dir.join("takes/still.png"), b"\x89PNG\r\n\x1a\nnot a video").unwrap();
+    std::fs::write(dir.join("takes/broken.mp4"), b"\x89PNG\r\n\x1a\nnot a video").unwrap();
+    let image = protocol::TakeFile { path: "takes/still.png".into(), media_type: "image/png".into(), ..Default::default() };
+    send_takes(&mut program, &cell, vec![round("q1", 1, vec![image]), round("q2", 2, vec![take_file("takes/broken.mp4", false)])]);
+    let film = film_of(&program, "both rounds", |film| film.groups.len() >= 2);
+    assert_eq!(runs(&film)[0].1, 1, "a round that made nothing to play left the strip");
+    assert!(matches!(film.items[0].pending, Some(protocol::FilmPending::Failed)), "{:?}", film.items[0]);
+    program.command("film_select", json!({ "value": 1 }));
+    let refused = program.wait("the refusal", |message| match message {
+        AppMessage::Ask(ask) => Some(ask.title.clone()),
+        _ => None,
+    });
+    assert_eq!(refused, "This video could not be opened");
+    drop(program);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Catches a video take drawn as a file rather than as its asset, as the
 /// Image Generator's: its latest iteration as a stack whose badge opens the
 /// iterations as a run after its round, an out-of-date take outlined with
